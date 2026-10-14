@@ -1,0 +1,132 @@
+{{define "shared.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Shared storage</h2>
+  <p class="muted" style="margin:0">Mount NFS / SMB / CephFS shares and attach iSCSI LUNs. <strong>Hard rule:</strong> all network storage must ride the dedicated <em>storage interface</em> and its target must be on that interface's subnet — never the management network.</p>
+</div>
+
+<!-- Storage network -->
+<div class="card">
+  <h2>Storage network</h2>
+  <form method="post" action="/shared/iface" class="row" style="align-items:end">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Dedicated storage interface
+      <select name="iface" style="min-width:240px">
+        <option value="">— none (storage disabled) —</option>
+        {{range .Interfaces}}{{if or (eq .Type "physical") (eq .Type "bond") (eq .Type "vlan")}}<option value="{{.Name}}" {{if eq .Name $.StorageIface}}selected{{end}}>{{.Name}} ({{.Type}}{{if .Addrs}} · {{index .Addrs 0}}{{end}})</option>{{end}}{{end}}
+      </select>
+    </label>
+    <button class="btn primary">Set storage interface</button>
+  </form>
+  {{if .StorageIface}}<p class="muted" style="margin:8px 0 0;font-size:12px">Storage traffic is pinned to <span class="mono">{{.StorageIface}}</span>. Targets must live on its subnet.</p>
+  {{else}}<p style="margin:8px 0 0;font-size:12px;color:var(--warn)">No storage interface set — mounting is disabled until you choose one.</p>{{end}}
+</div>
+
+<!-- Mounts -->
+<div class="card">
+  <div class="card-head">
+    <h2>Mounts</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" data-modal="m-nfs" {{if not .Caps.NFS}}disabled title="mount.nfs not available"{{end}}>+ NFS</button>
+      <button class="btn" data-modal="m-cifs" {{if not .Caps.CIFS}}disabled title="mount.cifs not available (cifs-utils)"{{end}}>+ SMB/CIFS</button>
+      <button class="btn" data-modal="m-ceph" {{if not .Caps.Ceph}}disabled title="mount.ceph not available (ceph-common)"{{end}}>+ CephFS</button>
+    </div>
+  </div>
+  {{if .Mounts}}
+  <table>
+    <tr><th>Name</th><th>Kind</th><th>Source</th><th>Mountpoint</th><th>Status</th><th></th></tr>
+    {{range .Mounts}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="pill">{{.Kind}}</span></td>
+      <td class="mono" style="font-size:12px">{{.Spec}}</td>
+      <td class="mono muted" style="font-size:12px">{{.Mountpoint}}</td>
+      <td><span class="pill {{if eq .Status "mounted"}}running{{else}}error{{end}}">{{.Status}}</span></td>
+      <td style="text-align:right"><form method="post" action="/shared/{{.ID}}/unmount" onsubmit="return confirm('Unmount {{.Name}}? (also removes its pool registration)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Unmount</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No shared mounts. Mounted shares are auto-registered as storage pools for VM disk placement.</div>{{end}}
+</div>
+
+<!-- iSCSI -->
+<div class="card">
+  <div class="card-head">
+    <h2>iSCSI</h2>
+    <button class="btn primary" data-modal="m-iscsi" {{if not .Caps.ISCSI}}disabled title="iscsiadm not available (open-iscsi)"{{end}}>+ Attach target</button>
+  </div>
+  {{if .ISCSI}}
+  <table>
+    <tr><th>Portal</th><th>Target</th><th>Status</th><th></th></tr>
+    {{range .ISCSI}}
+    <tr><td class="mono">{{.Portal}}</td><td class="mono" style="font-size:12px">{{.Target}}</td><td><span class="pill running">{{.Status}}</span></td>
+      <td style="text-align:right"><form method="post" action="/shared/iscsi/{{.ID}}/logout" onsubmit="return confirm('Log out of this target?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Logout</button></form></td></tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No iSCSI sessions. After attaching, the LUN appears as a disk you can build a ZFS/LVM pool on.</div>{{end}}
+</div>
+
+<!-- modals -->
+<div class="modal" id="m-nfs"><div class="modal-card">
+  <div class="modal-head"><h3>Mount NFS export</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/shared/nfs">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool name<input name="name" placeholder="nfs-fast" required></label>
+    <label class="fld">Server (on storage subnet)<input name="server" placeholder="10.50.0.10" required></label>
+    <label class="fld">Export path<input name="export" placeholder="/exports/vms" required></label>
+    <label class="fld">Extra options<input name="options" placeholder="(optional) e.g. rsize=1048576"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Mount</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-cifs"><div class="modal-card">
+  <div class="modal-head"><h3>Mount SMB/CIFS share</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/shared/cifs">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool name<input name="name" placeholder="smb-share" required></label>
+    <label class="fld">UNC path<input name="unc" placeholder="//10.50.0.11/share" required></label>
+    <label class="fld">Username<input name="username" placeholder="(blank = guest)"></label>
+    <label class="fld">Password<input name="password" type="password"></label>
+    <label class="fld">Extra options<input name="options" placeholder="(optional)"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Mount</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-ceph"><div class="modal-card">
+  <div class="modal-head"><h3>Mount CephFS</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/shared/ceph">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool name<input name="name" placeholder="cephfs" required></label>
+    <label class="fld">Monitors (comma-separated, on storage subnet)<input name="mons" placeholder="10.50.0.20,10.50.0.21" required></label>
+    <label class="fld">Path<input name="path" value="/" placeholder="/"></label>
+    <label class="fld">Client name<input name="ceph_name" placeholder="admin" required></label>
+    <label class="fld">Secret key<input name="secret" type="password" placeholder="AQB...==" required></label>
+    <label class="fld">Extra options<input name="options" placeholder="(optional)"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Mount</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-iscsi"><div class="modal-card">
+  <div class="modal-head"><h3>Attach iSCSI target</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/shared/iscsi/login">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Portal (on storage subnet)<input name="portal" id="iscsi-portal" placeholder="10.50.0.30:3260" required></label>
+    <div><button type="button" class="btn sm" id="iscsi-discover">Discover targets</button> <span id="iscsi-msg" class="muted" style="font-size:12px"></span></div>
+    <label class="fld">Target IQN<input name="target" id="iscsi-target" list="iscsi-iqns" placeholder="iqn.2004-04.com.example:target" required>
+      <datalist id="iscsi-iqns"></datalist></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Log in</button></div>
+  </form>
+</div></div>
+<script>
+ (function(){
+   var btn=document.getElementById('iscsi-discover'); if(!btn) return;
+   btn.addEventListener('click', function(){
+     var portal=document.getElementById('iscsi-portal').value.trim();
+     var msg=document.getElementById('iscsi-msg'); msg.textContent='discovering…';
+     fetch('/api/iscsi/discover?portal='+encodeURIComponent(portal)).then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t);}); return r.json(); })
+       .then(function(d){ var dl=document.getElementById('iscsi-iqns'); dl.innerHTML=''; (d.targets||[]).forEach(function(t){ var o=document.createElement('option'); o.value=t; dl.appendChild(o); });
+         msg.textContent=(d.targets||[]).length+' target(s) found'; if((d.targets||[])[0]) document.getElementById('iscsi-target').value=d.targets[0]; })
+       .catch(function(e){ msg.textContent='discovery failed: '+e.message; });
+   });
+ })();
+</script>
+{{template "foot" .}}{{end}}

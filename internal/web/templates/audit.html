@@ -1,0 +1,37 @@
+{{define "audit.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Audit log</h2>
+  <form method="get" action="/audit" class="row" style="margin-bottom:12px">
+    <label class="fld">Filter by action
+      <select name="action" onchange="this.form.submit()">
+        <option value="" {{if eq .Filter ""}}selected{{end}}>all</option>
+        <option value="session." {{if eq .Filter "session."}}selected{{end}}>session.</option>
+        <option value="snapshot." {{if eq .Filter "snapshot."}}selected{{end}}>snapshot.</option>
+        <option value="backup." {{if eq .Filter "backup."}}selected{{end}}>backup.</option>
+        <option value="iso." {{if eq .Filter "iso."}}selected{{end}}>iso.</option>
+        <option value="template." {{if eq .Filter "template."}}selected{{end}}>template.</option>
+        <option value="network." {{if eq .Filter "network."}}selected{{end}}>network.</option>
+        <option value="portforward." {{if eq .Filter "portforward."}}selected{{end}}>portforward.</option>
+        <option value="member." {{if eq .Filter "member."}}selected{{end}}>member.</option>
+        <option value="apikey." {{if eq .Filter "apikey."}}selected{{end}}>apikey.</option>
+        <option value="alertrule." {{if eq .Filter "alertrule."}}selected{{end}}>alertrule.</option>
+      </select>
+    </label>
+    <noscript><button class="btn sm">Apply</button></noscript>
+  </form>
+  {{if .Entries}}
+  <table>
+    <tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+    {{range .Entries}}
+    <tr>
+      <td class="muted mono" style="font-size:12px;white-space:nowrap">{{.CreatedAt}}</td>
+      <td>{{.ActorKind}}#{{.ActorID}}</td>
+      <td><span class="pill">{{.Action}}</span></td>
+      <td class="muted">{{.TargetType}} {{if .TargetID}}<span class="mono">{{.TargetID}}</span>{{end}}</td>
+      <td class="muted mono" style="font-size:12px">{{.Detail}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No audit entries for this organization yet.</div>{{end}}
+</div>
+{{template "foot" .}}{{end}}

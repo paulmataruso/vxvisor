@@ -1,0 +1,42 @@
+{{define "members.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Members of this organization</h2>
+    <button class="btn primary" data-modal="m-member">+ Add member</button>
+  </div>
+  {{if .Members}}
+  <table>
+    <tr><th>User</th><th>Role</th><th></th></tr>
+    {{range .Members}}
+    <tr>
+      <td><strong>{{.Username}}</strong></td>
+      <td><span class="pill">{{.Role}}</span></td>
+      <td style="text-align:right">
+        <form method="post" action="/members/{{.UserID}}/remove" style="display:inline" onsubmit="return confirm('Remove {{.Username}}?')">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No members yet.</div>{{end}}
+</div>
+
+<div class="modal" id="m-member"><div class="modal-card">
+  <div class="modal-head"><h3>Add member</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/members/add">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Username<input type="text" name="username" placeholder="existing user" required></label>
+    <label class="fld">Role
+      <select name="role">
+        <option value="viewer">Viewer</option>
+        <option value="member" selected>Member</option>
+        <option value="admin">Admin</option>
+        <option value="owner">Owner</option>
+      </select>
+    </label>
+    <p class="muted" style="margin:0">Create users first with <span class="mono">vdxd user add &lt;name&gt;</span>.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add member</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

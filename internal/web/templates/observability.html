@@ -1,0 +1,185 @@
+{{define "observability.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Host <span id="connstate" class="muted" style="font-weight:400;font-size:12px">connecting…</span></h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+    <div><div class="muted">CPU</div><div style="font-size:26px;font-weight:650"><span id="h_cpu">—</span>%</div><canvas id="spark_cpu" width="300" height="48" style="width:100%;height:48px"></canvas></div>
+    <div><div class="muted">Memory</div><div style="font-size:26px;font-weight:650"><span id="h_mem">—</span>%</div><div class="muted" id="h_mem_abs"></div></div>
+    <div><div class="muted">Disk pool</div><div style="font-size:26px;font-weight:650"><span id="h_disk">—</span>%</div><div class="muted" id="h_disk_abs"></div></div>
+    <div><div class="muted">Disk I/O</div><div style="font-size:20px;font-weight:650;margin-top:4px" id="h_diskio">—</div><div class="muted">read / write</div></div>
+    <div><div class="muted">Network</div><div style="font-size:20px;font-weight:650;margin-top:4px" id="h_netio">—</div><div class="muted">rx / tx</div></div>
+    <div><div class="muted">IOWAIT</div><div style="font-size:26px;font-weight:650"><span id="h_iowait">—</span>%</div></div>
+    <div><div class="muted">Pressure (PSI avg10)</div><div style="font-size:16px;font-weight:650;margin-top:6px" id="h_pres">—</div><div class="muted">cpu / mem / io</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>History <span class="muted" style="font-weight:400;font-size:12px">— host, last hour</span></h2>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
+    <div><div class="muted" style="font-size:12px">CPU %</div><canvas class="hist" data-metric="cpu" height="90" style="width:100%;height:90px"></canvas></div>
+    <div><div class="muted" style="font-size:12px">Memory %</div><canvas class="hist" data-metric="mem" height="90" style="width:100%;height:90px"></canvas></div>
+    <div><div class="muted" style="font-size:12px">Disk I/O (B/s)</div><canvas class="hist" data-metric="diskio" height="90" style="width:100%;height:90px"></canvas></div>
+    <div><div class="muted" style="font-size:12px">Network (B/s)</div><canvas class="hist" data-metric="netio" height="90" style="width:100%;height:90px"></canvas></div>
+    <div><div class="muted" style="font-size:12px">IOWAIT %</div><canvas class="hist" data-metric="iowait" height="90" style="width:100%;height:90px"></canvas></div>
+    <div><div class="muted" style="font-size:12px">CPU pressure (PSI)</div><canvas class="hist" data-metric="cpupres" height="90" style="width:100%;height:90px"></canvas></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Instances (live)</h2>
+  <table>
+    <thead><tr><th>Name</th><th>CPU %</th><th>RSS</th></tr></thead>
+    <tbody id="vmrows"><tr><td class="muted" colspan="3">waiting for data…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Active alerts</h2>
+  {{if .Alerts}}
+  <table>
+    <tr><th>Rule</th><th>State</th><th>Value</th><th>Fired</th><th>Resolved</th></tr>
+    {{range .Alerts}}
+    <tr>
+      <td>{{.RuleName}}</td>
+      <td><span class="pill {{if eq .State "firing"}}error{{else}}running{{end}}">{{.State}}</span></td>
+      <td>{{printf "%.1f" .Value}}</td>
+      <td class="muted">{{.FiredAt}}</td>
+      <td class="muted">{{if .ResolvedAt}}{{.ResolvedAt}}{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No alerts.</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Alert rules</h2>
+    <button class="btn primary" data-modal="m-rule">+ Add rule</button>
+  </div>
+  {{if .Rules}}
+  <table>
+    <tr><th>Name</th><th>Condition</th><th></th></tr>
+    {{range .Rules}}
+    <tr><td>{{.Name}}</td><td class="mono">{{.Metric}} {{.Op}} {{.Threshold}}</td>
+      <td style="text-align:right"><form method="post" action="/alert-rules/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No alert rules yet.</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Notification channels</h2>
+    <button class="btn primary" data-modal="m-channel">+ Add channel</button>
+  </div>
+  {{if .Channels}}
+  <table>
+    <tr><th>Name</th><th>Kind</th><th>Target</th></tr>
+    {{range .Channels}}<tr><td>{{.Name}}</td><td>{{.Kind}}</td><td class="mono" style="font-size:12px">{{.Target}}</td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No notification channels yet.</div>{{end}}
+</div>
+
+<div class="modal" id="m-rule"><div class="modal-card">
+  <div class="modal-head"><h3>Add alert rule</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/alert-rules">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="high-cpu" required></label>
+    <label class="fld">Metric
+      <select name="metric"><option value="host.cpu_pct">host CPU %</option><option value="host.mem_pct">host mem %</option><option value="host.disk_pct">host disk %</option></select>
+    </label>
+    <label class="fld">Op<select name="op"><option value="&gt;">&gt;</option><option value="&lt;">&lt;</option></select></label>
+    <label class="fld">Threshold<input type="number" name="threshold" value="90" step="0.1"></label>
+    <label class="fld">Channel
+      <select name="channel_id"><option value="0">— none —</option>{{range .Channels}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}</select>
+    </label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add rule</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-channel"><div class="modal-card">
+  <div class="modal-head"><h3>Add notification channel</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/alert-channels">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="ops-webhook" required></label>
+    <label class="fld">Kind<select name="kind"><option value="webhook">webhook</option><option value="email">email</option></select></label>
+    <label class="fld">Target (URL or email)<input type="text" name="target" placeholder="https://hooks.example/…"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add channel</button></div>
+  </form>
+</div></div>
+
+<script>
+ const sparkData = [];
+ function fmtBytes(n){ if(!n) return "0"; const u=["B","KB","MB","GB","TB"]; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return v.toFixed(1)+" "+u[i]; }
+ function fmtBps(n){ n=n||0; var u=["B","KB","MB","GB"],i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (n>=10||i===0?Math.round(n):n.toFixed(1))+" "+u[i]+"/s"; }
+ function pct(used,total){ return total>0 ? (100*used/total) : 0; }
+ function drawSpark(){
+   const c=document.getElementById("spark_cpu"), g=c.getContext("2d");
+   g.clearRect(0,0,c.width,c.height);
+   if(sparkData.length<2) return;
+   g.strokeStyle="#2dd4bf"; g.lineWidth=2; g.beginPath();
+   const step=c.width/(sparkData.length-1);
+   sparkData.forEach((v,i)=>{ const y=c.height-(v/100)*c.height; i?g.lineTo(i*step,y):g.moveTo(0,y); });
+   g.stroke();
+ }
+ function render(s){
+   const h=s.host||{};
+   document.getElementById("h_cpu").textContent=(h.cpu_pct||0).toFixed(1);
+   const mp=pct(h.mem_used,h.mem_total), dp=pct(h.disk_used,h.disk_total);
+   document.getElementById("h_mem").textContent=mp.toFixed(1);
+   document.getElementById("h_disk").textContent=dp.toFixed(1);
+   document.getElementById("h_mem_abs").textContent=fmtBytes(h.mem_used)+" / "+fmtBytes(h.mem_total);
+   document.getElementById("h_disk_abs").textContent=fmtBytes(h.disk_used)+" / "+fmtBytes(h.disk_total);
+   var io=document.getElementById("h_diskio"); if(io) io.textContent="↓ "+fmtBps(h.disk_read)+"  ↑ "+fmtBps(h.disk_write);
+   var no=document.getElementById("h_netio"); if(no) no.textContent="↓ "+fmtBps(h.net_rx)+"  ↑ "+fmtBps(h.net_tx);
+   var iw=document.getElementById("h_iowait"); if(iw) iw.textContent=(h.iowait||0).toFixed(1);
+   var pr=document.getElementById("h_pres"); if(pr) pr.textContent=(h.cpu_pres||0).toFixed(1)+" / "+(h.mem_pres||0).toFixed(1)+" / "+(h.io_pres||0).toFixed(1);
+   sparkData.push(h.cpu_pct||0); if(sparkData.length>120) sparkData.shift(); drawSpark();
+   const tb=document.getElementById("vmrows");
+   if(!s.vms||!s.vms.length){ tb.innerHTML='<tr><td class="muted" colspan="3">No running instances.</td></tr>'; return; }
+   tb.innerHTML=s.vms.map(v=>`<tr><td>${v.name}</td><td>${(v.cpu_pct||0).toFixed(1)}</td><td class="muted">${fmtBytes(v.mem_used)}</td></tr>`).join("");
+ }
+ (function(){
+   const proto=location.protocol==="https:"?"wss":"ws";
+   const ws=new WebSocket(`${proto}://${location.host}/observability/ws`);
+   const st=document.getElementById("connstate");
+   ws.onopen=()=>st.textContent="live";
+   ws.onclose=()=>st.textContent="disconnected";
+   ws.onmessage=e=>{ try{ render(JSON.parse(e.data)); }catch(err){} };
+ })();
+
+ // Persisted history charts (host, last hour), refreshed every 30s.
+ (function(){
+   var cs=getComputedStyle(document.documentElement);
+   var col=(cs.getPropertyValue('--primary').trim()||'#3b82f6'), grid=(cs.getPropertyValue('--line').trim()||'#27303f');
+   function val(s,m){
+     if(m==='cpu') return s.cpu_pct||0;
+     if(m==='mem') return s.mem_total? 100*s.mem_used/s.mem_total : 0;
+     if(m==='diskio') return (s.disk_read||0)+(s.disk_write||0);
+     if(m==='netio') return (s.net_rx||0)+(s.net_tx||0);
+     if(m==='iowait') return s.iowait||0;
+     if(m==='cpupres') return s.cpu_pres||0;
+     return 0;
+   }
+   function draw(c,data){
+     var g=c.getContext('2d'), w=c.width=c.clientWidth||300, h=c.height;
+     g.clearRect(0,0,w,h);
+     g.strokeStyle=grid; g.lineWidth=1; g.beginPath(); g.moveTo(0,h-1); g.lineTo(w,h-1); g.stroke();
+     if(data.length<2){ return; }
+     var max=Math.max.apply(null,data)||1, step=w/(data.length-1);
+     g.strokeStyle=col; g.lineWidth=2; g.beginPath();
+     data.forEach(function(v,i){ var y=h-(v/max)*(h-6)-2; i?g.lineTo(i*step,y):g.moveTo(0,y); });
+     g.stroke();
+     g.fillStyle=col; g.globalAlpha=.08; g.lineTo(w,h); g.lineTo(0,h); g.closePath(); g.fill(); g.globalAlpha=1;
+   }
+   function load(){
+     fetch('/api/metrics/history?scope=host&mins=60').then(function(r){return r.json();}).then(function(j){
+       var s=j.samples||[];
+       document.querySelectorAll('canvas.hist').forEach(function(c){
+         draw(c, s.map(function(x){ return val(x, c.getAttribute('data-metric')); }));
+       });
+     }).catch(function(){});
+   }
+   load(); setInterval(function(){ if(!document.hidden) load(); }, 30000);
+ })();
+</script>
+{{template "foot" .}}{{end}}

@@ -1,0 +1,303 @@
+{{define "storage.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Storage pools</h2>
+  <p class="muted" style="margin:4px 0 0">Register a directory/NFS/CIFS pool, or build and manage <b>ZFS</b> and <b>LVM thin</b> pools directly on the host.</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Registered pools</h2>
+    {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-pool-reg">+ Register pool</button>{{end}}
+  </div>
+  {{if .Pools}}
+  <table>
+    <tr><th>Name</th><th>Kind</th><th>Path</th><th>Usage</th>{{if .P.IsAdmin}}<th></th>{{end}}</tr>
+    {{range .Pools}}
+    <tr><td><strong>{{.Name}}</strong></td><td><span class="pill">{{.Kind}}</span></td><td class="mono">{{.Path}}</td>
+      <td class="muted">{{if .TotalBytes}}{{humanBytes .UsedBytes}} / {{humanBytes .TotalBytes}}{{else}}—{{end}}</td>
+      {{if $.P.IsAdmin}}<td style="text-align:right"><form method="post" action="/storage/delete" onsubmit="return confirm('Unregister pool {{.Name}}? (only removes the registry entry; the underlying ZFS/LVM backend is not touched)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><button class="btn sm danger">Unregister</button></form></td>{{end}}</tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No pools registered. The default disk directory is always used for overlays.</div>{{end}}
+</div>
+
+{{if .P.IsAdmin}}
+<!-- ============================ ZFS ============================ -->
+<div class="card">
+  <div class="card-head">
+    <h2>ZFS pools</h2>
+    {{if .ZFSReady}}<div style="display:flex;gap:8px;flex-wrap:wrap">
+      {{if .ZFSPools}}<button class="btn" data-modal="m-zfs-replace">Replace disk</button><button class="btn" data-modal="m-zfs-cache">Add L2ARC</button><button class="btn" data-modal="m-zfs-log">Add SLOG</button>{{end}}
+      <button class="btn" data-modal="m-zfs-ds">+ Dataset</button><button class="btn primary" data-modal="m-zfs">+ Create ZFS pool</button>
+    </div>{{end}}
+  </div>
+  {{if not .ZFSReady}}
+    <div class="empty">ZFS tools not installed on this host (<span class="mono">zfsutils-linux</span>).</div>
+  {{else}}
+    {{if .ZFSPools}}
+    <table>
+      <tr><th>Pool</th><th>Health</th><th>Capacity</th><th>Used / Size</th><th>Frag</th><th></th></tr>
+      {{range .ZFSPools}}
+      <tr>
+        <td><strong>{{.Name}}</strong></td>
+        <td><span class="pill {{if eq .Health "ONLINE"}}running{{else}}error{{end}}">{{.Health}}</span></td>
+        <td style="min-width:140px">
+          <div style="background:var(--panel2);border-radius:6px;height:10px;overflow:hidden">
+            <div style="height:100%;width:{{.CapPercent}}%;background:linear-gradient(90deg,var(--primary),var(--accent))"></div>
+          </div><span class="muted" style="font-size:12px">{{.CapPercent}}%</span>
+        </td>
+        <td class="muted">{{humanBytes .AllocBytes}} / {{humanBytes .SizeBytes}}</td>
+        <td class="muted">{{.FragPct}}%</td>
+        <td style="text-align:right">
+          <form method="post" action="/storage/zfs/{{.Name}}/destroy" onsubmit="return confirm('DESTROY zpool {{.Name}}? This erases all data on it.')" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Destroy</button></form>
+        </td>
+      </tr>
+      {{end}}
+    </table>
+
+    <!-- per-pool vdev status tree -->
+    {{range .ZFSPools}}{{with index $.ZFSStatus .Name}}
+    <details style="margin-top:12px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px">Status — {{.Name}} <span class="pill {{if eq .State "ONLINE"}}running{{else}}error{{end}}" style="margin-left:6px">{{.State}}</span></summary>
+      <div style="margin:8px 0 0;padding:10px 12px;background:var(--panel2);border-radius:8px">
+        {{if .Scan}}<div class="muted" style="font-size:12px;margin-bottom:6px">scan: {{.Scan}}</div>{{end}}
+        {{if .Status}}<div class="muted" style="font-size:12px;margin-bottom:6px">{{.Status}}</div>{{end}}
+        <table style="font-size:12px;width:100%">
+          <tr><th style="text-align:left">Device</th><th>State</th><th>Read</th><th>Write</th><th>Cksum</th></tr>
+          {{range .Devices}}
+          <tr>
+            <td class="mono" style="padding-left:{{.Indent}}px">{{if .Section}}<span class="muted">{{.Name}}</span>{{else}}{{.Name}}{{end}}</td>
+            <td style="text-align:center">{{if .State}}<span class="pill {{if eq .State "ONLINE"}}running{{else}}error{{end}}">{{.State}}</span>{{end}}</td>
+            <td style="text-align:center" class="muted">{{.Read}}</td><td style="text-align:center" class="muted">{{.Write}}</td><td style="text-align:center" class="muted">{{.Cksum}}</td>
+          </tr>
+          {{end}}
+        </table>
+        <div class="muted" style="font-size:12px;margin-top:6px">errors: {{if .Errors}}{{.Errors}}{{else}}—{{end}}</div>
+      </div>
+    </details>
+    {{end}}{{end}}
+    {{else}}<div class="empty">No ZFS pools yet.</div>{{end}}
+
+    {{if .ZFSDatasets}}
+    <h3 style="margin:18px 0 8px;font-size:14px">Datasets</h3>
+    <table style="font-size:13px">
+      <tr><th>Dataset</th><th>Type</th><th>Used</th><th>Avail</th><th>Mountpoint</th><th></th></tr>
+      {{range .ZFSDatasets}}
+      <tr>
+        <td class="mono"><strong>{{.Name}}</strong></td>
+        <td>{{.Type}}</td>
+        <td class="muted">{{humanBytes .UsedBytes}}</td>
+        <td class="muted">{{humanBytes .AvailBytes}}</td>
+        <td class="mono muted" style="font-size:12px">{{if .Mountpoint}}{{.Mountpoint}}{{else}}—{{end}}</td>
+        <td style="text-align:right">
+          {{if and (eq .Type "filesystem") .Mountpoint (ne .Mountpoint "-") (ne .Mountpoint "none")}}
+          <form method="post" action="/storage" style="display:inline" title="Register this dataset as a storage pool so VMs can place disks on it">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <input type="hidden" name="kind" value="dir">
+            <input type="hidden" name="path" value="{{.Mountpoint}}">
+            <button class="btn sm">Register as pool</button>
+          </form>
+          {{end}}
+        </td>
+      </tr>
+      {{end}}
+    </table>
+    <p class="muted" style="margin:8px 0 0;font-size:12px">Register a dataset as a pool to make it selectable as a VM disk location.</p>
+    {{end}}
+  {{end}}
+</div>
+
+<!-- ============================ Disk status ============================ -->
+<div class="card">
+  <h2>Disk status</h2>
+  {{if .DiskStatus}}
+  <table style="font-size:13px">
+    <tr><th>Device</th><th>Model</th><th>Size</th><th>SMART</th><th>In use</th></tr>
+    {{range .DiskStatus}}
+    <tr>
+      <td class="mono"><strong>{{.Path}}</strong></td>
+      <td class="muted">{{if .Model}}{{.Model}}{{else}}—{{end}}</td>
+      <td>{{.Size}}</td>
+      <td><span class="pill {{if eq .Health "PASSED"}}running{{else if eq .Health "FAILED"}}error{{end}}">{{.Health}}</span></td>
+      <td>{{if .InUse}}<span class="pill error" title="{{.UseNote}}">in use</span>{{else}}<span class="pill running">free</span>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">SMART health needs <span class="mono">smartmontools</span>; devices without SMART show “unknown”/“n/a”.</p>
+  {{else}}<div class="empty">No physical disks detected.</div>{{end}}
+</div>
+
+<!-- ============================ LVM ============================ -->
+<div class="card">
+  <div class="card-head">
+    <h2>LVM thin pools</h2>
+    {{if .LVMReady}}<button class="btn primary" data-modal="m-lvm">+ Create thin pool</button>{{end}}
+  </div>
+  {{if not .LVMReady}}
+    <div class="empty">LVM tools not installed on this host (<span class="mono">lvm2</span>).</div>
+  {{else}}
+    {{if .LVMPools}}
+    <table>
+      <tr><th>VG / pool</th><th>Size</th><th>Data used</th><th>Meta used</th><th></th></tr>
+      {{range .LVMPools}}
+      <tr>
+        <td><strong>{{.VG}}</strong> / {{.Name}}</td>
+        <td class="muted">{{humanBytes .SizeBytes}}</td>
+        <td class="muted">{{printf "%.1f" .DataPct}}%</td>
+        <td class="muted">{{printf "%.1f" .MetaPct}}%</td>
+        <td style="text-align:right">
+          <form method="post" action="/storage/lvm/{{.VG}}/remove" onsubmit="return confirm('Remove volume group {{.VG}}? This frees its disks and DESTROYS the thin pool + all its volumes.')" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove VG</button></form>
+        </td>
+      </tr>
+      {{end}}
+    </table>
+    {{else}}<div class="empty">No LVM thin pools.</div>{{end}}
+  {{end}}
+</div>
+{{end}}
+
+<!-- ============================ modals ============================ -->
+{{if .P.IsAdmin}}
+<div class="modal" id="m-pool-reg"><div class="modal-card">
+  <div class="modal-head"><h3>Register pool (directory / network)</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="fast-ssd" required></label>
+    <label class="fld">Kind
+      <select name="kind"><option value="dir">dir</option><option value="nfs">nfs</option><option value="cifs">cifs</option><option value="iscsi">iscsi</option></select>
+    </label>
+    <label class="fld">Path / mountpoint
+      <input type="text" name="path" id="poolpath" list="fslist" autocomplete="off" placeholder="/var/lib/vdxclone/disks" required>
+      <datalist id="fslist"></datalist>
+    </label>
+    <p class="muted" style="margin:0;font-size:12px">Start typing a path — suggestions come live from the host. 📁 = a mount point.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+  </form>
+</div></div>
+
+{{if .ZFSReady}}
+<div class="modal" id="m-zfs"><div class="modal-card lg">
+  <div class="modal-head"><h3>Create ZFS pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/zfs/create" onsubmit="return confirm('Create zpool — selected disks will be WIPED. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <label class="fld">Pool name<input name="name" placeholder="tank" required></label>
+      <label class="fld">Layout
+        <select name="raid"><option value="stripe">stripe (no redundancy)</option><option value="mirror">mirror</option><option value="raidz">raidz</option><option value="raidz2">raidz2</option></select>
+      </label>
+      <label class="fld" style="align-self:center;flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f, wipe signatures)</label>
+    </div>
+    {{template "diskpicker" .}}
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create pool</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-zfs-ds"><div class="modal-card">
+  <div class="modal-head"><h3>Create ZFS dataset</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/zfs/dataset">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Dataset (pool/name)<input name="name" placeholder="tank/vms" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create dataset</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-zfs-replace"><div class="modal-card">
+  <div class="modal-head"><h3>Replace a disk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/zfs/replace" onsubmit="return confirm('Replace device — the new disk will be WIPED and resilvered. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool<select name="pool">{{range .ZFSPools}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Old device<input name="old" placeholder="sda or /dev/sda" required></label>
+    <label class="fld">New device<select name="new" required><option value="">— pick a free disk —</option>{{range .Disks}}{{if and (eq .Type "disk") (not .InUse)}}<option value="{{.Path}}">{{.Path}} ({{.Size}}{{if .Model}} · {{.Model}}{{end}})</option>{{end}}{{end}}</select></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f)</label>
+    <p class="muted" style="margin:0;font-size:12px">Open the pool's Status to see current device names for “Old device”.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Replace</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-zfs-cache"><div class="modal-card">
+  <div class="modal-head"><h3>Add L2ARC (cache)</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/zfs/cache" onsubmit="return confirm('Add cache device(s) — selected disks will be WIPED. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool<select name="pool">{{range .ZFSPools}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Cache device(s)
+      <div style="display:flex;flex-direction:column;gap:6px">{{range .Disks}}{{if and (eq .Type "disk") (not .InUse)}}<label style="display:flex;gap:7px;align-items:center;font-weight:400"><input type="checkbox" name="devices" value="{{.Path}}" style="width:auto"> <span class="mono">{{.Path}}</span> <span class="muted">{{.Size}}</span></label>{{end}}{{end}}</div>
+    </label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f)</label>
+    <p class="muted" style="margin:0;font-size:12px">L2ARC is a read cache — a fast SSD/NVMe. Safe to lose (no mirror needed).</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add cache</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-zfs-log"><div class="modal-card">
+  <div class="modal-head"><h3>Add SLOG (log)</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/zfs/log" onsubmit="return confirm('Add log device(s) — selected disks will be WIPED. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Pool<select name="pool">{{range .ZFSPools}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Log device(s)
+      <div style="display:flex;flex-direction:column;gap:6px">{{range .Disks}}{{if and (eq .Type "disk") (not .InUse)}}<label style="display:flex;gap:7px;align-items:center;font-weight:400"><input type="checkbox" name="devices" value="{{.Path}}" style="width:auto"> <span class="mono">{{.Path}}</span> <span class="muted">{{.Size}}</span></label>{{end}}{{end}}</div>
+    </label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="mirror" value="1" style="width:auto"> mirror (pick 2 devices — recommended for a SLOG)</label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f)</label>
+    <p class="muted" style="margin:0;font-size:12px">SLOG accelerates sync writes. Mirror it so a log-device failure can't lose in-flight writes.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add log</button></div>
+  </form>
+</div></div>
+{{end}}
+
+{{if .LVMReady}}
+<div class="modal" id="m-lvm"><div class="modal-card lg">
+  <div class="modal-head"><h3>Create LVM thin pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/storage/lvm/create" onsubmit="return confirm('Create LVM thin pool — selected disks will be WIPED. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="row">
+      <label class="fld">Volume group<input name="vg" placeholder="vmstore2" required></label>
+      <label class="fld">Thin pool name<input name="thinpool" placeholder="pool0" required></label>
+    </div>
+    {{template "diskpicker" .}}
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create thin pool</button></div>
+  </form>
+</div></div>
+{{end}}
+{{end}}
+
+<script>
+// Live mount-path autocomplete for the pool path box.
+(function(){
+  var box = document.getElementById('poolpath'), dl = document.getElementById('fslist');
+  if(!box) return;
+  var t;
+  box.addEventListener('input', function(){
+    clearTimeout(t);
+    t = setTimeout(function(){
+      fetch('/api/fs?path='+encodeURIComponent(box.value||'/')).then(function(r){return r.json()}).then(function(d){
+        dl.innerHTML='';
+        (d.entries||[]).forEach(function(e){
+          var o=document.createElement('option');
+          o.value=e.path; o.label=e.is_mount?'📁 mount':'';
+          dl.appendChild(o);
+        });
+      }).catch(function(){});
+    }, 150);
+  });
+})();
+</script>
+{{template "foot" .}}{{end}}
+
+{{define "diskpicker"}}
+<div class="muted" style="font-size:12px;margin-bottom:4px">Select whole disks for the pool. Disks in use are flagged — selecting one will wipe it.</div>
+{{if .Disks}}
+<table style="font-size:13px">
+  <tr><th></th><th>Device</th><th>Size</th><th>Model</th><th>Status</th></tr>
+  {{range .Disks}}
+  <tr>
+    <td><input type="checkbox" name="devices" value="{{.Path}}"></td>
+    <td class="mono">{{.Path}}</td>
+    <td>{{.Size}}</td>
+    <td class="muted">{{.Model}}</td>
+    <td>{{if .InUse}}<span class="pill error" title="{{.UseNote}}">in use</span>{{else}}<span class="pill running">free</span>{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<div class="empty">No block devices detected.</div>{{end}}
+{{end}}

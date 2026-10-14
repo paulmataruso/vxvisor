@@ -1,0 +1,84 @@
+package web
+
+import (
+	"net/http"
+	"strconv"
+
+	"vdxclone/internal/netdrv"
+	"vdxclone/internal/service"
+)
+
+func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	list, err := s.svc.ListNetworks(p)
+	if err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	bonds, _ := s.svc.ListBonds(p)
+	vswitches, _ := s.svc.ListVSwitches(p)
+	s.render(w, p, "networks.html", "networks", map[string]any{
+		"Networks":  list,
+		"Bonds":     bonds,
+		"VSwitches": vswitches,
+	})
+}
+
+func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	vlan, _ := strconv.Atoi(r.FormValue("vlan_id"))
+	n := netdrv.Network{
+		Name: r.FormValue("name"), Mode: r.FormValue("mode"),
+		Bridge: r.FormValue("bridge"), VLANID: vlan,
+		CIDR: r.FormValue("cidr"), Gateway: r.FormValue("gateway"),
+		PoolStart: r.FormValue("pool_start"), PoolEnd: r.FormValue("pool_end"),
+	}
+	if _, err := s.svc.CreateNetwork(p, n, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// ---- port forwards (on the instance detail page) -------------------------
+
+func (s *Server) addPortForward(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	id := r.PathValue("id")
+	guest, _ := strconv.Atoi(r.FormValue("guest_port"))
+	if _, err := s.svc.AddPortForward(p, id, guest, r.FormValue("proto"), r.FormValue("label"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
+}
+
+func (s *Server) deletePortForward(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.svc.DeletePortForward(p, id, atoi(r.PathValue("pfid")), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
+}

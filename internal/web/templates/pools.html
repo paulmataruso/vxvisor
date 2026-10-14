@@ -1,0 +1,58 @@
+{{define "pools.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Desktop pools</h2>
+    {{if .PortalURL}}<a class="btn primary" href="{{.PortalURL}}" target="_blank" rel="noopener"><svg class="ic"><use href="#i-monitor"/></svg>Open VDI Portal ↗</a>{{end}}
+  </div>
+  <p class="muted" style="margin:4px 0 0">Pools back the public VDI portal. Users you grant see their desktops at the portal and open them in a browser tab. <b>Pooled</b> leases a free VM on connect and reclaims it when idle; <b>persistent</b> gives each user a dedicated VM.</p>
+  {{if .PortalURL}}<p class="muted" style="margin:8px 0 0;font-size:12px">Public portal: <a href="{{.PortalURL}}" target="_blank" rel="noopener" class="mono">{{.PortalURL}}</a> — share this with users you grant.</p>
+  {{else}}<p style="margin:8px 0 0;font-size:12px;color:var(--warn)">The public VDI portal is disabled — enable <span class="mono">[public]</span> in the config to serve it.</p>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Pools</h2>
+    <button class="btn primary" data-modal="m-pool">+ New pool</button>
+  </div>
+  {{if .Pools}}
+  <table>
+    <tr><th>Name</th><th>Image</th><th>Mode</th><th>Specs</th><th>Max</th><th>Grant user</th><th></th></tr>
+    {{range .Pools}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td class="mono">{{.ImageName}}</td>
+      <td><span class="pill">{{.AssignMode}}</span></td>
+      <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB · {{.DiskGB}} GB</td>
+      <td class="muted">{{.MaxSize}}</td>
+      <td>
+        <form method="post" action="/pools/{{.ID}}/grant" style="display:flex;gap:6px">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input name="username" placeholder="username" style="width:130px">
+          <button class="btn sm">Grant</button>
+        </form>
+      </td>
+      <td style="text-align:right">
+        <form method="post" action="/pools/{{.ID}}/delete" onsubmit="return confirm('Delete pool {{.Name}}? (its VMs are left intact)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No pools yet. Create one, then grant users.</div>{{end}}
+</div>
+
+<div class="modal" id="m-pool"><div class="modal-card lg">
+  <div class="modal-head"><h3>New desktop pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/pools">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input name="name" required></label>
+    <label class="fld">Image<select name="image">{{range .Images}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Mode<select name="assign_mode"><option value="pooled">pooled</option><option value="persistent">persistent</option></select></label>
+    <label class="fld">vCPUs<input type="number" name="cpus" value="2" min="1" max="32"></label>
+    <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="2048" min="512" step="256"></label>
+    <label class="fld">Disk (GB)<input type="number" name="disk_gb" value="20" min="0" max="512"></label>
+    <label class="fld">Min warm<input type="number" name="min_size" value="0" min="0" max="50"></label>
+    <label class="fld">Max size<input type="number" name="max_size" value="5" min="1" max="200"></label>
+    <div class="modal-actions full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create pool</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

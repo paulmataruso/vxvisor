@@ -1,0 +1,71 @@
+{{define "cluster.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Nodes</h2>
+    <button class="btn primary" data-modal="m-node">+ Add worker node</button>
+  </div>
+  {{if .Nodes}}
+  <table>
+    <tr><th>Name</th><th>Role</th><th>Address</th><th>Status</th><th>CPUs</th><th>Free RAM</th><th>Last seen</th><th></th></tr>
+    {{range .Nodes}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="pill">{{.Role}}</span></td>
+      <td class="mono" style="font-size:12px">{{if .Address}}{{.Address}}{{else}}—{{end}}</td>
+      <td><span class="pill {{if eq .Status "ready"}}running{{else if eq .Status "unreachable"}}error{{end}}">{{.Status}}</span></td>
+      <td>{{.CPUs}}</td>
+      <td class="muted">{{if .MemTotal}}{{.MemFree}} / {{.MemTotal}} B{{else}}—{{end}}</td>
+      <td class="muted" style="font-size:12px">{{if .LastSeen}}{{.LastSeen}}{{else}}never{{end}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        {{if ne .Role "local"}}
+        <form method="post" action="/cluster/nodes/{{.ID}}/probe" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Probe</button></form>
+        <form method="post" action="/cluster/nodes/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No worker nodes. A single-node install always schedules locally.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">The scheduler places new instances on the ready node with the most free memory. Live migration additionally needs shared storage (an NFS pool) and matching CPU/QEMU versions.</p>
+</div>
+
+<div class="card">
+  <h2>Host passthrough capability</h2>
+  <table>
+    <tr><th>IOMMU</th><td>{{if .Capability.IOMMU}}<span class="pill running">enabled</span> ({{.Capability.IOMMUGroups}} groups){{else}}<span class="pill error">off</span>{{end}}</td></tr>
+    <tr><th>VFIO</th><td>{{if .Capability.VFIO}}<span class="pill running">loaded</span>{{else}}<span class="pill">not loaded</span>{{end}}</td></tr>
+    <tr><th>Status</th><td class="muted">{{.Capability.Note}}</td></tr>
+  </table>
+  <p class="muted" style="margin:10px 0 0">When enabled, add host PCI addresses in the instance launch form to pass a GPU/NIC through with vfio-pci.</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Import a VM disk</h2>
+    <button class="btn primary" data-modal="m-import">+ Import disk</button>
+  </div>
+  <p class="muted" style="margin:0">Converts a foreign disk to qcow2 (qemu-img) and registers it as a base image. ESXi: extract the .vmdk from the OVA first. Proxmox: export the volume. Also available as <span class="mono">vdxd import &lt;name&gt; &lt;file&gt;</span>.</p>
+</div>
+
+<div class="modal" id="m-node"><div class="modal-card">
+  <div class="modal-head"><h3>Add worker node</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/cluster/nodes">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="node-2" required></label>
+    <label class="fld">SSH address<input type="text" name="address" placeholder="10.0.0.12:22" required></label>
+    <label class="fld">SSH user<input type="text" name="ssh_user" value="root"></label>
+    <p class="muted" style="margin:0">The control node drives workers over SSH (key-based auth; QEMU/qemu-img/QMP tunneled).</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add node</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-import"><div class="modal-card">
+  <div class="modal-head"><h3>Import a VM disk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/cluster/import">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Image name<input type="text" name="name" placeholder="imported-esxi-vm" required></label>
+    <label class="fld">Disk URL (VMDK/VHD/raw/qcow2)<input type="text" name="url" placeholder="http://…/disk.vmdk" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Import</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

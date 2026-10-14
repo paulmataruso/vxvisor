@@ -1,0 +1,206 @@
+{{define "overview.html"}}{{template "head" .}}
+<style>
+  .ov-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-bottom:20px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden;min-width:0}
+  .tile .ic{width:18px;height:18px;color:var(--muted)}
+  .tile .lbl{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.02em;text-transform:uppercase;display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile .big{font-size:28px;font-weight:700;line-height:1.1;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile .sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile.accent-l{border-left:3px solid var(--primary)}
+  .tile.accent-a{border-left:3px solid var(--accent)}
+  .tile.accent-o{border-left:3px solid var(--ok)}
+  .ov-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+  .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .kv:last-child{border-bottom:0}
+  .kv .k{color:var(--muted)}
+  .kv .v{font-weight:600}
+  .bar{height:8px;background:var(--panel2);border-radius:999px;overflow:hidden;margin:8px 0 4px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--primary),var(--accent));border-radius:999px}
+  .act{display:flex;gap:10px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+  .act:last-child{border-bottom:0}
+  .act .when{color:var(--faint);font-size:11px;white-space:nowrap;min-width:120px}
+  .act .what{font-weight:600}
+  .chiprow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:5px 11px;border:1px solid var(--line);border-radius:999px;color:var(--fg);text-decoration:none}
+  .chip:hover{border-color:var(--primary)}
+  .chip .d{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+</style>
+
+<div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+  <div>
+    <h2 style="margin:0 0 3px">Overview</h2>
+    <p class="muted" style="margin:0">Welcome back, {{.P.User.Username}}. Here's what's running across your environment.</p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <a href="/instances" class="btn primary"><svg class="ic"><use href="#i-server"/></svg>New instance</a>
+    <a href="/networks" class="btn"><svg class="ic"><use href="#i-network"/></svg>Networks</a>
+    <a href="/storage" class="btn"><svg class="ic"><use href="#i-database"/></svg>Storage</a>
+  </div>
+</div>
+
+{{with .O}}
+<div class="ov-tiles">
+  <div class="tile accent-l">
+    <span class="lbl"><svg class="ic"><use href="#i-server"/></svg>Instances</span>
+    <span class="big">{{.VMs.Running}}<span style="font-size:16px;color:var(--muted)"> / {{.VMs.Total}}</span></span>
+    <span class="sub">{{.VMs.Running}} running · {{.VMs.Stopped}} stopped</span>
+  </div>
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-monitor"/></svg>Shape</span>
+    <span class="big">{{.VMs.Desktop}}<span style="font-size:16px;color:var(--muted)"> / {{.VMs.Servers}}</span></span>
+    <span class="sub">desktops / servers</span>
+  </div>
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-activity"/></svg>Allocated</span>
+    <span class="big">{{.VCPUs}}<span style="font-size:16px;color:var(--muted)"> vCPU</span></span>
+    <span class="sub">{{printf "%.1f" .MemoryGB}} GB RAM · {{printf "%.1f" .DiskTB}} TB disk</span>
+  </div>
+  <div class="tile accent-a">
+    <span class="lbl"><svg class="ic"><use href="#i-network"/></svg>Networking</span>
+    <span class="big">{{.PortGroups}}</span>
+    <span class="sub">port groups · {{.VSwitches}} vSwitch · {{.Bonds}} LAG</span>
+  </div>
+  <div class="tile accent-o">
+    <span class="lbl"><svg class="ic"><use href="#i-database"/></svg>Storage pools</span>
+    <span class="big">{{.Pools}}</span>
+    <span class="sub">{{printf "%.0f" .PoolUsedGB}} / {{printf "%.0f" .PoolTotGB}} GB used</span>
+  </div>
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-disc"/></svg>Library</span>
+    <span class="big">{{.Images}}<span style="font-size:16px;color:var(--muted)"> img</span></span>
+    <span class="sub">{{.ISOs}} ISOs · {{.Templates}} templates</span>
+  </div>
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-archive"/></svg>Backups</span>
+    <span class="big">{{.Backups}}</span>
+    <span class="sub">{{printf "%.1f" .BackupSizeGB}} GB stored</span>
+  </div>
+  <div class="tile accent-l">
+    <span class="lbl"><svg class="ic"><use href="#i-database"/></svg>Disk I/O</span>
+    <span class="big" id="ov-disk" style="font-size:15px">—</span>
+    <span class="sub" id="ov-disk-sub">read / write</span>
+    <canvas id="ov-disk-spark" height="30" style="width:100%;height:30px;margin-top:4px"></canvas>
+  </div>
+  <div class="tile accent-a">
+    <span class="lbl"><svg class="ic"><use href="#i-network"/></svg>Network</span>
+    <span class="big" id="ov-net" style="font-size:15px">—</span>
+    <span class="sub" id="ov-net-sub">rx / tx</span>
+    <canvas id="ov-net-spark" height="30" style="width:100%;height:30px;margin-top:4px"></canvas>
+  </div>
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-activity"/></svg>Pressure / IOWAIT</span>
+    <span class="big" id="ov-pres" style="font-size:14px">—</span>
+    <span class="sub" id="ov-pres-sub">CPU / MEM / IO PSI · iowait</span>
+  </div>
+  {{if $.P.IsAdmin}}
+  <div class="tile">
+    <span class="lbl"><svg class="ic"><use href="#i-grid"/></svg>Cluster</span>
+    <span class="big">{{.Nodes}}</span>
+    <span class="sub">nodes · {{.Members}} members</span>
+  </div>
+  {{end}}
+</div>
+
+<div class="ov-cols">
+  <!-- Running instances -->
+  <div class="card">
+    <h2>Compute</h2>
+    {{if .Runners}}
+    <p class="muted" style="margin:0 0 4px">Running now — open a console:</p>
+    <div class="chiprow">
+      {{range .Runners}}<a class="chip" href="/instances/{{.ID}}"><span class="d"></span>{{.Name}} <span class="muted">{{.Kind}}</span></a>{{end}}
+    </div>
+    {{else}}
+    <div class="empty">No instances running. <a href="/instances">Launch one →</a></div>
+    {{end}}
+    <div class="kv" style="margin-top:12px"><span class="k">Total instances</span><span class="v">{{.VMs.Total}}</span></div>
+    <div class="kv"><span class="k">Desktop pools</span><span class="v">{{.DesktopPools}}</span></div>
+  </div>
+
+  <!-- Storage -->
+  <div class="card">
+    <h2>Storage</h2>
+    <div class="bar"><i style="width:{{.PoolPct}}%"></i></div>
+    <div class="kv"><span class="k">Capacity used</span><span class="v">{{.PoolPct}}% · {{printf "%.0f" .PoolUsedGB}} / {{printf "%.0f" .PoolTotGB}} GB</span></div>
+    <div class="kv"><span class="k">Registered pools</span><span class="v">{{.Pools}}</span></div>
+    {{if $.P.IsAdmin}}
+    <div class="kv"><span class="k">ZFS pools</span><span class="v">{{.ZFSPools}}</span></div>
+    <div class="kv"><span class="k">LVM-thin pools</span><span class="v">{{.LVMPools}}</span></div>
+    {{end}}
+    <div style="margin-top:10px"><a href="/storage" class="btn sm">Manage storage</a></div>
+  </div>
+
+  <!-- Networking -->
+  <div class="card">
+    <h2>Networking</h2>
+    <div class="kv"><span class="k">Port groups</span><span class="v">{{.PortGroups}}</span></div>
+    <div class="kv"><span class="k">vSwitches</span><span class="v">{{.VSwitches}}</span></div>
+    <div class="kv"><span class="k">Uplinks (LAG)</span><span class="v">{{.Bonds}}</span></div>
+    {{if $.P.IsAdmin}}<div class="kv"><span class="k">L3 routing</span><span class="v">{{if eq .Routing "configured"}}<span class="pill running">on</span>{{else}}<span class="pill">off</span>{{end}}</span></div>{{end}}
+    <div style="margin-top:10px"><a href="/networks" class="btn sm">View topology</a></div>
+  </div>
+
+  <!-- Usage & quota -->
+  <div class="card">
+    <h2>Usage &amp; Quota <span class="muted" style="font-size:12px;font-weight:400">· last 30 days</span></h2>
+    <div class="kv"><span class="k">Instance-hours</span><span class="v">{{printf "%.1f" .Usage.InstanceHours}}</span></div>
+    {{if .Usage.CostCredits}}<div class="kv"><span class="k">Cost</span><span class="v">{{printf "%.2f" .Usage.CostCredits}} credits</span></div>{{end}}
+    <div class="kv"><span class="k">Running</span><span class="v">{{.VMs.Running}}{{if .Quota.MaxRunning}} / {{.Quota.MaxRunning}}{{end}}</span></div>
+    <div class="kv"><span class="k">Servers</span><span class="v">{{.VMs.Servers}}{{if .Quota.MaxServers}} / {{.Quota.MaxServers}}{{end}}</span></div>
+    <div class="kv"><span class="k">vCPUs allocated</span><span class="v">{{.VCPUs}}{{if .Quota.MaxVCPUs}} / {{.Quota.MaxVCPUs}}{{end}}</span></div>
+    <div style="margin-top:10px"><a href="/billing" class="btn sm">Usage report</a></div>
+  </div>
+</div>
+
+<!-- Recent activity -->
+<div class="card">
+  <h2>Recent activity</h2>
+  {{if .Recent}}
+  {{range .Recent}}
+  <div class="act">
+    <span class="when">{{.CreatedAt}}</span>
+    <span class="what">{{.Action}}</span>
+    <span class="muted">{{.TargetType}}{{if .TargetID}} {{.TargetID}}{{end}}</span>
+  </div>
+  {{end}}
+  <div style="margin-top:10px"><a href="/audit" class="btn sm">Full audit log</a></div>
+  {{else}}<div class="empty">No activity yet.</div>{{end}}
+</div>
+{{end}}
+<script>
+ // Live disk + network throughput via the metrics WebSocket.
+ (function(){
+   function fmtBps(n){ n=n||0; var u=['B','KB','MB','GB'],i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (n>=10||i===0?Math.round(n):n.toFixed(1))+' '+u[i]+'/s'; }
+   var diskHist=[], netHist=[];
+   function spark(id,data,color){
+     var c=document.getElementById(id); if(!c) return; var g=c.getContext('2d');
+     var w=c.width=c.clientWidth||300, h=c.height;
+     g.clearRect(0,0,w,h); if(data.length<2) return;
+     var max=Math.max.apply(null,data)||1, step=w/(data.length-1);
+     g.strokeStyle=color; g.lineWidth=2; g.beginPath();
+     data.forEach(function(v,i){ var y=h-(v/max)*(h-3)-1; i?g.lineTo(i*step,y):g.moveTo(0,y); });
+     g.stroke();
+   }
+   var cs=getComputedStyle(document.documentElement);
+   var cPrim=(cs.getPropertyValue('--primary').trim()||'#3b82f6'), cAcc=(cs.getPropertyValue('--accent').trim()||'#f59e0b');
+   function onSample(h){
+     if(!h) return;
+     var d=document.getElementById('ov-disk'), ds=document.getElementById('ov-disk-sub');
+     if(d){ d.textContent='↓ '+fmtBps(h.disk_read)+'  ↑ '+fmtBps(h.disk_write); ds.textContent='read / write'; }
+     var n=document.getElementById('ov-net'), ns=document.getElementById('ov-net-sub');
+     if(n){ n.textContent='↓ '+fmtBps(h.net_rx)+'  ↑ '+fmtBps(h.net_tx); ns.textContent='rx / tx'; }
+     var pr=document.getElementById('ov-pres');
+     if(pr){ pr.textContent='CPU '+(h.cpu_pres||0).toFixed(1)+' · MEM '+(h.mem_pres||0).toFixed(1)+' · IO '+(h.io_pres||0).toFixed(1);
+             document.getElementById('ov-pres-sub').textContent='PSI avg10 · iowait '+(h.iowait||0).toFixed(1)+'%'; }
+     diskHist.push((h.disk_read||0)+(h.disk_write||0)); if(diskHist.length>60)diskHist.shift();
+     netHist.push((h.net_rx||0)+(h.net_tx||0)); if(netHist.length>60)netHist.shift();
+     spark('ov-disk-spark',diskHist,cPrim); spark('ov-net-spark',netHist,cAcc);
+   }
+   try{
+     var proto=location.protocol==='https:'?'wss':'ws';
+     var ws=new WebSocket(proto+'://'+location.host+'/observability/ws');
+     ws.onmessage=function(e){ try{ onSample(JSON.parse(e.data).host); }catch(_){} };
+   }catch(_){}
+ })();
+</script>
+{{template "foot" .}}{{end}}

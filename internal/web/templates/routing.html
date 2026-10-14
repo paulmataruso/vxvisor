@@ -1,0 +1,223 @@
+{{define "routing.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>L3 Routing</h2>
+    <form method="post" action="/routing/apply" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn primary">Apply / refresh</button></form>
+  </div>
+  <p class="muted" style="margin:0">vdxd owns a single managed FRR config + nftables table. Build routing with the buttons below — each change is applied to the host immediately.{{if not .FRRReady}} <strong style="color:var(--danger)">FRR is not installed — OSPF/BGP/static won't apply.</strong>{{end}}</p>
+</div>
+
+<!-- Edge NAT uplink -->
+<div class="card">
+  <h2>Edge NAT uplink</h2>
+  <form method="post" action="/routing/uplink" class="row" style="align-items:end">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Uplink interface (SNAT out)
+      <select name="uplink" style="min-width:220px">
+        <option value="">— none —</option>
+        {{range .Interfaces}}{{if or (eq .Type "physical") (eq .Type "bridge") (eq .Type "bond")}}<option value="{{.Name}}" {{if eq .Name $.Cfg.Uplink}}selected{{end}}>{{.Name}} ({{.Type}})</option>{{end}}{{end}}
+      </select>
+    </label>
+    <button class="btn">Set uplink</button>
+  </form>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">NAT target networks are taken automatically from Port Groups flagged for NAT; masqueraded out this uplink.</p>
+</div>
+
+<!-- Interface prefixes -->
+<div class="card">
+  <div class="card-head"><h2>Interface prefixes</h2><button class="btn primary" data-modal="m-prefix">+ Add prefix</button></div>
+  {{if .Cfg.Prefixes}}
+  <table><tr><th>Interface</th><th>Prefix (CIDR)</th><th></th></tr>
+    {{range $i, $x := .Cfg.Prefixes}}<tr><td class="mono">{{$x.Iface}}</td><td class="mono">{{$x.CIDR}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/prefix/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No interface prefixes. Add one to assign an IP to a host interface (managed by zebra).</div>{{end}}
+</div>
+
+<!-- Static routes -->
+<div class="card">
+  <div class="card-head"><h2>Static routes</h2><button class="btn primary" data-modal="m-static">+ Add route</button></div>
+  {{if .Cfg.Static}}
+  <table><tr><th>Destination</th><th>Next hop</th><th></th></tr>
+    {{range $i, $x := .Cfg.Static}}<tr><td class="mono">{{$x.Dest}}</td><td class="mono">{{$x.NextHop}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/static/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No static routes.</div>{{end}}
+</div>
+
+<!-- Firewall -->
+<div class="card">
+  <div class="card-head"><h2>Firewall (forward chain)</h2><button class="btn primary" data-modal="m-fw">+ Add rule</button></div>
+  {{if .Cfg.Firewall}}
+  <table><tr><th>Action</th><th>Proto</th><th>Dport</th><th>Source</th><th></th></tr>
+    {{range $i, $x := .Cfg.Firewall}}<tr><td><span class="pill {{if eq $x.Action "accept"}}running{{else}}error{{end}}">{{$x.Action}}</span></td><td>{{if $x.Proto}}{{$x.Proto}}{{else}}any{{end}}</td><td>{{if $x.DPort}}{{$x.DPort}}{{else}}any{{end}}</td><td class="mono">{{if $x.Source}}{{$x.Source}}{{else}}any{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/firewall/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No firewall rules (default: established/related accepted, policy accept).</div>{{end}}
+</div>
+
+<!-- Prefix lists -->
+<div class="card">
+  <div class="card-head"><h2>Prefix lists</h2><button class="btn primary" data-modal="m-pl">+ Add prefix-list</button></div>
+  {{if .Cfg.PrefixLists}}
+  <table><tr><th>Name</th><th>Seq</th><th>Action</th><th>Prefix</th><th>ge/le</th><th></th></tr>
+    {{range $i, $x := .Cfg.PrefixLists}}<tr><td class="mono">{{$x.Name}}</td><td>{{$x.Seq}}</td><td>{{$x.Action}}</td><td class="mono">{{$x.Prefix}}</td><td class="muted">{{if $x.Ge}}ge {{$x.Ge}} {{end}}{{if $x.Le}}le {{$x.Le}}{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/prefixlist/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No prefix lists.</div>{{end}}
+</div>
+
+<!-- Route-maps -->
+<div class="card">
+  <div class="card-head"><h2>Route-maps</h2><button class="btn primary" data-modal="m-rm">+ Add clause</button></div>
+  {{if .Cfg.RouteMaps}}
+  <table><tr><th>Name</th><th>Seq</th><th>Action</th><th>Match</th><th>Set</th><th></th></tr>
+    {{range $i, $x := .Cfg.RouteMaps}}<tr><td class="mono">{{$x.Name}}</td><td>{{$x.Seq}}</td><td>{{$x.Action}}</td><td class="muted">{{if $x.MatchPrefixList}}prefix-list {{$x.MatchPrefixList}}{{end}}</td><td class="muted">{{if $x.SetMetric}}metric {{$x.SetMetric}} {{end}}{{if $x.SetLocalPref}}localpref {{$x.SetLocalPref}}{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/routemap/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No route-maps.</div>{{end}}
+</div>
+
+<!-- OSPF -->
+<div class="card">
+  <div class="card-head"><h2>OSPF <span class="pill {{if .Cfg.OSPF.Enabled}}running{{end}}">{{if .Cfg.OSPF.Enabled}}enabled{{else}}off{{end}}</span></h2><button class="btn primary" data-modal="m-ospf-net">+ Add network</button></div>
+  <form method="post" action="/routing/ospf" class="row" style="align-items:end">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="enabled" value="1" style="width:auto" {{if .Cfg.OSPF.Enabled}}checked{{end}}> enabled</label>
+    <label class="fld">Router ID<input name="router_id" value="{{.Cfg.OSPF.RouterID}}" placeholder="1.1.1.1"></label>
+    <button class="btn">Save OSPF</button>
+  </form>
+  {{if .Cfg.OSPF.Networks}}
+  <table style="margin-top:12px"><tr><th>Network</th><th>Area</th><th></th></tr>
+    {{range $i, $x := .Cfg.OSPF.Networks}}<tr><td class="mono">{{$x.CIDR}}</td><td>{{$x.Area}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/ospf/net/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{end}}
+</div>
+
+<!-- BGP -->
+<div class="card">
+  <div class="card-head"><h2>BGP <span class="pill {{if .Cfg.BGP.Enabled}}running{{end}}">{{if .Cfg.BGP.Enabled}}enabled{{else}}off{{end}}</span></h2>
+    <div style="display:flex;gap:8px"><button class="btn" data-modal="m-bgp-net">+ Network</button><button class="btn primary" data-modal="m-bgp-neigh">+ Neighbor</button></div>
+  </div>
+  <form method="post" action="/routing/bgp" class="row" style="align-items:end">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="enabled" value="1" style="width:auto" {{if .Cfg.BGP.Enabled}}checked{{end}}> enabled</label>
+    <label class="fld">Local ASN<input name="asn" type="number" value="{{if .Cfg.BGP.ASN}}{{.Cfg.BGP.ASN}}{{end}}" placeholder="65001"></label>
+    <label class="fld">Router ID<input name="router_id" value="{{.Cfg.BGP.RouterID}}" placeholder="1.1.1.1"></label>
+    <button class="btn">Save BGP</button>
+  </form>
+  {{if .Cfg.BGP.Neighbors}}
+  <h3 style="margin:14px 0 6px;font-size:13px">Neighbors</h3>
+  <table><tr><th>Peer</th><th>Remote AS</th><th>Route-map in/out</th><th></th></tr>
+    {{range $i, $x := .Cfg.BGP.Neighbors}}<tr><td class="mono">{{$x.Addr}}</td><td>{{$x.RemoteAS}}</td><td class="muted">{{if $x.RouteMapIn}}in:{{$x.RouteMapIn}} {{end}}{{if $x.RouteMapOut}}out:{{$x.RouteMapOut}}{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/bgp/neighbor/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{end}}
+  {{if .Cfg.BGP.Networks}}
+  <h3 style="margin:14px 0 6px;font-size:13px">Advertised networks</h3>
+  <table><tr><th>Network</th><th></th></tr>
+    {{range $i, $x := .Cfg.BGP.Networks}}<tr><td class="mono">{{$x}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/bgp/network/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{end}}
+</div>
+
+<!-- Live status -->
+<div class="card">
+  <h2>Live route table</h2>
+  <pre class="mono" style="background:var(--panel2);border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:360px">{{if .Status}}{{.Status}}{{else}}(no routes){{end}}</pre>
+</div>
+
+<!-- ===================== modals ===================== -->
+<div class="modal" id="m-prefix"><div class="modal-card">
+  <div class="modal-head"><h3>Add interface prefix</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/prefix">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Interface<select name="iface">{{range .Interfaces}}{{if or (eq .Type "physical") (eq .Type "bridge") (eq .Type "bond")}}<option value="{{.Name}}">{{.Name}} ({{.Type}})</option>{{end}}{{end}}</select></label>
+    <label class="fld">Prefix (CIDR)<input name="cidr" placeholder="10.50.0.1/24" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-static"><div class="modal-card">
+  <div class="modal-head"><h3>Add static route</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/static">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Destination<input name="dest" placeholder="10.60.0.0/24 or default" required></label>
+    <label class="fld">Next hop<input name="next_hop" placeholder="10.0.0.1" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add route</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-fw"><div class="modal-card">
+  <div class="modal-head"><h3>Add firewall rule</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/firewall">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Action<select name="action"><option value="accept">accept</option><option value="drop">drop</option></select></label>
+    <label class="fld">Protocol<select name="proto"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></label>
+    <label class="fld">Destination port<input name="dport" placeholder="443 (blank = any)"></label>
+    <label class="fld">Source CIDR<input name="source" placeholder="10.0.0.0/8 (blank = any)"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add rule</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-pl"><div class="modal-card">
+  <div class="modal-head"><h3>Add prefix-list entry</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform row2" method="post" action="/routing/prefixlist">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input name="name" placeholder="ALLOW-10" required></label>
+    <label class="fld">Seq<input name="seq" type="number" value="10"></label>
+    <label class="fld">Action<select name="action"><option value="permit">permit</option><option value="deny">deny</option></select></label>
+    <label class="fld">Prefix<input name="prefix" placeholder="10.0.0.0/8 or any" required></label>
+    <label class="fld">ge (optional)<input name="ge" type="number" placeholder=""></label>
+    <label class="fld">le (optional)<input name="le" type="number" placeholder=""></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-rm"><div class="modal-card">
+  <div class="modal-head"><h3>Add route-map clause</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform row2" method="post" action="/routing/routemap">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input name="name" placeholder="RM-IN" required></label>
+    <label class="fld">Seq<input name="seq" type="number" value="10"></label>
+    <label class="fld">Action<select name="action"><option value="permit">permit</option><option value="deny">deny</option></select></label>
+    <label class="fld">Match prefix-list<input name="match_prefix_list" placeholder="ALLOW-10"></label>
+    <label class="fld">Set metric<input name="set_metric" type="number" placeholder=""></label>
+    <label class="fld">Set local-pref<input name="set_local_pref" type="number" placeholder=""></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-ospf-net"><div class="modal-card">
+  <div class="modal-head"><h3>Add OSPF network</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/ospf/net">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Network (CIDR)<input name="cidr" placeholder="10.0.0.0/24" required></label>
+    <label class="fld">Area<input name="area" value="0" placeholder="0"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-bgp-neigh"><div class="modal-card">
+  <div class="modal-head"><h3>Add BGP neighbor</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform row2" method="post" action="/routing/bgp/neighbor">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Peer address<input name="addr" placeholder="10.0.0.2" required></label>
+    <label class="fld">Remote AS<input name="remote_as" type="number" placeholder="65002" required></label>
+    <label class="fld">Route-map in<input name="route_map_in" placeholder="(optional)"></label>
+    <label class="fld">Route-map out<input name="route_map_out" placeholder="(optional)"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add neighbor</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-bgp-net"><div class="modal-card">
+  <div class="modal-head"><h3>Advertise a network</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/bgp/network">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Network (CIDR)<input name="cidr" placeholder="10.0.0.0/24" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

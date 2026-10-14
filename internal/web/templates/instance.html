@@ -1,0 +1,214 @@
+{{define "instance.html"}}{{template "head" .}}
+{{$s := .Session}}
+<div class="card">
+  <div style="display:flex;align-items:center;gap:14px">
+    <h2 style="margin:0">{{$s.Name}}</h2>
+    <span class="pill {{$s.State}}">{{$s.State}}</span>
+    <div class="spacer" style="flex:1"></div>
+    {{if .Running}}
+      <a class="btn sm primary" href="/console/{{$s.ID}}">Open console</a>
+      <a class="btn sm" href="/desktop/{{$s.ID}}" title="Full desktop in the browser via the guacd gateway — clipboard, audio, microphone, webcam">Open desktop</a>
+      <form method="post" action="/sessions/{{$s.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
+    {{else}}
+      <form method="post" action="/sessions/{{$s.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>
+    {{end}}
+    <form method="post" action="/sessions/{{$s.ID}}/delete" style="display:inline" onsubmit="return confirm('Move to Trash?')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm danger">Delete</button></form>
+  </div>
+  <p class="muted mono" style="font-size:12px;margin:8px 0 0">{{$s.ID}}</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Specification</h2>
+    <div style="display:flex;gap:8px">
+      {{if $s.BootISOID}}
+      <form method="post" action="/sessions/{{$s.ID}}/eject-iso" style="display:inline" onsubmit="return confirm('Detach the boot ISO? The instance will boot from its disk on next start.')">
+        <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" title="Detach the install ISO so the VM boots its disk (takes effect next start)"><svg class="ic"><use href="#i-disc"/></svg>Eject ISO</button>
+      </form>
+      {{end}}
+      <button class="btn" data-modal="m-resize" {{if .Running}}disabled title="Stop the instance to change specs"{{end}}>Resize</button>
+    </div>
+  </div>
+  <table>
+    <tr><th>Image</th><td>{{$s.ImageName}}</td><th>Type</th><td>{{$s.Kind}}</td></tr>
+    <tr><th>Firmware</th><td>{{$s.Firmware}}</td><th>Created</th><td class="muted">{{$s.CreatedAt}}</td></tr>
+    <tr><th>vCPUs</th><td>{{$s.CPUs}}</td><th>Memory</th><td>{{$s.MemoryMB}} MB</td></tr>
+    <tr><th>Disk</th><td>{{if $s.DiskGB}}{{$s.DiskGB}} GB{{else}}image default{{end}}</td><th>Networking</th><td class="muted">user (NAT)</td></tr>
+  </table>
+</div>
+
+{{if $s.CloudInit}}
+<div class="card">
+  <h2>First-boot credentials (cloud-init)</h2>
+  <p class="muted">Injected on first boot. Usable at the console and over SSH once the guest finishes cloud-init.</p>
+  <table>
+    <tr><th>Username</th><td class="mono">{{$s.CIUsername}}</td></tr>
+    <tr><th>Password</th><td class="mono">{{$s.CIPassword}}</td></tr>
+    {{if $s.CISSHKey}}<tr><th>SSH key</th><td class="mono" style="font-size:12px;word-break:break-all">{{$s.CISSHKey}}</td></tr>{{end}}
+  </table>
+</div>
+{{end}}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Port forwarding <span class="muted" style="font-weight:400;font-size:12px">— reach this NAT'd guest over the network</span></h2>
+    <button class="btn primary" data-modal="m-fwd">+ Add forward</button>
+  </div>
+  {{if .Forwards}}
+  <table>
+    <tr><th>Reach at</th><th>→ guest</th><th>Label</th><th></th></tr>
+    {{range .Forwards}}
+    <tr>
+      <td class="mono">{{$.ForwardHost}}:{{.HostPort}}</td>
+      <td class="muted">{{.Proto}}/{{.GuestPort}}</td>
+      <td>{{.Label}}</td>
+      <td style="text-align:right"><form method="post" action="/sessions/{{$s.ID}}/forwards/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:10px 0 0">Forwards apply on the next start. e.g. <span class="mono">ssh {{$s.CIUsername}}@{{$.ForwardHost}} -p &lt;port&gt;</span></p>
+  {{else}}<div class="empty">No forwards. Add one (e.g. guest 22) to SSH into this instance.</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Snapshots <span class="muted" style="font-weight:400;font-size:12px">— {{if .Running}}live (RAM + disk){{else}}offline (disk){{end}}</span></h2>
+    <button class="btn primary" data-modal="m-snap">+ Take snapshot</button>
+  </div>
+  {{if .Snapshots}}
+  <table>
+    <tr><th>Name</th><th>Type</th><th>Taken</th><th></th></tr>
+    {{range .Snapshots}}
+    <tr>
+      <td>{{.Name}} <span class="muted mono" style="font-size:11px">{{.Tag}}</span></td>
+      <td>{{if .Online}}<span class="pill running">live</span>{{else}}<span class="pill">disk</span>{{end}}</td>
+      <td class="muted">{{.CreatedAt}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/revert" style="display:inline" onsubmit="return confirm('Revert disk to this snapshot? Instance must be stopped.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Revert</button></form>
+        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No snapshots.</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Backups &amp; retention</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" data-modal="m-schedule">Schedule</button>
+      <button class="btn" data-modal="m-retention">Retention</button>
+      <button class="btn primary" data-modal="m-backup">Back up now</button>
+    </div>
+  </div>
+  <p class="muted" style="margin:0">Take a compressed copy now, schedule recurring backups, or set an auto-deprovision date. See all backups and schedules under <a href="/backups">Backups</a>.</p>
+</div>
+
+{{if and .IsAdmin .Running}}
+<div class="card">
+  <div class="card-head">
+    <h2>Live migration</h2>
+    <button class="btn primary" data-modal="m-migrate">Migrate</button>
+  </div>
+  <p class="muted" style="margin:0">Move this running instance to another cluster node without disconnecting it. The guest keeps its IP because every node shares one L2 segment (the VXLAN overlay); QEMU streams RAM to the destination and relearns the MAC there. Needs a second node plus shared storage — otherwise it refuses rather than risk the disk.</p>
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Events</h2>
+  {{if .Events}}
+  <table>
+    <tr><th>Time</th><th>Actor</th><th>Action</th><th>Detail</th></tr>
+    {{range .Events}}
+    <tr>
+      <td class="muted mono" style="font-size:12px;white-space:nowrap">{{.CreatedAt}}</td>
+      <td>{{.ActorKind}}#{{.ActorID}}</td>
+      <td><span class="pill">{{.Action}}</span></td>
+      <td class="muted mono" style="font-size:12px">{{.Detail}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No events yet.</div>{{end}}
+</div>
+
+<!-- ===================== modals ===================== -->
+<div class="modal" id="m-resize"><div class="modal-card">
+  <div class="modal-head"><h3>Resize instance</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/resize">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">vCPUs<input type="number" name="cpus" value="{{$s.CPUs}}" min="1" max="32"></label>
+    <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="{{$s.MemoryMB}}" min="256" step="256"></label>
+    <label class="fld">Disk (GB)<input type="number" name="disk_gb" value="{{$s.DiskGB}}" min="0" max="2048"></label>
+    <p class="muted" style="margin:0">Disk can only grow; the guest expands the filesystem on next boot.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Apply</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-fwd"><div class="modal-card">
+  <div class="modal-head"><h3>Add port forward</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/forwards">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Guest port<input type="number" name="guest_port" value="22" min="1" max="65535"></label>
+    <label class="fld">Proto<select name="proto"><option value="tcp">tcp</option><option value="udp">udp</option></select></label>
+    <label class="fld">Label<input type="text" name="label" placeholder="ssh"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add forward</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-snap"><div class="modal-card">
+  <div class="modal-head"><h3>Take snapshot</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/snapshots">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="before-upgrade" required></label>
+    <p class="muted" style="margin:0">{{if .Running}}Live snapshot captures RAM + disk.{{else}}Offline snapshot captures the disk.{{end}}</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Take snapshot</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-backup"><div class="modal-card">
+  <div class="modal-head"><h3>Back up now</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/backup" {{if .Running}}onsubmit="return confirm('Instance is running — stop it first for a clean backup. Continue anyway?')"{{end}}>
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Backup name<input type="text" name="name" placeholder="manual" value="manual"></label>
+    <p class="muted" style="margin:0">Compressed copy — stop the instance first for a consistent image.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Back up now</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-schedule"><div class="modal-card">
+  <div class="modal-head"><h3>Schedule backups</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/schedule">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Every (hours)<input type="number" name="interval_hours" value="24" min="1"></label>
+    <label class="fld">Keep (most recent)<input type="number" name="keep" value="7" min="1"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Schedule</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-retention"><div class="modal-card">
+  <div class="modal-head"><h3>Set retention</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/retention">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Auto-deprovision in (days)<input type="number" name="days" value="7" min="1"></label>
+    <p class="muted" style="margin:0">The instance is moved to Trash automatically after this many days.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn danger">Set retention</button></div>
+  </form>
+</div></div>
+
+{{if and .IsAdmin .Running}}
+<div class="modal" id="m-migrate"><div class="modal-card">
+  <div class="modal-head"><h3>Live migration</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/migrate" onsubmit="return confirm('Live-migrate this instance to the selected node?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Destination node
+      <select name="dst_node">
+        {{range .Nodes}}<option value="{{.ID}}">{{.Name}} ({{.Status}}{{if eq .Role "local"}} — this node{{end}})</option>{{end}}
+      </select>
+    </label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="shared_storage" style="width:auto"> shared storage present</label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Migrate</button></div>
+  </form>
+</div></div>
+{{end}}
+{{template "foot" .}}{{end}}
