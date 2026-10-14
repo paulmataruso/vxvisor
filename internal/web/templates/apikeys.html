@@ -1,0 +1,43 @@
+{{define "apikeys.html"}}{{template "head" .}}
+{{if .NewKey}}
+<div class="card" style="border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:var(--ok-soft)">
+  <h2>New API key — copy it now</h2>
+  <p class="muted">This is shown only once. Store it securely.</p>
+  <div class="mono" style="padding:12px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;word-break:break-all">{{.NewKey}}</div>
+</div>
+{{end}}
+<div class="card">
+  <div class="card-head">
+    <h2>API keys</h2>
+    <button class="btn primary" data-modal="m-key">+ Generate key</button>
+  </div>
+  {{if .Keys}}
+  <table>
+    <tr><th>Prefix</th><th>Label</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr>
+    {{range .Keys}}
+    <tr>
+      <td class="mono">vdx_{{.Prefix}}…</td>
+      <td>{{if .Label}}{{.Label}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="muted">{{.CreatedAt}}</td>
+      <td class="muted">{{if .LastUsed}}{{.LastUsed}}{{else}}never{{end}}</td>
+      <td>{{if .Revoked}}<span class="pill error">revoked</span>{{else}}<span class="pill running">active</span>{{end}}</td>
+      <td style="text-align:right">
+        {{if not .Revoked}}<form method="post" action="/apikeys/{{.ID}}/revoke" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Revoke</button></form>{{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No API keys yet.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">Use as <span class="mono">Authorization: Bearer &lt;key&gt;</span> against <span class="mono">/api/v1/…</span>.</p>
+</div>
+
+<div class="modal" id="m-key"><div class="modal-card">
+  <div class="modal-head"><h3>Generate API key</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/apikeys/create">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Label<input type="text" name="label" placeholder="ci-deploy"></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="readonly" value="1" style="width:auto"> read-only</label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Generate</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

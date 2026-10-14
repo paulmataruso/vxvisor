@@ -1,0 +1,43 @@
+{{define "backups.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Backups</h2>
+  {{if .Backups}}
+  <table>
+    <tr><th>Name</th><th>Instance</th><th>Size</th><th>Compressor</th><th>Status</th><th>Created</th><th></th></tr>
+    {{range .Backups}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td class="muted mono" style="font-size:12px">{{slice .SessionID 0 8}}…</td>
+      <td class="muted">{{if .SizeBytes}}{{.SizeBytes}} B{{else}}—{{end}}</td>
+      <td>{{.Compressor}}</td>
+      <td><span class="pill {{if eq .Status "ready"}}running{{else if eq .Status "error"}}error{{end}}">{{.Status}}</span>{{if .Error}}<br><span class="muted" style="font-size:11px">{{.Error}}</span>{{end}}</td>
+      <td class="muted">{{.CreatedAt}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        {{if eq .Status "ready"}}<form method="post" action="/backups/{{.ID}}/restore" style="display:inline" onsubmit="return confirm('Restore as a new base image?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restore</button></form>{{end}}
+        <form method="post" action="/backups/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No backups. Create one from an instance's detail page.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">Restore creates a new base image named <span class="mono">restore-…</span>; launch an instance from it on the dashboard.</p>
+</div>
+<div class="card">
+  <h2>Backup schedules</h2>
+  {{if .Schedules}}
+  <table>
+    <tr><th>Instance</th><th>Every</th><th>Keep</th><th>Last run</th><th>Next run</th><th></th></tr>
+    {{range .Schedules}}
+    <tr>
+      <td class="muted mono" style="font-size:12px">{{slice .SessionID 0 8}}…</td>
+      <td>{{.IntervalHours}}h</td>
+      <td>{{.Keep}}</td>
+      <td class="muted">{{if .LastRunAt}}{{.LastRunAt}}{{else}}—{{end}}</td>
+      <td class="muted">{{.NextRunAt}}</td>
+      <td style="text-align:right"><form method="post" action="/schedules/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No schedules. Add one from an instance's detail page.</div>{{end}}
+</div>
+{{template "foot" .}}{{end}}

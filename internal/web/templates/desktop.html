@@ -1,0 +1,66 @@
+{{define "desktop.html"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Desktop — {{.Desktop.Name}}</title>
+<style>
+ html,body{margin:0;height:100%;background:#0b0d12;color:#e7e9ee;font:14px system-ui,sans-serif;overflow:hidden}
+ #bar{height:44px;display:flex;align-items:center;gap:14px;padding:0 16px;background:#161922;border-bottom:1px solid #2a2f3c}
+ #bar a{color:#5b8cff;text-decoration:none}#bar b{font-size:14px}
+ #status{color:#8b93a3;font-size:13px;margin-left:auto}
+ .pill{font-size:11px;padding:2px 8px;border:1px solid #2a2f3c;border-radius:999px;color:#9aa3b2}
+ #display{height:calc(100% - 44px);display:flex;align-items:center;justify-content:center}
+ #display canvas{outline:none;max-width:100%;max-height:100%}
+</style></head><body>
+<div id="bar">
+  <a href="/instances/{{.Desktop.SessionID}}">← Instance</a>
+  <b>{{.Desktop.Name}}</b>
+  <span class="pill">{{.Desktop.Protocol}}</span>
+  <span class="pill" title="clipboard, audio and microphone ride the remote-desktop channels">devices: clip · audio · mic</span>
+  <span id="status">connecting…</span>
+</div>
+<div id="display" tabindex="0"></div>
+<script type="module">
+ // Full desktop in the browser via the guacd gateway. guacamole-common-js is
+ // served from this origin (no CDN, no plugin). The WebSocket carries the
+ // Guacamole protocol; the server completes the guacd handshake and relays.
+ import Guacamole from "/static/guac/guacamole-common.min.js";
+
+ const status = document.getElementById("status");
+ const display = document.getElementById("display");
+ const scheme = location.protocol === "https:" ? "wss" : "ws";
+ const token = {{if .Token}}"{{.Token}}"{{else}}""{{end}};
+ const url = `${scheme}://${location.host}/desktop/{{.Desktop.SessionID}}/ws` + (token ? ("?t=" + encodeURIComponent(token)) : "");
+
+ const tunnel = new Guacamole.WebSocketTunnel(url);
+ const client = new Guacamole.Client(tunnel);
+ display.appendChild(client.getDisplay().getElement());
+
+ client.onstatechange = state => {
+   // 0 IDLE 1 CONNECTING 2 WAITING 3 CONNECTED 4 DISCONNECTING 5 DISCONNECTED
+   status.textContent = ["idle","connecting…","waiting…","connected","closing…","disconnected"][state] || state;
+ };
+ client.onerror = e => { status.textContent = "error: " + (e && e.message ? e.message : e); };
+
+ try {
+   client.connect();
+ } catch (err) { status.textContent = "connect failed: " + err; }
+
+ // Mouse → guest.
+ const mouse = new Guacamole.Mouse(client.getDisplay().getElement());
+ mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = s => client.sendMouseState(s);
+ // Keyboard → guest (attached to the whole document while focused).
+ const kbd = new Guacamole.Keyboard(document);
+ kbd.onkeydown = k => client.sendKeyEvent(1, k);
+ kbd.onkeyup   = k => client.sendKeyEvent(0, k);
+
+ // Clipboard: push local clipboard into the guest on paste.
+ display.addEventListener("paste", ev => {
+   const text = (ev.clipboardData || window.clipboardData).getData("text");
+   if (!text) return;
+   const stream = client.createClipboardStream("text/plain");
+   const w = new Guacamole.StringWriter(stream);
+   w.sendText(text); w.sendEnd();
+ });
+
+ window.addEventListener("beforeunload", () => { try { client.disconnect(); } catch(e){} });
+ display.focus();
+</script></body></html>{{end}}

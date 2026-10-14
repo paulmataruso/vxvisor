@@ -1,0 +1,90 @@
+{{define "foot"}}  </div>
+</div>
+<style>
+ @keyframes vdxspin{to{transform:rotate(360deg)}}
+ .vdx-spin{display:inline-block;width:14px;height:14px;margin-right:7px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:vdxspin .7s linear infinite;vertical-align:-2px}
+ button[disabled]{opacity:.75;cursor:progress}
+</style>
+<script>
+ // Give long-running POSTs (pool create/destroy, VG remove, routing apply) visible
+ // feedback so the page never looks frozen while the host does real work.
+ // Bubble phase + defaultPrevented check so a cancelled confirm() (onsubmit
+ // returning false) never leaves a button stuck spinning.
+ function vdxResetBtn(btn){
+   if(btn && btn.dataset.vdxlbl !== undefined){
+     btn.disabled = false;
+     btn.innerHTML = btn.dataset.vdxlbl;
+     delete btn.dataset.vdxlbl;
+   }
+ }
+ document.addEventListener('submit', function(ev){
+   if(ev.defaultPrevented) return;
+   var f = ev.target; if(!(f instanceof HTMLFormElement)) return;
+   if(f.method && f.method.toLowerCase() !== 'post') return;
+   var btn = f.querySelector('button[type=submit], button:not([type])');
+   if(btn && !btn.disabled){
+     var orig = btn.innerHTML;
+     var label = btn.textContent.trim();
+     setTimeout(function(){ // after the submit proceeds
+       btn.dataset.vdxlbl = orig;      // remember so we can restore it
+       btn.disabled = true;
+       btn.innerHTML = '<span class="vdx-spin"></span>' + (label || 'Working…');
+     }, 0);
+   }
+ }, false);
+ // Reset any spinning buttons when the page is shown again — notably a "Back"
+ // from an error page (bfcache restore), which otherwise leaves the submit/Add
+ // button stuck disabled so the form looks like it's "still running".
+ window.addEventListener('pageshow', function(){
+   document.querySelectorAll('button[data-vdxlbl]').forEach(vdxResetBtn);
+ });
+
+ // Modal dialogs. A button/link with data-modal="ID" opens #ID; clicking the
+ // backdrop, any [data-close] control, or Escape closes the open modal. The
+ // first field is focused on open for keyboard-friendly entry.
+ (function(){
+   function open(m){ if(!m) return; m.classList.add('open'); document.body.style.overflow='hidden';
+     var f=m.querySelector('input:not([type=hidden]),select,textarea'); if(f) setTimeout(function(){f.focus();},30); }
+   function closeAll(){ document.querySelectorAll('.modal.open').forEach(function(m){m.classList.remove('open');}); document.body.style.overflow=''; }
+   document.addEventListener('click', function(e){
+     var opener=e.target.closest('[data-modal]');
+     if(opener){ e.preventDefault(); open(document.getElementById(opener.getAttribute('data-modal'))); return; }
+     if(e.target.closest('[data-close]')){ e.preventDefault(); closeAll(); return; }
+     if(e.target.classList && e.target.classList.contains('modal')){ closeAll(); }
+   });
+   document.addEventListener('keydown', function(e){ if(e.key==='Escape') closeAll(); });
+ })();
+
+ // Toast status cards (bottom-right), used for background uploads / downloads so
+ // the user is never stuck watching a modal. Returns a handle to update it.
+ window.VDXToast = (function(){
+   function container(){
+     var c=document.getElementById('vdx-toasts');
+     if(!c){ c=document.createElement('div'); c.id='vdx-toasts'; document.body.appendChild(c); }
+     return c;
+   }
+   function add(title){
+     var el=document.createElement('div'); el.className='vtoast indet';
+     el.innerHTML='<div class="vt-head"><span class="vt-title"></span><button class="vt-x" type="button" aria-label="Dismiss">&times;</button></div>'+
+                  '<div class="vt-note"></div><div class="vt-bar"><i></i></div>';
+     el.querySelector('.vt-title').textContent=title||'Working…';
+     el.querySelector('.vt-x').addEventListener('click',function(){ remove(); });
+     container().appendChild(el);
+     var bar=el.querySelector('.vt-bar>i'), note=el.querySelector('.vt-note'), tEl=el.querySelector('.vt-title');
+     var removed=false;
+     function remove(){ if(removed) return; removed=true; el.style.transition='opacity .2s'; el.style.opacity='0'; setTimeout(function(){ el.remove(); },200); }
+     return {
+       // frac 0..1 sets a determinate bar; null = indeterminate (animated).
+       progress:function(frac){ if(frac==null){ el.classList.add('indet'); bar.style.width=''; } else { el.classList.remove('indet'); bar.style.width=Math.max(0,Math.min(1,frac))*100+'%'; } },
+       note:function(t){ note.textContent=t||''; },
+       title:function(t){ tEl.textContent=t; },
+       done:function(msg){ el.classList.remove('indet'); el.classList.add('ok'); if(msg) note.textContent=msg; setTimeout(remove,2600); },
+       fail:function(msg){ el.classList.remove('indet'); el.classList.add('err'); if(msg) note.textContent=msg; },
+       remove:remove
+     };
+   }
+   return { add:add };
+ })();
+</script>
+<div id="vdx-toasts"></div>
+</body></html>{{end}}

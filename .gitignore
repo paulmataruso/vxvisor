@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/dist/
+*.test
+*.out
+
+# Local runtime data: DBs, broker.key, VM disks, ISOs, backups, logs, local config.
+# Never commit these — they contain secrets and host-specific state.
+/run/
+
+# Any stray built daemon binary at the repo root
+/vdxd
+
+# Editor / OS cruft
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+/vendor/

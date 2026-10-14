@@ -1,0 +1,25 @@
+{{define "orgs.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Organizations</h2>
+    <button class="btn primary" data-modal="m-org">+ New organization</button>
+  </div>
+  {{if .P.Orgs}}
+  <table>
+    <tr><th>Name</th><th>Slug</th><th>Created</th></tr>
+    {{range .P.Orgs}}<tr><td><strong>{{.Name}}</strong></td><td class="mono">{{.Slug}}</td><td class="muted">{{.CreatedAt}}</td></tr>{{end}}
+  </table>
+  {{else}}<div class="empty">No organizations yet.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">You are an instance admin and see all organizations. Switch context with the org selector, then manage members and keys there.</p>
+</div>
+
+<div class="modal" id="m-org"><div class="modal-card">
+  <div class="modal-head"><h3>New organization</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/orgs">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="Acme Corp" required></label>
+    <label class="fld">Slug<input type="text" name="slug" placeholder="acme" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

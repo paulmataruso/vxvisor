@@ -1,0 +1,72 @@
+{{define "dashboard.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Instances</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      {{if .Templates}}
+      {{range .Templates}}
+      <form method="post" action="/templates/{{.ID}}/launch" style="display:inline">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="name" value="{{.Name}}-{{$.P.User.Username}}">
+        <button class="btn sm">⟶ {{.Name}}</button>
+      </form>
+      {{end}}
+      {{end}}
+      <button class="btn primary" data-modal="m-launch" {{if and (not .Images) (not .ISOs)}}disabled title="Pull a base image or add a boot ISO first"{{end}}>+ New instance</button>
+    </div>
+  </div>
+  {{if .Sessions}}
+  <table>
+    <tr><th>Name</th><th>Type</th><th>Image</th><th>Specs</th><th>State</th><th></th></tr>
+    {{range .Sessions}}
+    <tr>
+      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td>{{.Kind}}{{if eq .Firmware "uefi"}} · <span class="muted">uefi</span>{{end}}</td>
+      <td>{{.ImageName}}</td>
+      <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .DiskGB}} · {{.DiskGB}} GB{{end}}</td>
+      <td><span class="pill {{.State}}">{{.State}}</span></td>
+      <td style="text-align:right;white-space:nowrap">
+        <a class="btn sm" href="/instances/{{.ID}}">Details</a>
+        {{if eq .State "running"}}
+          <a class="btn sm" href="/console/{{.ID}}">Console</a>
+          <a class="btn sm" href="/desktop/{{.ID}}" title="Full browser desktop (clipboard, audio, mic, webcam)">Desktop</a>
+          <form method="post" action="/sessions/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
+        {{else}}
+          <form method="post" action="/sessions/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>
+        {{end}}
+        <form method="post" action="/sessions/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Move to Trash?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No instances in this organization yet.{{if not .Images}} Pull a base image first — <span class="mono">vdxd image pull ubuntu-24.04</span>.{{end}}</div>{{end}}
+</div>
+
+<div class="modal" id="m-launch"><div class="modal-card lg">
+  <div class="modal-head"><h3>Launch an instance</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/sessions">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="muted full" style="margin:0;font-size:12px">Pick an <strong>Image</strong> for an instant cloud VM, <em>or</em> choose <strong>none (install from ISO)</strong> + a <strong>Boot ISO</strong> to install a fresh OS onto a blank disk.</p>
+    <label class="fld full">Name<input type="text" name="name" placeholder="my-vm" required></label>
+    <label class="fld">Image<select name="image"><option value="">— none (install from ISO) —</option>{{range .Images}}{{if eq .Status "ready"}}<option value="{{.Name}}">{{.Name}}</option>{{end}}{{end}}</select></label>
+    <label class="fld">Type<select name="kind"><option value="desktop">Desktop</option><option value="server">Server</option></select></label>
+    <label class="fld">Firmware<select name="firmware"><option value="uefi">UEFI</option><option value="bios">BIOS</option></select></label>
+    <label class="fld">Boot ISO<select name="boot_iso_id"><option value="0">— none —</option>{{range .ISOs}}{{if eq .Status "ready"}}<option value="{{.ID}}">{{.Name}}</option>{{end}}{{end}}</select></label>
+    <label class="fld">Port Group<select name="network_id"><option value="0">— default (NAT) —</option>{{range .Networks}}<option value="{{.ID}}">{{.Name}}{{if .VLANID}} · VLAN {{.VLANID}}{{end}}</option>{{end}}</select></label>
+    <label class="fld">Storage pool<select name="storage_pool_id"><option value="0">— default disk directory —</option>{{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}</select></label>
+    <label class="fld">Disk backend<select name="disk_backend" id="disk-backend"><option value="qcow2">qcow2 file</option>{{if .ZFSPools}}<option value="zvol">raw ZFS zvol (fastest)</option>{{end}}</select></label>
+    {{if .ZFSPools}}<label class="fld">ZFS pool (for zvol)<select name="zvol_pool"><option value="">—</option>{{range .ZFSPools}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>{{end}}
+    <label class="fld">Display<select name="display"><option value="vnc">VNC (built-in console)</option><option value="spice">SPICE (qxl + agent, via gateway)</option></select></label>
+    <label class="fld">Desktop<select name="desktop"><option value="">none (server/CLI)</option><option value="xfce">XFCE (lightweight, cloud-init)</option></select></label>
+    <label class="fld">vCPUs<input type="number" name="cpus" value="2" min="1" max="32"></label>
+    <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="2048" min="256" step="256"></label>
+    <label class="fld">Disk (GB)<input type="number" name="disk_gb" value="10" min="0" max="2048"></label>
+    <label class="fld">PCI passthrough<input type="text" name="passthrough" placeholder="0000:01:00.0" title="host PCI address(es), comma-separated; requires IOMMU"></label>
+    <label class="fld">Login user<input type="text" name="ci_username" value="vdx" placeholder="vdx"></label>
+    <label class="fld">Password<input type="text" name="ci_password" placeholder="(auto-generated)"></label>
+    <label class="fld full">SSH public key (optional)<input type="text" name="ci_ssh_key" placeholder="ssh-ed25519 AAAA…"></label>
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="cloud_init" value="1" checked style="width:auto"> cloud-init</label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

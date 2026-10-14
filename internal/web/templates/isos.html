@@ -1,0 +1,100 @@
+{{define "isos.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>ISO library</h2>
+    <div style="display:flex;gap:8px">
+      <button class="btn" data-modal="m-iso-pull">+ Pull from URL</button>
+      <button class="btn primary" data-modal="m-iso-upload">+ Upload ISO</button>
+    </div>
+  </div>
+  {{if .ISOs}}
+  <table>
+    <tr><th>Name</th><th>Size</th><th>Status</th><th>Checksum</th><th></th></tr>
+    {{range .ISOs}}
+    <tr{{if eq .Status "downloading"}} data-downloading{{end}}>
+      <td><strong>{{.Name}}</strong>{{if eq .OrgID 0}} <span class="pill">global</span>{{end}}</td>
+      <td class="muted">{{if .SizeBytes}}{{humanBytes .SizeBytes}}{{else}}—{{end}}</td>
+      <td><span class="pill {{if eq .Status "ready"}}running{{else if eq .Status "error"}}error{{else}}stopped{{end}}">{{if eq .Status "downloading"}}<span class="vdx-spin"></span>downloading{{else}}{{.Status}}{{end}}</span></td>
+      <td class="muted mono" style="font-size:11px">{{if .Checksum}}{{slice .Checksum 0 12}}…{{end}}</td>
+      <td style="text-align:right">
+        <form method="post" action="/isos/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete ISO?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No ISOs yet. Upload one or pull from a URL to boot installers.</div>{{end}}
+  <p class="muted" style="margin:10px 0 0;font-size:12px">A URL pull downloads in the background — the row shows <b>downloading</b>, then <b>ready</b>. If it fails it shows <b>error</b>; delete it and try again.</p>
+</div>
+<script>
+ // Auto-refresh while any ISO is still downloading so status updates live.
+ if (document.querySelector('[data-downloading]')) setTimeout(function(){ location.reload(); }, 4000);
+
+ (function(){
+   function closeModals(){ document.querySelectorAll('.modal.open').forEach(function(m){m.classList.remove('open');}); document.body.style.overflow=''; }
+   function fmtBytes(n){ if(!n) return '0 B'; var u=['B','KB','MB','GB','TB'],i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return v.toFixed(v<10&&i>0?1:0)+' '+u[i]; }
+
+   // Upload: stream via XHR with a real progress bar in a bottom-right toast.
+   var up=document.querySelector('#m-iso-upload form');
+   if(up) up.addEventListener('submit', function(e){
+     e.preventDefault();
+     var fd=new FormData(up);
+     var file=up.querySelector('input[type=file]').files[0];
+     var nm=(up.querySelector('input[name=name]').value||'').trim() || (file&&file.name) || 'ISO';
+     up.reset(); closeModals();
+     var t=VDXToast.add('Uploading '+nm); t.progress(0); t.note('starting…');
+     var xhr=new XMLHttpRequest();
+     xhr.open('POST','/isos/upload?ajax=1');
+     xhr.upload.onprogress=function(ev){ if(ev.lengthComputable){ t.progress(ev.loaded/ev.total); t.note(fmtBytes(ev.loaded)+' / '+fmtBytes(ev.total)); } };
+     xhr.onload=function(){ if(xhr.status>=200&&xhr.status<300){ t.title('Uploaded '+nm); t.done('done'); setTimeout(function(){ location.reload(); },900); } else { t.fail('upload failed ('+xhr.status+')'); } };
+     xhr.onerror=function(){ t.fail('upload failed — network error'); };
+     xhr.send(fd);
+   });
+
+   // URL pull: kick off the background download, then poll for completion.
+   var pl=document.querySelector('#m-iso-pull form');
+   if(pl) pl.addEventListener('submit', function(e){
+     e.preventDefault();
+     var nm=(pl.querySelector('input[name=name]').value||'').trim()||'ISO';
+     var fd=new FormData(pl);
+     closeModals(); pl.reset();
+     var t=VDXToast.add('Downloading '+nm); t.progress(null); t.note('fetching from URL…');
+     fetch('/isos/pull?ajax=1',{method:'POST',body:new URLSearchParams(fd)})
+       .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+       .then(function(d){
+         var id=d.id;
+         var poll=setInterval(function(){
+           fetch('/api/isos').then(function(r){return r.json();}).then(function(j){
+             var iso=(j.isos||[]).filter(function(x){return x.id===id;})[0];
+             if(!iso) return;
+             if(iso.status==='ready'){ clearInterval(poll); t.progress(1); t.title('Downloaded '+nm); t.done(fmtBytes(iso.size)); setTimeout(function(){ location.reload(); },900); }
+             else if(iso.status==='error'){ clearInterval(poll); t.fail('download failed — delete the row and retry'); }
+             else { t.note(iso.size?fmtBytes(iso.size)+' so far…':'downloading…'); }
+           }).catch(function(){});
+         }, 2000);
+       })
+       .catch(function(err){ t.fail('could not start: '+err.message); });
+   });
+ })();
+</script>
+
+<div class="modal" id="m-iso-upload"><div class="modal-card">
+  <div class="modal-head"><h3>Upload ISO</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <!-- field order matters: csrf + name stream before the file part -->
+  <form class="mform" method="post" action="/isos/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="(defaults to filename)"></label>
+    <label class="fld">File<input type="file" name="iso" accept=".iso" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Upload</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-iso-pull"><div class="modal-card">
+  <div class="modal-head"><h3>Pull ISO from URL</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/isos/pull">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">URL<input type="text" name="url" placeholder="https://…/installer.iso" required></label>
+    <label class="fld">Name<input type="text" name="name" placeholder="debian-12" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Pull</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

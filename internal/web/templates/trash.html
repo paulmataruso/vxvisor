@@ -1,0 +1,22 @@
+{{define "trash.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Trash</h2>
+  <p class="muted">Deleted instances are retained here until restored or purged. Auto-deprovisioned instances (past their retention date) also land here.</p>
+  {{if .Sessions}}
+  <table>
+    <tr><th>Name</th><th>Image</th><th>Spec</th><th></th></tr>
+    {{range .Sessions}}
+    <tr>
+      <td><strong>{{.Name}}</strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td>{{.ImageName}}</td>
+      <td class="muted">{{.Kind}} · {{.CPUs}} vCPU · {{.MemoryMB}} MB</td>
+      <td style="text-align:right;white-space:nowrap">
+        <form method="post" action="/trash/{{.ID}}/restore" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restore</button></form>
+        <form method="post" action="/trash/{{.ID}}/purge" style="display:inline" onsubmit="return confirm('Permanently delete this instance and its disk? This cannot be undone.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Purge</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">Trash is empty.</div>{{end}}
+</div>
+{{template "foot" .}}{{end}}

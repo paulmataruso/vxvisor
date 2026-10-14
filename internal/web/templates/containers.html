@@ -1,0 +1,76 @@
+{{define "containers.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Containers <span class="muted" style="font-weight:400;font-size:12px">— LXC system containers</span></h2>
+    <button class="btn primary" data-modal="m-ct" {{if not .LXCReady}}disabled title="LXC not installed on this host"{{end}}>+ New container</button>
+  </div>
+  {{if not .LXCReady}}<div class="empty">LXC tools not installed on this host (<span class="mono">lxc</span>).</div>
+  {{else if .Containers}}
+  <table>
+    <tr><th>Name</th><th>Template</th><th>Spec</th><th>State</th><th>IP</th><th></th></tr>
+    {{range .Containers}}
+    <tr{{if eq .Status "creating"}} data-creating{{end}}>
+      <td><strong>{{.Name}}</strong></td>
+      <td class="muted">{{.Dist}}/{{.Release}} · {{.Arch}}</td>
+      <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .Bridge}} · {{.Bridge}}{{end}}</td>
+      <td>
+        {{if eq .Status "creating"}}<span class="pill stopped"><span class="vdx-spin"></span>creating</span>
+        {{else if eq .Status "error"}}<span class="pill error">error</span>
+        {{else}}<span class="pill {{if eq .State "RUNNING"}}running{{else}}stopped{{end}}">{{.State}}</span>{{end}}
+      </td>
+      <td class="mono" style="font-size:12px">{{if .IP}}{{.IP}}{{else}}—{{end}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        {{if eq .State "RUNNING"}}
+          <form method="post" action="/containers/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
+        {{else if or (eq .Status "stopped") (eq .State "STOPPED")}}
+          <form method="post" action="/containers/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>
+          <form method="post" action="/containers/{{.ID}}/snapshot" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Snapshot</button></form>
+        {{end}}
+        <form method="post" action="/containers/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete container {{.Name}}? This destroys its rootfs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:10px 0 0;font-size:12px">Attach a console with <span class="mono">lxc-attach -n &lt;name&gt;</span> on the host. Containers share the host kernel and start in well under a second.</p>
+  {{else}}<div class="empty">No containers yet. Create one — the rootfs downloads in the background (shows “creating”, then “stopped”).</div>{{end}}
+</div>
+
+<div class="modal" id="m-ct"><div class="modal-card lg">
+  <div class="modal-head"><h3>New LXC container</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform row2" method="post" action="/containers">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld full">Name<input name="name" placeholder="web1" required pattern="[a-zA-Z0-9._-]+"></label>
+    <label class="fld">Distribution<select name="dist" id="ct-dist"><option value="ubuntu">ubuntu</option><option value="debian">debian</option><option value="alpine">alpine</option><option value="rockylinux">rockylinux</option><option value="centos">centos</option></select></label>
+    <label class="fld">Release<select name="release" id="ct-release"></select></label>
+    <label class="fld">vCPUs<input type="number" name="cpus" value="1" min="1" max="64"></label>
+    <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="512" min="64" step="64"></label>
+    <label class="fld">Bridge (network)
+      <select name="bridge">
+        <option value="lxcbr0">lxcbr0 (default LXC NAT)</option>
+        {{range .Interfaces}}{{if eq .Type "bridge"}}<option value="{{.Name}}">{{.Name}}</option>{{end}}{{end}}
+      </select>
+    </label>
+    <label class="fld">Storage pool<select name="storage_pool_id"><option value="0">— default (/var/lib/lxc) —</option>{{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}</select></label>
+    <div class="modal-actions full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create container</button></div>
+  </form>
+</div></div>
+<script>
+ // Auto-refresh while any container is still being created.
+ if (document.querySelector('[data-creating]')) setTimeout(function(){ location.reload(); }, 4000);
+
+ // Release dropdown follows the chosen distribution (download-image catalog).
+ (function(){
+   var rel = {
+     ubuntu:     ["noble","jammy","resolute"],
+     debian:     ["bookworm","trixie","forky"],
+     alpine:     ["3.24","3.23","3.22","3.21","edge"],
+     rockylinux: ["9","8"],
+     centos:     ["9-Stream"]
+   };
+   var dist = document.getElementById('ct-dist'), release = document.getElementById('ct-release');
+   if(!dist||!release) return;
+   function fill(){ release.innerHTML=''; (rel[dist.value]||[]).forEach(function(r){ var o=document.createElement('option'); o.value=r; o.textContent=r; release.appendChild(o); }); }
+   dist.addEventListener('change', fill); fill();
+ })();
+</script>
+{{template "foot" .}}{{end}}

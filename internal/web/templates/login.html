@@ -1,0 +1,50 @@
+{{define "login.html"}}<!doctype html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in — VXVisor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@500&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+ :root{--bg:#0b0e14;--panel:#121722;--panel2:#1a2130;--line:#27303f;--fg:#e6e9ef;--muted:#8a93a6;
+   --primary:#3b82f6;--primary-fg:#fff;--accent:#f59e0b;--ring:#3b82f6;--danger:#f87171}
+ *{box-sizing:border-box}
+ body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:
+   radial-gradient(1100px 560px at 72% -12%, color-mix(in srgb,var(--primary) 22%,var(--bg)) 0%, var(--bg) 58%);
+   color:var(--fg);font:14px/1.55 'Fira Sans',system-ui,sans-serif;padding:16px}
+ .box{width:360px;max-width:100%;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:30px;
+   box-shadow:0 10px 40px rgba(0,0,0,.4)}
+ .brand{display:flex;justify-content:center;margin-bottom:10px}
+ .brand svg{width:240px;max-width:100%;height:auto}
+ .sub{color:var(--muted);font-size:13px;margin:0 0 20px;text-align:center}
+ label{display:block;font-size:12px;color:var(--muted);margin:14px 0 6px}
+ input{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:11px 12px;outline:none;font:inherit;transition:border-color .15s,box-shadow .15s}
+ input:focus{border-color:var(--ring);box-shadow:0 0 0 3px color-mix(in srgb,var(--ring) 25%,transparent)}
+ button{width:100%;margin-top:22px;padding:12px;border:0;border-radius:10px;cursor:pointer;font-weight:700;font:inherit;
+   background:var(--primary);color:var(--primary-fg);transition:filter .15s}
+ button:hover{filter:brightness(1.08)}
+ .err{margin-top:14px;color:var(--danger);font-size:13px}
+ .sso{display:block;text-align:center;margin-top:16px;padding:11px;border:1px solid var(--line);border-radius:10px;color:var(--fg);text-decoration:none;font-weight:600;transition:border-color .15s}
+ .sso:hover{border-color:var(--primary)}
+</style></head><body>
+<form class="box" method="post" action="/login">
+  <div class="brand">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="VXVisor">
+      <defs>
+        <linearGradient id="blue" x1="190" y1="300" x2="840" y2="740" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#168BFF"/><stop offset="0.48" stop-color="#1261D9"/><stop offset="1" stop-color="#092B70"/></linearGradient>
+        <linearGradient id="blue2" x1="400" y1="330" x2="850" y2="720" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#159CFF"/><stop offset="1" stop-color="#0754C7"/></linearGradient>
+        <linearGradient id="dark" x1="470" y1="400" x2="760" y2="730" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#174A9B"/><stop offset="1" stop-color="#09265D"/></linearGradient>
+      </defs>
+      <path d="M155 280 H260 L455 585 L520 685 H415 Z" fill="url(#blue)"/>
+      <path d="M260 280 H365 L520 520 L455 620 Z" fill="#10468F"/>
+      <path d="M415 685 L660 380 L740 280 H845 L520 685 Z" fill="url(#blue2)"/>
+      <path d="M470 280 H575 L845 685 H740 Z" fill="url(#dark)"/>
+      <text x="512" y="805" font-family="Arial, Helvetica, sans-serif" font-size="100" font-weight="800" letter-spacing="8" text-anchor="middle"><tspan fill="#168BFF">VX</tspan><tspan fill="#E4EDF9">VISOR</tspan></text>
+    </svg>
+  </div>
+  <p class="sub">Virtualization &amp; VDI control plane</p>
+  <label>Username</label><input name="username" autofocus autocomplete="username">
+  <label>Password</label><input name="password" type="password" autocomplete="current-password">
+  <button>Sign in</button>
+  {{if .Error}}<div class="err">Invalid credentials or too many attempts.</div>{{end}}
+  {{if .OIDC}}<a class="sso" href="/oidc/login">Sign in with SSO</a>{{end}}
+</form>
+</body></html>{{end}}

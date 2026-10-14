@@ -1,0 +1,47 @@
+{{define "templates.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Templates</h2>
+    <button class="btn primary" data-modal="m-tpl" {{if not .Images}}disabled title="Pull a base image first"{{end}}>+ New template</button>
+  </div>
+  {{if .Templates}}
+  <table>
+    <tr><th>Name</th><th>Image</th><th>Spec</th><th>cloud-init</th><th></th></tr>
+    {{range .Templates}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td>{{.ImageName}}</td>
+      <td class="muted">{{.Kind}} · {{.Firmware}} · {{.CPUs}} vCPU · {{.MemoryMB}} MB · {{.DiskGB}} GB</td>
+      <td>{{if .CloudInit}}{{.CIUsername}}{{else}}<span class="muted">off</span>{{end}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <form method="post" action="/templates/{{.ID}}/launch" style="display:inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}-vm">
+          <button class="btn sm primary">Launch</button>
+        </form>
+        <form method="post" action="/templates/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete template?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No templates yet. Save one to launch instances in a click.</div>{{end}}
+  {{if not .Images}}<p class="muted" style="margin:12px 0 0">No base images yet — <span class="mono">vdxd image pull ubuntu-24.04</span>.</p>{{end}}
+</div>
+
+<div class="modal" id="m-tpl"><div class="modal-card lg">
+  <div class="modal-head"><h3>New template</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/templates">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="web-server" required></label>
+    <label class="fld">Image<select name="image" required>{{range .Images}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+    <label class="fld">Type<select name="kind"><option value="server">Server</option><option value="desktop">Desktop</option></select></label>
+    <label class="fld">Firmware<select name="firmware"><option value="uefi">UEFI</option><option value="bios">BIOS</option></select></label>
+    <label class="fld">vCPUs<input type="number" name="cpus" value="2" min="1" max="32"></label>
+    <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="2048" min="256" step="256"></label>
+    <label class="fld">Disk (GB)<input type="number" name="disk_gb" value="10" min="0"></label>
+    <label class="fld">Login user<input type="text" name="ci_username" value="vdx"></label>
+    <label class="fld full">SSH public key<input type="text" name="ci_ssh_key" placeholder="ssh-ed25519 AAAA…"></label>
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="cloud_init" value="1" checked style="width:auto"> cloud-init</label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save template</button></div>
+  </form>
+</div></div>
+{{template "foot" .}}{{end}}

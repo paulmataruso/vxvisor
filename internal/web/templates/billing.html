@@ -1,0 +1,40 @@
+{{define "billing.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Usage — last {{.Report.Days}} days</h2>
+  <div class="grid" style="grid-template-columns:repeat(3,1fr)">
+    <div><div class="muted">Instance-hours</div><div style="font-size:26px;font-weight:650">{{printf "%.1f" .Report.InstanceHours}}</div></div>
+    <div><div class="muted">vCPU-seconds</div><div style="font-size:26px;font-weight:650">{{.Report.VCPUSeconds}}</div></div>
+    <div><div class="muted">Est. cost (credits)</div><div style="font-size:26px;font-weight:650">{{printf "%.4f" .Report.CostCredits}}</div></div>
+  </div>
+  <p class="muted" style="margin:12px 0 0">Metering is fully local — usage is recorded to an on-box ledger with no external calls. Cost shows only if the org has a plan assigned.</p>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Quota (current org)</h2>
+    {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-quota">Edit quota</button>{{end}}
+  </div>
+  <table>
+    <tr><th>Max servers</th><td>{{if .Quota.MaxServers}}{{.Quota.MaxServers}}{{else}}∞{{end}}</td><th>Max running</th><td>{{if .Quota.MaxRunning}}{{.Quota.MaxRunning}}{{else}}∞{{end}}</td></tr>
+    <tr><th>Max vCPUs</th><td>{{if .Quota.MaxVCPUs}}{{.Quota.MaxVCPUs}}{{else}}∞{{end}}</td><th>Max memory</th><td>{{if .Quota.MaxMemoryMB}}{{.Quota.MaxMemoryMB}} MB{{else}}∞{{end}}</td></tr>
+    <tr><th>Max disk</th><td>{{if .Quota.MaxDiskGB}}{{.Quota.MaxDiskGB}} GB{{else}}∞{{end}}</td><th></th><td></td></tr>
+  </table>
+  <p class="muted" style="margin:10px 0 0">{{if .P.IsAdmin}}0 = unlimited. Enforced locally at instance create/start.{{else}}Quotas are set by an instance administrator.{{end}}</p>
+</div>
+
+{{if .P.IsAdmin}}
+<div class="modal" id="m-quota"><div class="modal-card lg">
+  <div class="modal-head"><h3>Edit quota (current org)</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/billing/quota">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Max server VMs<input type="number" name="max_servers" value="{{.Quota.MaxServers}}" min="0"></label>
+    <label class="fld">Max running<input type="number" name="max_running" value="{{.Quota.MaxRunning}}" min="0"></label>
+    <label class="fld">Max vCPUs<input type="number" name="max_vcpus" value="{{.Quota.MaxVCPUs}}" min="0"></label>
+    <label class="fld">Max memory (MB)<input type="number" name="max_memory_mb" value="{{.Quota.MaxMemoryMB}}" min="0"></label>
+    <label class="fld">Max disk (GB)<input type="number" name="max_disk_gb" value="{{.Quota.MaxDiskGB}}" min="0"></label>
+    <div class="modal-actions full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save quota</button></div>
+  </form>
+</div></div>
+{{end}}
+
+{{template "foot" .}}{{end}}

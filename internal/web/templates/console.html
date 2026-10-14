@@ -1,0 +1,98 @@
+{{define "console.html"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Console — {{.Session.Name}}</title>
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#e7e9ee;font:14px system-ui,sans-serif}
+ #bar{height:46px;display:flex;align-items:center;gap:8px;padding:0 12px;background:#161922;border-bottom:1px solid #2a2f3c;flex-wrap:nowrap;overflow-x:auto}
+ #bar a{color:#5b8cff;text-decoration:none;white-space:nowrap}
+ #bar b{font-size:14px;white-space:nowrap}
+ #status{color:#8b93a3;font-size:13px;white-space:nowrap;margin-left:auto}
+ .cbtn{background:#222736;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap}
+ .cbtn:hover{border-color:#5b8cff}
+ .cbtn:active{background:#2f3545}
+ select.cbtn,input.cpaste{height:30px}
+ .cpaste{background:#0e121a;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:4px 8px;font:inherit;font-size:12px;width:150px}
+ .sep{width:1px;height:24px;background:#2a2f3c;margin:0 2px}
+ #screen{height:calc(100% - 46px)}
+</style></head><body>
+<div id="bar">
+  <a href="/instances">←</a><b>{{.Session.Name}}</b>
+  <span class="sep"></span>
+  <button class="cbtn" id="k-cad" title="Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+  <select class="cbtn" id="k-combo" title="Send a key combo">
+    <option value="">Send key…</option>
+    <option value="cab">Ctrl+Alt+Backspace</option>
+    <option value="esc">Esc</option>
+    <option value="tab">Tab</option>
+    <option value="alttab">Alt+Tab</option>
+    <option value="ctrlc">Ctrl+C</option>
+    <option value="ctrlv">Ctrl+V</option>
+    <option value="ctrlz">Ctrl+Z</option>
+    <option value="super">Super (Win)</option>
+    <option value="caf1">Ctrl+Alt+F1</option>
+    <option value="caf2">Ctrl+Alt+F2</option>
+    <option value="caf3">Ctrl+Alt+F3</option>
+    <option value="caf7">Ctrl+Alt+F7</option>
+  </select>
+  <span class="sep"></span>
+  <input class="cpaste" id="k-paste" placeholder="paste text → guest">
+  <button class="cbtn" id="k-send">Send</button>
+  <span class="sep"></span>
+  <button class="cbtn" id="k-fit" title="Toggle scale-to-fit">Fit</button>
+  <button class="cbtn" id="k-full" title="Fullscreen">⛶ Full</button>
+  <span id="status">connecting…</span>
+</div>
+<div id="screen"></div>
+<script type="module">
+ import RFB from "/static/novnc/core/rfb.js";
+ const status = document.getElementById("status");
+ const scheme = location.protocol === "https:" ? "wss" : "ws";
+ const url = `${scheme}://${location.host}/console/{{.Session.ID}}/ws`;
+ // X keysyms
+ const K = { ctrl:0xffe3, alt:0xffe9, shift:0xffe1, super:0xffeb, esc:0xff1b, tab:0xff09,
+   bksp:0xff08, del:0xffff, f1:0xffbe, f2:0xffbf, f3:0xffc0, f7:0xffc4,
+   c:0x0063, v:0x0076, z:0x007a };
+ let rfb;
+ function combo(...syms){ if(!rfb) return; rfb.focus();
+   for(const s of syms) rfb.sendKey(s, null, true);
+   for(let i=syms.length-1;i>=0;i--) rfb.sendKey(syms[i], null, false);
+ }
+ try {
+   rfb = new RFB(document.getElementById("screen"), url,
+     { credentials: { password: "{{.Session.VNCPassword}}" } });
+   rfb.scaleViewport = true;
+   rfb.addEventListener("connect", () => { status.textContent = "connected"; rfb.focus(); });
+   rfb.addEventListener("disconnect", e =>
+     status.textContent = e.detail.clean ? "disconnected" : "connection failed — is the VM running?");
+   rfb.addEventListener("clipboard", e => { /* guest copied; available if needed */ });
+ } catch (err) { status.textContent = "noVNC failed to load: " + err; }
+
+ document.getElementById("k-cad").onclick = () => rfb && rfb.sendCtrlAltDel();
+ document.getElementById("k-combo").onchange = (e) => {
+   const v = e.target.value; e.target.value = "";
+   switch(v){
+     case "cab": combo(K.ctrl,K.alt,K.bksp); break;
+     case "esc": combo(K.esc); break;
+     case "tab": combo(K.tab); break;
+     case "alttab": combo(K.alt,K.tab); break;
+     case "ctrlc": combo(K.ctrl,K.c); break;
+     case "ctrlv": combo(K.ctrl,K.v); break;
+     case "ctrlz": combo(K.ctrl,K.z); break;
+     case "super": combo(K.super); break;
+     case "caf1": combo(K.ctrl,K.alt,K.f1); break;
+     case "caf2": combo(K.ctrl,K.alt,K.f2); break;
+     case "caf3": combo(K.ctrl,K.alt,K.f3); break;
+     case "caf7": combo(K.ctrl,K.alt,K.f7); break;
+   }
+ };
+ document.getElementById("k-send").onclick = () => {
+   const inp = document.getElementById("k-paste");
+   if(rfb && inp.value){ rfb.clipboardPasteFrom(inp.value); status.textContent = "sent to guest clipboard — paste in the guest"; }
+ };
+ document.getElementById("k-fit").onclick = () => { if(rfb){ rfb.scaleViewport = !rfb.scaleViewport; } };
+ document.getElementById("k-full").onclick = () => {
+   const el = document.documentElement;
+   if(!document.fullscreenElement){ el.requestFullscreen && el.requestFullscreen(); }
+   else { document.exitFullscreen && document.exitFullscreen(); }
+ };
+</script></body></html>{{end}}
