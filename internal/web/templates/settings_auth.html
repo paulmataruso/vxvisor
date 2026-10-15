@@ -1,0 +1,87 @@
+{{define "settings_auth.html"}}{{template "head" .}}
+{{if .Ok}}<div class="card" style="border-left:3px solid var(--ok,#2e7d32)"><strong>Authentication settings saved.</strong> They are live now — no restart needed.</div>{{end}}
+{{if .Err}}<div class="card" style="border-left:3px solid var(--danger,#c0392b)"><strong>Could not save:</strong> {{.Err}}</div>{{end}}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Active Directory / LDAP</h2>
+    <span class="pill {{if .AD.Enabled}}running{{end}}">{{if .AD.Enabled}}enabled{{else}}disabled{{end}}</span>
+  </div>
+  <p class="muted" style="margin:4px 0 0">
+    Let users sign in with their AD credentials. Accounts are created automatically on first login (JIT).
+    The minimum is a <b>directory URL</b> + <b>domain</b> — that alone enables UPN login. Add a service
+    account only if you want to map an AD group to the admin role.
+    {{if not .FromDB}}<br><span style="color:var(--warn)">These values currently come from the config file <span class="mono">[ad]</span> block; saving here takes over and persists in the database.</span>{{end}}
+  </p>
+</div>
+
+<div class="card">
+  <form class="mform row2" method="post" action="/settings/auth" id="adform">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:10px">
+      <input type="checkbox" name="enabled" {{if .AD.Enabled}}checked{{end}} style="width:auto">
+      <span>Enable Active Directory / LDAP sign-in</span>
+    </label>
+
+    <label class="fld">Directory URL
+      <input name="url" value="{{.AD.URL}}" placeholder="ldaps://dc.corp.example.com:636" required>
+    </label>
+    <label class="fld">AD domain
+      <input name="domain" value="{{.AD.Domain}}" placeholder="corp.example.com">
+    </label>
+
+    <label class="fld" style="flex-direction:row;align-items:center;gap:10px">
+      <input type="checkbox" name="starttls" {{if .AD.StartTLS}}checked{{end}} style="width:auto">
+      <span>StartTLS (upgrade a plain <span class="mono">ldap://</span> connection)</span>
+    </label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:10px">
+      <input type="checkbox" name="insecure" {{if .AD.Insecure}}checked{{end}} style="width:auto">
+      <span>Skip TLS certificate verification <span class="muted">(lab / self-signed only)</span></span>
+    </label>
+
+    <div class="full"><div class="grp" style="padding:8px 0 2px;border-top:1px solid var(--line);margin-top:4px">Optional — service account (for admin-group → role mapping)</div></div>
+
+    <label class="fld">Service account DN / UPN
+      <input name="bind_dn" value="{{.AD.BindDN}}" placeholder="CN=svc-vdx,OU=Service,DC=corp,DC=example,DC=com">
+    </label>
+    <label class="fld">Service account password
+      <input type="password" name="bind_password" autocomplete="off" placeholder="{{if .HasBindPW}}•••••••• (unchanged — leave blank to keep){{else}}(none set){{end}}">
+    </label>
+    <label class="fld">Search base DN
+      <input name="base_dn" value="{{.AD.BaseDN}}" placeholder="DC=corp,DC=example,DC=com">
+    </label>
+    <label class="fld">Admin group
+      <input name="admin_group" value="{{.AD.AdminGroup}}" placeholder="VXVisor-Admins (CN or full DN)">
+    </label>
+    <label class="fld full">User search filter <span class="muted">(advanced — leave blank for the default)</span>
+      <input name="user_filter" value="{{.AD.UserFilter}}" placeholder="(&(objectClass=user)(sAMAccountName=%s))">
+    </label>
+
+    <div class="modal-actions full" style="gap:8px">
+      <button type="button" class="btn" id="adtest">Test connection</button>
+      <span id="adtestmsg" class="muted" style="align-self:center;flex:1"></span>
+      <button class="btn primary">Save settings</button>
+    </div>
+  </form>
+</div>
+
+<script>
+(function(){
+  var form=document.getElementById('adform'), btn=document.getElementById('adtest'), msg=document.getElementById('adtestmsg');
+  if(!btn) return;
+  btn.addEventListener('click', function(){
+    msg.textContent='Testing…'; msg.style.color='';
+    btn.disabled=true;
+    fetch('/settings/auth/test',{method:'POST',body:new FormData(form),headers:{'Accept':'application/json'}})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        msg.textContent=d.message||(d.ok?'OK':'failed');
+        msg.style.color=d.ok?'var(--ok,#2e7d32)':'var(--danger,#c0392b)';
+      })
+      .catch(function(e){msg.textContent='test failed: '+e;msg.style.color='var(--danger,#c0392b)';})
+      .finally(function(){btn.disabled=false;});
+  });
+})();
+</script>
+{{template "foot" .}}{{end}}

@@ -21,6 +21,7 @@ func (s *Server) PublicRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /", s.auth(s.portal))
 	mux.HandleFunc("POST /connect", s.auth(s.connectDesktop))
+	mux.HandleFunc("POST /apps/launch", s.auth(s.launchApp))
 	mux.HandleFunc("POST /desktops/{id}/disconnect", s.auth(s.disconnectDesktop))
 
 	mux.HandleFunc("GET /desktop/{id}", s.auth(s.desktop))
@@ -36,7 +37,8 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request, p *service.Princ
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
-	s.render(w, p, "portal.html", "", map[string]any{"Desktops": desks})
+	apps, _ := s.svc.MyApps(p)
+	s.render(w, p, "portal.html", "", map[string]any{"Desktops": desks, "Apps": apps})
 }
 
 // connectDesktop leases/creates a desktop from a pool and redirects the browser
@@ -64,7 +66,56 @@ func (s *Server) adminPools(w http.ResponseWriter, r *http.Request, p *service.P
 		return
 	}
 	images, _ := image.List(s.svc.DB())
-	s.render(w, p, "pools.html", "pools", map[string]any{"Pools": pools, "Images": images})
+	apps, _ := s.svc.ListApps(p)
+	s.render(w, p, "pools.html", "pools", map[string]any{"Pools": pools, "Images": images, "Apps": apps})
+}
+
+// createApp publishes an app to the portal (admin).
+func (s *Server) createApp(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	a := broker.App{
+		Name:   r.FormValue("name"),
+		Kind:   r.FormValue("kind"),
+		PoolID: int64(atoi(r.FormValue("pool_id"))),
+		Target: r.FormValue("target"),
+		Args:   r.FormValue("args"),
+		Icon:   r.FormValue("icon"),
+	}
+	if _, err := s.svc.CreateApp(p, a, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/pools", http.StatusSeeOther)
+}
+
+func (s *Server) deleteApp(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteApp(p, int64(atoi(r.PathValue("id"))), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/pools", http.StatusSeeOther)
+}
+
+// launchApp (portal) launches a published app: a web app redirects to its URL,
+// a desktop/remoteapp app leases a pool VM and opens the browser desktop.
+func (s *Server) launchApp(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	redirect, err := s.svc.ConnectApp(p, int64(atoi(r.FormValue("app_id"))), clientIP(r))
+	if err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
 func (s *Server) createPool(w http.ResponseWriter, r *http.Request, p *service.Principal) {

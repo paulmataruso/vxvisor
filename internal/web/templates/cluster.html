@@ -1,4 +1,44 @@
 {{define "cluster.html"}}{{template "head" .}}
+{{if .ClusterOn}}
+<div class="card">
+  <div class="card-head"><h2>Cluster</h2></div>
+  <p style="margin:0">
+    Management VIP: <strong class="mono">{{if .VIP}}{{.VIP}}{{else}}(acquiring…){{end}}</strong>
+    &nbsp;·&nbsp; Leader: <span class="pill running">{{if .LeaderName}}{{.LeaderName}}{{else}}—{{end}}</span>
+    {{if .IsLeaderHere}}<span class="pill">this node</span>{{end}}
+  </p>
+  <p class="muted" style="margin:8px 0 0">Manage the whole cluster from the VIP — it always points at the current leader. Account changes must be made here (on the leader); followers sync automatically.</p>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Cluster instances</h2></div>
+  {{if .ClusterVMs}}
+  <table>
+    <tr><th>Name</th><th>Node</th><th>State</th><th>Kind</th><th>vCPU</th><th>RAM</th><th>Owner</th><th></th></tr>
+    {{range .ClusterVMs}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="pill">{{.Node}}</span></td>
+      <td><span class="pill {{if eq .State "running"}}running{{else if eq .State "error"}}error{{end}}">{{.State}}</span></td>
+      <td class="muted">{{.Kind}}</td>
+      <td>{{.CPUs}}</td>
+      <td class="muted">{{.MemoryMB}} MB</td>
+      <td class="muted">{{.Owner}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        {{if eq .State "running"}}
+        <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
+        <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/restart" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restart</button></form>
+        {{else}}
+        <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No instances across the cluster yet.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">Every node's VMs, from one pane. Actions on a remote node's VM are proxied to it over the authenticated cluster API.</p>
+</div>
+{{end}}
 <div class="card">
   <div class="card-head">
     <h2>Nodes</h2>

@@ -22,14 +22,24 @@ import (
 const mdnsService = "_vdxclone._tcp"
 
 // Meta is the per-node payload gossiped in memberlist node metadata. It is kept
-// small (well under memberlist's meta limit) and carries exactly what a remote
-// node needs to schedule onto or migrate to this one.
+// small (well under memberlist's 512-byte meta limit) and carries exactly what a
+// remote node needs to schedule onto, migrate to, or elect this one.
 type Meta struct {
 	Name      string `json:"name"`
-	Address   string `json:"addr"`     // routable host IP for SSH/migration
+	Address   string `json:"addr"`     // cluster-net IP: SSH/migration/peer-API target
+	MgmtAddr  string `json:"mgmt"`     // mgmt IP peers probe for liveness before promoting
 	CPUs      int    `json:"cpus"`
 	MemFreeMB int64  `json:"mem_free"` // live free memory
 	MemTotal  int64  `json:"mem_total"`
+	// Leadership (gossip is encrypted+authenticated via SecretKey, so these are
+	// trustworthy): Leader asserts this node currently holds the lease for Term;
+	// VIP is the floating management address the leader owns; Primary/Started are
+	// the stable tiebreak inputs for election.
+	Leader  bool   `json:"ldr,omitempty"`
+	Term    uint64 `json:"term,omitempty"`
+	VIP     string `json:"vip,omitempty"`
+	Primary bool   `json:"pri,omitempty"`
+	Started int64  `json:"started,omitempty"` // unix seconds, stable across re-gossip
 }
 
 // Member is a resolved cluster peer (local or remote).
@@ -40,12 +50,19 @@ type Member struct {
 
 // Config controls how this node joins the mesh.
 type Config struct {
-	NodeName   string
-	BindAddr   string
-	BindPort   int
-	Seeds      []string // optional static "host:port" peers
-	MDNS       bool     // enable mDNS discovery + advertisement
-	Advertise  string   // routable address peers reach us at (for Meta.Address)
+	NodeName  string
+	BindAddr  string
+	BindPort  int
+	Seeds     []string // optional static "host:port" peers
+	MDNS      bool     // enable mDNS discovery + advertisement
+	Advertise string   // cluster-net address peers reach us at (for Meta.Address)
+	MgmtAddr  string   // mgmt IP peers probe before promoting (for Meta.MgmtAddr)
+	Primary   bool     // startup/tiebreak-preferred leader (for Meta.Primary)
+	// SecretKey encrypts+authenticates all gossip (16/24/32 bytes). REQUIRED in
+	// cluster mode because leadership — and thus VIP ownership — rides gossip:
+	// without it any host on the cluster subnet could forge a leader. Same key on
+	// every node.
+	SecretKey []byte
 }
 
 // Cluster is a running gossip membership handle.
@@ -67,9 +84,19 @@ func (d *delegate) set(m Meta) { d.mu.Lock(); d.meta = m; d.mu.Unlock() }
 func (d *delegate) get() Meta  { d.mu.RLock(); defer d.mu.RUnlock(); return d.meta }
 
 func (d *delegate) NodeMeta(limit int) []byte {
-	b, _ := json.Marshal(d.get())
+	m := d.get()
+	b, _ := json.Marshal(m)
 	if len(b) > limit {
-		return b[:limit]
+		// Never truncate — a sliced JSON blob fails to decode on every peer and
+		// silently erases leadership/VIP state. Fall back to a minimal valid
+		// payload and log loudly so the overflow is caught instead of corrupting
+		// the cluster view.
+		log.Printf("gossip: node meta %d bytes exceeds limit %d — advertising minimal meta (name/addr only)", len(b), limit)
+		min, _ := json.Marshal(Meta{Name: m.Name, Address: m.Address, MgmtAddr: m.MgmtAddr})
+		if len(min) <= limit {
+			return min
+		}
+		return nil
 	}
 	return b
 }
@@ -87,7 +114,13 @@ func Start(cfg Config) (*Cluster, error) {
 			cfg.Advertise = ip
 		}
 	}
-	del := &delegate{meta: Meta{Name: cfg.NodeName, Address: cfg.Advertise}}
+	del := &delegate{meta: Meta{
+		Name:     cfg.NodeName,
+		Address:  cfg.Advertise,
+		MgmtAddr: cfg.MgmtAddr,
+		Primary:  cfg.Primary,
+		Started:  time.Now().Unix(),
+	}}
 
 	mlCfg := memberlist.DefaultLANConfig()
 	mlCfg.Name = cfg.NodeName
@@ -100,6 +133,11 @@ func Start(cfg Config) (*Cluster, error) {
 	mlCfg.AdvertisePort = cfg.BindPort
 	mlCfg.Delegate = del
 	mlCfg.LogOutput = logDiscard{}
+	// Encrypt + authenticate gossip. Leadership/VIP ownership ride these packets,
+	// so an unkeyed mesh would let any subnet host forge a leader.
+	if len(cfg.SecretKey) > 0 {
+		mlCfg.SecretKey = cfg.SecretKey
+	}
 
 	ml, err := memberlist.Create(mlCfg)
 	if err != nil {
@@ -136,6 +174,19 @@ func (c *Cluster) UpdateLocal(cpus int, memFreeMB, memTotalMB int64) {
 	// Re-gossip the new metadata to peers.
 	_ = c.ml.UpdateNode(2 * time.Second)
 }
+
+// SetLeadership updates this node's advertised leadership state and immediately
+// re-gossips it. Called by the election loop when claiming or yielding the lease
+// (and to publish the floating VIP once acquired).
+func (c *Cluster) SetLeadership(leader bool, term uint64, vip string) {
+	m := c.del.get()
+	m.Leader, m.Term, m.VIP = leader, term, vip
+	c.del.set(m)
+	_ = c.ml.UpdateNode(2 * time.Second)
+}
+
+// Self returns this node's own current advertised Meta.
+func (c *Cluster) Self() Meta { return c.del.get() }
 
 // Members returns the current cluster view decoded from gossiped metadata.
 func (c *Cluster) Members() []Member {

@@ -49,8 +49,11 @@
 <!-- ===================== Port Groups ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Port Groups</h2>
-    <button class="btn primary" data-modal="m-pg">+ Add port group</button>
+    <h2>Port Groups &amp; VXLAN networks</h2>
+    <div style="display:flex;gap:8px">
+      <button class="btn" data-modal="m-vxlan">+ VXLAN network</button>
+      <button class="btn primary" data-modal="m-pg">+ Add port group</button>
+    </div>
   </div>
   {{if .Networks}}
   <table>
@@ -128,7 +131,7 @@
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Port Group name<input type="text" name="name" placeholder="VLAN-20" required></label>
     <label class="fld">Type
-      <select name="mode"><option value="bridge">vSwitch (VLAN)</option><option value="user">user (NAT)</option><option value="overlay">overlay (VXLAN)</option></select>
+      <select name="mode"><option value="bridge">vSwitch (VLAN)</option><option value="user">user (NAT)</option><option value="overlay">overlay (cluster VXLAN)</option></select>
     </label>
     <label class="fld">vSwitch
       <select name="bridge" id="bridgesel"><option value="">— pick a vSwitch —</option>{{range .VSwitches}}<option value="{{.Bridge}}">{{.Name}} ({{.Bridge}})</option>{{end}}</select>
@@ -139,6 +142,29 @@
     <label class="fld">Pool start<input type="text" name="pool_start" placeholder="10.20.0.10"></label>
     <label class="fld">Pool end<input type="text" name="pool_end" placeholder="10.20.0.200"></label>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create port group</button></div>
+  </form>
+</div></div>
+
+<!-- ===================== VXLAN network ===================== -->
+<div class="modal" id="m-vxlan"><div class="modal-card lg">
+  <div class="modal-head"><h3>Create VXLAN network</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/networks">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="mode" value="vxlan">
+    <p class="muted full" style="margin:0;font-size:12px">A standalone L2 overlay segment with its own VNI, riding as UDP over any underlay NIC — VMs on it share one broadcast domain across hosts. Give every node the same VNI and list the <em>other</em> nodes' underlay IPs as peers. This is independent of the single cluster overlay.</p>
+    <label class="fld">Name<input type="text" name="name" placeholder="vxlan-tenant-100" required></label>
+    <label class="fld">VNI<input type="number" name="vni" min="1" max="16777215" placeholder="100" required></label>
+    <label class="fld">Underlay NIC<input type="text" name="underlay" placeholder="e.g. eth0 / bond0" required></label>
+    <label class="fld">Underlay local IP<input type="text" name="vxlan_local" placeholder="(optional) this node's underlay IP"></label>
+    <label class="fld full">Peer underlay IPs<input type="text" name="vxlan_peers" placeholder="comma-separated other-node IPs, e.g. 10.10.2.160"></label>
+    <label class="fld">UDP port<input type="number" name="vxlan_dstport" value="4789"></label>
+    <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" title="underlay MTU minus ~50"></label>
+    <label class="fld">Guest CIDR<input type="text" name="cidr" placeholder="(optional) 10.100.0.0/24"></label>
+    <label class="fld">Gateway on bridge<input type="text" name="gateway" placeholder="(optional) 10.100.0.1"></label>
+    <label class="fld">Pool start<input type="text" name="pool_start" placeholder="(optional) 10.100.0.10"></label>
+    <label class="fld">Pool end<input type="text" name="pool_end" placeholder="(optional) 10.100.0.200"></label>
+    <p class="muted full" style="margin:0;font-size:11px">A per-network bridge (<span class="mono">vdxubr&lt;id&gt;</span>) + VXLAN device is created and made reboot-persistent via systemd. VMs attach to it by selecting this network at launch.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create VXLAN network</button></div>
   </form>
 </div></div>
 
@@ -230,6 +256,10 @@
       return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
              '<rect x="'+(x+4)+'" y="'+(y+9)+'" width="6" height="3" fill="'+col+'"/>';
     }
+    function ctGlyph(x,y,col){ // tiny container/box glyph (14x12) — distinguishes LXC
+      return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+             '<path d="M'+x+' '+(y+4)+' h14 M'+(x+7)+' '+y+' v12" stroke="'+col+'" stroke-width="1.1"/>';
+    }
 
     function pgHeight(pg){return pgHdr+Math.max((pg.vms||[]).length,1)*vmRow+pgFoot;}
     function upHeight(up){return up.kind==='bond'?(bondHdr+Math.max((up.members||[]).length,1)*bondRow+bondFoot):nicH;}
@@ -269,8 +299,10 @@
         if(pg.cidr) svg+=txt(pgX+14,py+36,fit(pg.cidr,11,400,pgW-28),C.muted,'start',400,11);
         vms.forEach(function(vm,i){
           var ry=py+pgHdr+i*vmRow;
-          svg+=monitor(pgX+16,ry+3,vm.state==='running'?C.ok:C.muted);
-          svg+='<text x="'+(pgX+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(vm.name||vm.tap)+'</title>'+ESC(fit(vm.name||vm.tap,12,400,pgW-72))+'</text>';
+          var col=vm.state==='running'?C.ok:C.muted;
+          svg+=(vm.kind==='container'?ctGlyph(pgX+16,ry+2,col):monitor(pgX+16,ry+3,col));
+          var label=(vm.name||vm.tap)+(vm.kind==='container'?' (lxc)':'');
+          svg+='<text x="'+(pgX+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(label)+'</title>'+ESC(fit(label,12,400,pgW-72))+'</text>';
           svg+=dot(pgX+pgW-16,ry+9,vm.state==='running');
         });
         if(!vms.length) svg+=txt(pgX+40,py+pgHdr+14,'(no VMs attached)',C.muted,'start',400,12);

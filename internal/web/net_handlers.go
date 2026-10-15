@@ -29,11 +29,16 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *servic
 		return
 	}
 	vlan, _ := strconv.Atoi(r.FormValue("vlan_id"))
+	vni, _ := strconv.Atoi(r.FormValue("vni"))
+	dstport, _ := strconv.Atoi(r.FormValue("vxlan_dstport"))
+	mtu, _ := strconv.Atoi(r.FormValue("vxlan_mtu"))
 	n := netdrv.Network{
 		Name: r.FormValue("name"), Mode: r.FormValue("mode"),
 		Bridge: r.FormValue("bridge"), VLANID: vlan,
 		CIDR: r.FormValue("cidr"), Gateway: r.FormValue("gateway"),
 		PoolStart: r.FormValue("pool_start"), PoolEnd: r.FormValue("pool_end"),
+		VNI: vni, Underlay: r.FormValue("underlay"), VXLANLocal: r.FormValue("vxlan_local"),
+		VXLANPeers: r.FormValue("vxlan_peers"), DstPort: dstport, MTU: mtu,
 	}
 	if _, err := s.svc.CreateNetwork(p, n, clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))

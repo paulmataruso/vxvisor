@@ -1,0 +1,55 @@
+{{define "serial.html"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Serial — {{.Session.Name}}</title>
+<link rel="stylesheet" href="/static/xterm/xterm.css">
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#e7e9ee;font:14px system-ui,sans-serif}
+ #bar{height:46px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#161922;border-bottom:1px solid #2a2f3c;flex-wrap:nowrap;overflow-x:auto}
+ #bar a{color:#5b8cff;text-decoration:none;white-space:nowrap}
+ #bar b{font-size:14px;white-space:nowrap}
+ #status{color:#8b93a3;font-size:13px;white-space:nowrap;margin-left:auto}
+ .cbtn{background:#222736;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap}
+ .cbtn:hover{border-color:#5b8cff}
+ .sep{width:1px;height:24px;background:#2a2f3c;margin:0 2px}
+ #term{height:calc(100% - 46px);padding:4px 6px;box-sizing:border-box}
+</style></head><body>
+<div id="bar">
+  <a href="/instances">←</a><b>{{.Session.Name}}</b> <span class="muted" style="color:#8b93a3">serial console</span>
+  <span class="sep"></span>
+  <button class="cbtn" id="k-enter" title="Send Enter (wake the login prompt)">⏎ Enter</button>
+  <button class="cbtn" id="k-ctrlc" title="Send Ctrl+C">Ctrl+C</button>
+  <button class="cbtn" id="k-clear">Clear</button>
+  <span id="status">connecting…</span>
+</div>
+<div id="term"></div>
+<script src="/static/xterm/xterm.js"></script>
+<script src="/static/xterm/addon-fit.js"></script>
+<script>
+ const status = document.getElementById("status");
+ const term = new Terminal({ cursorBlink:true, fontFamily:"Fira Code, ui-monospace, monospace", fontSize:14,
+   theme:{ background:"#000000" }, scrollback:5000, convertEol:false });
+ const fit = new FitAddon.FitAddon();
+ term.loadAddon(fit);
+ term.open(document.getElementById("term"));
+ try { fit.fit(); } catch(e){}
+ window.addEventListener("resize", () => { try { fit.fit(); } catch(e){} });
+
+ const scheme = location.protocol === "https:" ? "wss" : "ws";
+ const ws = new WebSocket(`${scheme}://${location.host}/console/{{.Session.ID}}/serial/ws`, "binary");
+ ws.binaryType = "arraybuffer";
+ const enc = new TextEncoder();
+
+ ws.onopen = () => { status.textContent = "connected — press Enter"; term.focus();
+   // nudge the getty so a login prompt appears on a quiet line
+   try { ws.send(enc.encode("\r")); } catch(e){} };
+ ws.onmessage = (ev) => { term.write(new Uint8Array(ev.data)); };
+ ws.onclose = () => { status.textContent = "disconnected"; term.write("\r\n[serial console closed]\r\n"); };
+ ws.onerror = () => { status.textContent = "connection error — is the VM running (and restarted since serial was enabled)?"; };
+
+ // browser → guest
+ term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+
+ document.getElementById("k-enter").onclick  = () => { ws.readyState===1 && ws.send(enc.encode("\r")); term.focus(); };
+ document.getElementById("k-ctrlc").onclick  = () => { ws.readyState===1 && ws.send(enc.encode("\x03")); term.focus(); };
+ document.getElementById("k-clear").onclick  = () => { term.clear(); term.focus(); };
+</script></body></html>{{end}}

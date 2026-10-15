@@ -8,6 +8,12 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -563,6 +569,76 @@ ALTER TABLE sessions ADD COLUMN spice_port INTEGER NOT NULL DEFAULT 0;
 -- Disk backend: qcow2 file (default) or a raw ZFS zvol block device.
 ALTER TABLE sessions ADD COLUMN disk_backend TEXT NOT NULL DEFAULT 'qcow2'; -- qcow2|zvol
 `},
+	{21, "storage-overlay", `
+-- VXLAN storage overlays: a shared L2 for storage traffic over an existing
+-- underlay, so storage works when nodes are not on the same physical segment.
+CREATE TABLE IF NOT EXISTS storage_overlays (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL UNIQUE,        -- overlay iface name
+  vni          INTEGER NOT NULL,
+  underlay_dev TEXT NOT NULL,               -- device the UDP rides over
+  local_ip     TEXT NOT NULL,               -- underlay source IP
+  overlay_cidr TEXT NOT NULL,               -- this node's overlay address/CIDR
+  dstport      INTEGER NOT NULL DEFAULT 4789,
+  mtu          INTEGER NOT NULL DEFAULT 1450,
+  peers        TEXT NOT NULL DEFAULT '',    -- CSV of peer underlay IPs
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`},
+	{22, "vm-hardware", `
+-- Per-VM hardware knobs. Defaults reproduce the previously-hardcoded launch
+-- exactly (q35 / virtio-blk / virtio-net / qxl / no guest-agent / no TPM /
+-- no secure boot / linux), so existing VMs migrate with byte-identical hardware.
+ALTER TABLE sessions ADD COLUMN machine_type TEXT    NOT NULL DEFAULT 'q35';        -- q35|pc
+ALTER TABLE sessions ADD COLUMN disk_bus     TEXT    NOT NULL DEFAULT 'virtio-blk';  -- virtio-blk|virtio-scsi|sata
+ALTER TABLE sessions ADD COLUMN nic_model    TEXT    NOT NULL DEFAULT 'virtio';      -- virtio|e1000e|rtl8139
+ALTER TABLE sessions ADD COLUMN vga          TEXT    NOT NULL DEFAULT 'qxl';         -- qxl|virtio|std
+ALTER TABLE sessions ADD COLUMN guest_agent  INTEGER NOT NULL DEFAULT 0;             -- 0/1 qemu-guest-agent channel
+ALTER TABLE sessions ADD COLUMN tpm          INTEGER NOT NULL DEFAULT 0;             -- 0/1 swtpm TPM 2.0
+ALTER TABLE sessions ADD COLUMN secureboot   INTEGER NOT NULL DEFAULT 0;             -- 0/1 UEFI Secure Boot (MS keys)
+ALTER TABLE sessions ADD COLUMN os_type      TEXT    NOT NULL DEFAULT 'linux';       -- linux|windows
+`},
+	{23, "storage-vmotion", `
+-- Persisted storage-vMotion state machine. The invariant is that the VM is
+-- always recoverable from the UNTOUCHED source until a move is durably
+-- committed; these columns let a crash/restart recover safely (never auto-start
+-- on a half-written target; keep the source until an explicit reclaim).
+ALTER TABLE sessions ADD COLUMN migration_state TEXT NOT NULL DEFAULT 'idle';  -- idle|offline|mirroring|pivoting
+ALTER TABLE sessions ADD COLUMN mig_target_path TEXT NOT NULL DEFAULT '';      -- disk being written during a move
+ALTER TABLE sessions ADD COLUMN mig_source_path TEXT NOT NULL DEFAULT '';      -- retained pre-move source (for rollback/reclaim)
+`},
+	{24, "vxlan-networks", `
+-- First-class VXLAN VM networks: each network is its own L2 overlay segment with
+-- its own VNI/underlay/peers (not the single cluster-wide overlay). VMs attach to
+-- a per-network bridge. These columns are empty for non-VXLAN networks.
+ALTER TABLE networks ADD COLUMN vni           INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE networks ADD COLUMN underlay      TEXT    NOT NULL DEFAULT '';   -- underlay NIC carrying the UDP
+ALTER TABLE networks ADD COLUMN vxlan_local   TEXT    NOT NULL DEFAULT '';   -- underlay source IP (optional)
+ALTER TABLE networks ADD COLUMN vxlan_peers   TEXT    NOT NULL DEFAULT '';   -- CSV of peer underlay IPs (head-end replication)
+ALTER TABLE networks ADD COLUMN vxlan_dstport INTEGER NOT NULL DEFAULT 4789;
+ALTER TABLE networks ADD COLUMN vxlan_mtu     INTEGER NOT NULL DEFAULT 1450;
+`},
+	{25, "ad-identity", `
+-- Active Directory / LDAP identity mapping for JIT-provisioned users.
+ALTER TABLE users ADD COLUMN ad_dn TEXT;
+`},
+	{26, "published-apps", `
+-- VDI published-app library: apps an admin publishes to the end-user portal.
+-- kind 'desktop' = full desktop from a pool; 'remoteapp' = a single Windows
+-- RemoteApp (seamless) from a pool VM; 'web' = a link tile (throwaway browser
+-- target), no VM. Pool apps inherit the pool's per-user grants.
+CREATE TABLE IF NOT EXISTS published_apps (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  org_id     INTEGER NOT NULL,
+  pool_id    INTEGER NOT NULL DEFAULT 0,          -- backing VDI pool (0 for web)
+  name       TEXT    NOT NULL,
+  kind       TEXT    NOT NULL DEFAULT 'desktop',  -- desktop|remoteapp|web
+  target     TEXT    NOT NULL DEFAULT '',         -- web: URL; remoteapp: program/|| alias
+  args       TEXT    NOT NULL DEFAULT '',         -- remoteapp arguments
+  icon       TEXT    NOT NULL DEFAULT '',         -- short glyph/label for the tile
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.
@@ -572,7 +648,12 @@ ALTER TABLE sessions ADD COLUMN disk_backend TEXT NOT NULL DEFAULT 'qcow2'; -- q
 // connection interleave reads and writes efficiently. (A separate read pool can
 // be split out later if read throughput becomes a concern.)
 func Open(path string) (*DB, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	// synchronous(FULL) + WAL: writes are fsynced before the txn reports success,
+	// so a power cut can't lose a committed transaction (the durability the
+	// storage-vMotion commit relies on). busy_timeout avoids "database is locked"
+	// under the background workers; the pool is a single connection (writes
+	// serialize in SQLite anyway).
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=wal_autocheckpoint(1000)&_txlock=immediate"
 	sqldb, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -586,6 +667,178 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// OpenResilient opens the control-plane DB with self-healing. It:
+//  1. opens path and runs PRAGMA quick_check;
+//  2. if the file is unopenable or fails integrity, quarantines it and restores
+//     the newest VERIFIED backup from backupDir;
+//  3. if no good backup exists, starts a FRESH database.
+//
+// In every branch it NEVER touches VM disks or QEMU processes — a broken control
+// plane must not disrupt running VMs, which are re-adopted separately on boot.
+// It is the entrypoint the daemon uses; plain Open stays for tools/tests.
+func OpenResilient(path, backupDir string) (*DB, error) {
+	if d, err := Open(path); err == nil {
+		if qc := d.quickCheck(); qc == nil {
+			return d, nil
+		} else {
+			log.Printf("db: integrity check FAILED on %s: %v — attempting self-heal", path, qc)
+			_ = d.Close()
+		}
+	} else {
+		log.Printf("db: could not open %s: %v — attempting self-heal", path, err)
+	}
+
+	quarantine(path) // keep the bad file (+WAL/SHM) aside for forensics
+
+	if bak := newestGoodBackup(backupDir); bak != "" {
+		if err := copyFile(bak, path); err == nil {
+			if d, err := Open(path); err == nil && d.quickCheck() == nil {
+				log.Printf("db: RESTORED control plane from verified backup %s", bak)
+				return d, nil
+			} else if d != nil {
+				_ = d.Close()
+			}
+		}
+		log.Printf("db: restore from %s did not verify — falling back to a fresh database", bak)
+		quarantine(path)
+	}
+
+	log.Printf("db: no usable backup — starting a FRESH control-plane database (running VMs are unaffected and will be re-adopted on boot)")
+	d, err := Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("db: unrecoverable: %w", err)
+	}
+	return d, nil
+}
+
+// quickCheck runs PRAGMA quick_check (cheaper than integrity_check) and returns
+// an error unless it reports "ok".
+func (d *DB) quickCheck() error {
+	var res string
+	if err := d.QueryRow(`PRAGMA quick_check`).Scan(&res); err != nil {
+		return err
+	}
+	if res != "ok" {
+		return fmt.Errorf("quick_check: %s", res)
+	}
+	return nil
+}
+
+// Backup writes a consistent, VERIFIED snapshot of the DB to dir via VACUUM INTO
+// and returns its path. A snapshot that fails its own integrity check is deleted
+// and an error returned, so we never keep a backup we couldn't restore.
+func (d *DB) Backup(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", err
+	}
+	// VACUUM INTO refuses to write to a path that already exists ("output file
+	// already exists"), so we target a UNIQUE temp (pid+nanoseconds) that we also
+	// clear first, verify it, then atomically rename into the final timestamped
+	// name. This fixes repeated backup failures when a target name collided (e.g.
+	// two snapshots landing in the same clock second after a restart), and means a
+	// reader never sees a half-written snapshot.
+	now := time.Now().UTC()
+	tmp := filepath.Join(dir, fmt.Sprintf(".controlplane-%d-%d.tmp", os.Getpid(), now.UnixNano()))
+	_ = os.Remove(tmp)
+	if _, err := d.Exec(`VACUUM INTO ?`, tmp); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if !verifyDBFile(tmp) {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("backup failed verification")
+	}
+	dest := filepath.Join(dir, "controlplane-"+now.Format("20060102T150405.000")+".db")
+	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return dest, nil
+}
+
+// PruneBackups keeps the newest `keep` controlplane-*.db snapshots in dir and
+// removes older ones (best effort).
+func PruneBackups(dir string, keep int) {
+	baks := listBackups(dir)
+	for i := 0; i+keep < len(baks); i++ {
+		_ = os.Remove(baks[i])
+	}
+}
+
+// listBackups returns controlplane-*.db paths in dir sorted OLDEST→newest (the
+// timestamped names sort lexicographically in chronological order).
+func listBackups(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	m, _ := filepath.Glob(filepath.Join(dir, "controlplane-*.db"))
+	sort.Strings(m)
+	return m
+}
+
+// newestGoodBackup returns the newest backup that passes integrity verification,
+// scanning newest→oldest, or "" if none.
+func newestGoodBackup(dir string) string {
+	baks := listBackups(dir)
+	for i := len(baks) - 1; i >= 0; i-- {
+		if verifyDBFile(baks[i]) {
+			return baks[i]
+		}
+		log.Printf("db: backup %s failed verification, trying older", baks[i])
+	}
+	return ""
+}
+
+// verifyDBFile opens a DB file READ-ONLY (no migrations, no writes) and runs
+// quick_check. Used to vet backups before trusting them.
+func verifyDBFile(file string) bool {
+	if _, err := os.Stat(file); err != nil {
+		return false
+	}
+	ro, err := sql.Open("sqlite", file+"?_pragma=query_only(1)&_txlock=deferred")
+	if err != nil {
+		return false
+	}
+	defer ro.Close()
+	ro.SetMaxOpenConns(1)
+	var res string
+	if err := ro.QueryRow(`PRAGMA quick_check`).Scan(&res); err != nil {
+		return false
+	}
+	return res == "ok"
+}
+
+// quarantine renames a (corrupt) DB file and its WAL/SHM sidecars aside with a
+// timestamp, so the file is preserved for inspection but out of the way.
+func quarantine(path string) {
+	suffix := ".corrupt-" + time.Now().UTC().Format("20060102T150405")
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Rename(p, p+suffix)
+		}
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func (d *DB) migrate() error {

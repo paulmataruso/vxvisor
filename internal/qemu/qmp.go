@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -37,7 +38,20 @@ func DialQMP(socketPath string) (*QMP, error) {
 
 func (q *QMP) Close() error { return q.conn.Close() }
 
+// Quit terminates the QEMU process via QMP (used to tear down the paused source
+// after a completed live migration).
+func (q *QMP) Quit() error {
+	_, err := q.Execute("quit", nil)
+	return err
+}
+
 func (q *QMP) run(cmd map[string]any) (json.RawMessage, error) {
+	// Fresh per-command deadline. The connection is reused across many commands —
+	// a migration holds ONE QMP connection for minutes, polling progress — so a
+	// single fixed deadline set at dial time would expire mid-operation and break
+	// the socket (write: broken pipe). Resetting here bounds each command while
+	// keeping a long-lived polling connection healthy indefinitely.
+	_ = q.conn.SetDeadline(time.Now().Add(30 * time.Second))
 	b, _ := json.Marshal(cmd)
 	if _, err := q.conn.Write(append(b, '\n')); err != nil {
 		return nil, err
@@ -152,14 +166,18 @@ func QMPSnapshotSave(socket, tag string) error {
 
 // Migrate begins streaming this VM's live state to uri (e.g. tcp:HOST:PORT).
 // The call returns as soon as migration starts; progress is polled separately
-// with QueryMigrate. Optional tuning enables live block migration (copy the disk
-// inline) when the cluster has no shared storage.
+// with QueryMigrate.
+//
+// NOTE: the legacy inline block-migration parameters (`blk`/`inc`) were deprecated
+// in QEMU 8.2 and REMOVED in 9.1, so they are not sent here — passing them makes
+// modern QEMU reject the command. Diskless (no-shared-storage) migration now
+// requires a blockdev-mirror/NBD dance, which is not implemented yet; until then
+// live migration needs shared storage, and withBlock is refused with a clear error.
 func (q *QMP) Migrate(uri string, withBlock bool) error {
-	args := map[string]any{"uri": uri}
 	if withBlock {
-		args["blk"] = true
+		return fmt.Errorf("inline block migration is unsupported on this QEMU (blk/inc removed in 9.1); configure shared storage for live migration")
 	}
-	_, err := q.Execute("migrate", args)
+	_, err := q.Execute("migrate", map[string]any{"uri": uri})
 	return err
 }
 
@@ -167,6 +185,7 @@ func (q *QMP) Migrate(uri string, withBlock bool) error {
 type MigrateStatus struct {
 	Status    string `json:"status"` // setup|active|completed|failed|cancelled
 	Remaining int64  // bytes of RAM still to transfer
+	Total     int64  // total bytes of RAM to transfer (0 until QEMU reports it)
 }
 
 // QueryMigrate reports migration progress.
@@ -179,10 +198,11 @@ func (q *QMP) QueryMigrate() (MigrateStatus, error) {
 		Status string `json:"status"`
 		RAM    struct {
 			Remaining int64 `json:"remaining"`
+			Total     int64 `json:"total"`
 		} `json:"ram"`
 	}
 	_ = json.Unmarshal(res, &raw)
-	return MigrateStatus{Status: raw.Status, Remaining: raw.RAM.Remaining}, nil
+	return MigrateStatus{Status: raw.Status, Remaining: raw.RAM.Remaining, Total: raw.RAM.Total}, nil
 }
 
 // SetMigrateCapabilities toggles migration capabilities (e.g. auto-converge,
@@ -204,5 +224,233 @@ func QMPSnapshotDelete(socket, tag string) error {
 	}
 	defer q.Close()
 	_, err = q.hmp("delvm " + tag)
+	return err
+}
+
+// ---- block jobs (storage vMotion) ----------------------------------------
+//
+// drive-mirror copies a live disk to a new target while the guest keeps running
+// on the SOURCE; writes are mirrored to the target. The source is never modified
+// by the mirror, so a cancel before pivot is always safe. Once the job reports
+// `ready`, block-job-complete pivots the guest onto the target.
+
+// DriveMirror starts mirroring `device` (e.g. "disk0") to `target`. For a brand
+// new qcow2 file use mode="absolute-paths" (QEMU creates it) + format="qcow2";
+// for a pre-created raw target (zvol) use mode="existing" + format="raw". Both
+// error modes are "report" so a target failure fails the JOB, never the guest.
+func (q *QMP) DriveMirror(device, target, format, mode string) error {
+	args := map[string]any{
+		"device":          device,
+		"target":          target,
+		"sync":            "full",
+		"mode":            mode,
+		"on-source-error": "report",
+		"on-target-error": "report",
+	}
+	if format != "" {
+		args["format"] = format
+	}
+	_, err := q.Execute("drive-mirror", args)
+	return err
+}
+
+type blockJob struct {
+	Device string `json:"device"`
+	Type   string `json:"type"`
+	Ready  bool   `json:"ready"`
+	Len    int64  `json:"len"`
+	Offset int64  `json:"offset"`
+	// Status is the job's lifecycle state (running|ready|aborting|concluded|…) and
+	// Error is set when a job failed with on-*-error=report. Parsing these lets the
+	// poll loop abort promptly on a mirror failure instead of waiting out a
+	// deadline (a failed job stays PRESENT and not-ready until dismissed).
+	Status string `json:"status"`
+	Error  string `json:"error"`
+}
+
+// BlockJobs returns the active block jobs.
+func (q *QMP) BlockJobs() ([]blockJob, error) {
+	res, err := q.Execute("query-block-jobs", nil)
+	if err != nil {
+		return nil, err
+	}
+	var jobs []blockJob
+	_ = json.Unmarshal(res, &jobs)
+	return jobs, nil
+}
+
+// BlockJobProgress returns (ready, offset, len) for device's mirror job. present
+// is false when no job exists for the device (completed/never started).
+func (q *QMP) BlockJobProgress(device string) (ready bool, offset, length int64, present bool, err error) {
+	jobs, err := q.BlockJobs()
+	if err != nil {
+		return false, 0, 0, false, err
+	}
+	for _, j := range jobs {
+		if j.Device == device {
+			return j.Ready, j.Offset, j.Len, true, nil
+		}
+	}
+	return false, 0, 0, false, nil
+}
+
+// BlockJobFailed reports whether device's job has errored or concluded
+// abnormally (so a poll loop can abort at once). ok is false if no such job.
+func (q *QMP) BlockJobFailed(device string) (failed bool, reason string, ok bool) {
+	jobs, err := q.BlockJobs()
+	if err != nil {
+		return false, "", false
+	}
+	for _, j := range jobs {
+		if j.Device == device {
+			if j.Error != "" {
+				return true, j.Error, true
+			}
+			switch j.Status {
+			case "aborting", "concluded":
+				return true, j.Status, true
+			}
+			return false, "", true
+		}
+	}
+	return false, "", false
+}
+
+// BlockJobComplete pivots the guest onto the mirror target (the job must be
+// ready). After this the guest writes only to the target.
+func (q *QMP) BlockJobComplete(device string) error {
+	_, err := q.Execute("block-job-complete", map[string]any{"device": device})
+	return err
+}
+
+// BlockJobCancel aborts a mirror. Before pivot this leaves the guest on the
+// untouched source; the (partial) target should then be deleted by the caller.
+func (q *QMP) BlockJobCancel(device string) error {
+	_, err := q.Execute("block-job-cancel", map[string]any{"device": device})
+	return err
+}
+
+// InsertedFile returns the backing file currently inserted for a -drive id, via
+// query-block. Used to verify a pivot actually landed on the target.
+func (q *QMP) InsertedFile(device string) (string, error) {
+	res, err := q.Execute("query-block", nil)
+	if err != nil {
+		return "", err
+	}
+	var devs []struct {
+		Device string `json:"device"`
+		Inserted struct {
+			File string `json:"file"`
+		} `json:"inserted"`
+	}
+	_ = json.Unmarshal(res, &devs)
+	for _, d := range devs {
+		if d.Device == device {
+			return d.Inserted.File, nil
+		}
+	}
+	return "", nil
+}
+
+// ---- cross-host block-live migration (NBD + drive-mirror) -----------------
+
+// BlockNodeName returns the top (format) node-name currently inserted for a
+// -drive id, via query-block. The destination needs this to export the disk over
+// NBD (block-export-add targets a node-name, not a drive id).
+func (q *QMP) BlockNodeName(device string) (string, error) {
+	res, err := q.Execute("query-block", nil)
+	if err != nil {
+		return "", err
+	}
+	var devs []struct {
+		Device   string `json:"device"`
+		Inserted struct {
+			NodeName string `json:"node-name"`
+		} `json:"inserted"`
+	}
+	_ = json.Unmarshal(res, &devs)
+	for _, d := range devs {
+		if d.Device == device {
+			return d.Inserted.NodeName, nil
+		}
+	}
+	return "", fmt.Errorf("no block node for device %q", device)
+}
+
+// NBDServerStart starts the built-in NBD server bound to a SPECIFIC host:port
+// (the cluster NIC — never 0.0.0.0/:: and never the mgmt NIC).
+func (q *QMP) NBDServerStart(host string, port int) error {
+	_, err := q.Execute("nbd-server-start", map[string]any{
+		"addr": map[string]any{
+			"type": "inet",
+			"data": map[string]any{"host": host, "port": strconv.Itoa(port)},
+		},
+	})
+	return err
+}
+
+// BlockExportAddNBD exports nodeName over NBD as exportName, writable (so the
+// source mirror can write it). Leaving allow-inactive unset ACTIVATES the node,
+// which is required for the write-ready export during an incoming migration.
+func (q *QMP) BlockExportAddNBD(id, nodeName, exportName string) error {
+	_, err := q.Execute("block-export-add", map[string]any{
+		"type":      "nbd",
+		"id":        id,
+		"node-name": nodeName,
+		"name":      exportName,
+		"writable":  true,
+	})
+	return err
+}
+
+// BlockExportDel removes an NBD export by id (done at pre-switchover, before the
+// destination resumes, so a lingering writable export can't block activation).
+func (q *QMP) BlockExportDel(id string) error {
+	_, err := q.Execute("block-export-del", map[string]any{"id": id})
+	return err
+}
+
+// NBDServerStop stops the built-in NBD server.
+func (q *QMP) NBDServerStop() error { _, err := q.Execute("nbd-server-stop", nil); return err }
+
+// DriveMirrorJob is DriveMirror with an explicit job-id so the job can be
+// referenced (cancel/query) unambiguously during the cross-host dance.
+func (q *QMP) DriveMirrorJob(jobID, device, target, format, mode string) error {
+	args := map[string]any{
+		"job-id":          jobID,
+		"device":          device,
+		"target":          target,
+		"sync":            "full",
+		"mode":            mode,
+		"on-source-error": "report",
+		"on-target-error": "report",
+	}
+	if format != "" {
+		args["format"] = format
+	}
+	_, err := q.Execute("drive-mirror", args)
+	return err
+}
+
+// MigrateContinue advances a migration paused at `state` (e.g. "pre-switchover")
+// to its next phase.
+func (q *QMP) MigrateContinue(state string) error {
+	_, err := q.Execute("migrate-continue", map[string]any{"state": state})
+	return err
+}
+
+// MigrateCancel aborts an in-progress outgoing migration.
+func (q *QMP) MigrateCancel() error { _, err := q.Execute("migrate_cancel", nil); return err }
+
+// BlockdevSetActive (re)activates or inactivates block nodes. After a migration
+// reaches switchover the source's disks are inactivated; reviving the source
+// requires reactivating them (active=true) BEFORE `cont`. nodeName "" targets all
+// nodes. Available since QEMU 10.0.
+func (q *QMP) BlockdevSetActive(nodeName string, active bool) error {
+	args := map[string]any{"active": active}
+	if nodeName != "" {
+		args["node-name"] = nodeName
+	}
+	_, err := q.Execute("blockdev-set-active", args)
 	return err
 }

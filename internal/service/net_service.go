@@ -2,6 +2,10 @@ package service
 
 import (
 	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"strings"
 
 	"vdxclone/internal/netdrv"
 )
@@ -29,6 +33,19 @@ func (s *Service) CreateNetwork(p *Principal, n netdrv.Network, ip string) (int6
 	if err != nil {
 		return 0, err
 	}
+	// A first-class VXLAN network gets its own L2 segment: a per-network bridge
+	// (keyed on the row id, so no collision with the cluster overlay or other
+	// VXLAN nets) that VMs attach to, persisted via a systemd unit for reboot.
+	if n.Mode == "vxlan" {
+		if err := s.realizeVXLANNetwork(id, n); err != nil {
+			// Roll back cleanly: tear down any devices/unit the partial realize
+			// created, then drop the row — never leak a half-built segment.
+			netdrv.TeardownVNINetwork(id)
+			_ = os.Remove(vxlanNetUnitPath(id))
+			_ = s.net.DeleteNetwork(p.OrgID, id)
+			return 0, err
+		}
+	}
 	// If this port group is on a vSwitch with a VLAN, carry that VLAN tagged on
 	// the vSwitch's uplink trunk so the port group reaches the physical network.
 	if n.Bridge != "" && n.VLANID > 0 {
@@ -36,13 +53,62 @@ func (s *Service) CreateNetwork(p *Principal, n netdrv.Network, ip string) (int6
 			_ = netdrv.AddTrunkVlan(vs.Uplink, n.VLANID)
 		}
 	}
-	s.audit(p, p.OrgID, "network.create", "network", fmt.Sprint(id), ip, map[string]any{"name": n.Name, "mode": n.Mode, "vlan": n.VLANID})
+	s.audit(p, p.OrgID, "network.create", "network", fmt.Sprint(id), ip, map[string]any{"name": n.Name, "mode": n.Mode, "vlan": n.VLANID, "vni": n.VNI})
 	return id, nil
+}
+
+func vxlanNetUnitPath(id int64) string {
+	return fmt.Sprintf("/etc/systemd/system/vdx-net-%d.service", id)
+}
+
+// realizeVXLANNetwork builds the segment now and persists it via systemd. The
+// per-network bridge name is recorded back onto the row so VM taps enslave to it.
+func (s *Service) realizeVXLANNetwork(id int64, n netdrv.Network) error {
+	peers := splitCSV(n.VXLANPeers)
+	gwCIDR := ""
+	if n.Gateway != "" && n.CIDR != "" {
+		if _, ipnet, err := net.ParseCIDR(n.CIDR); err == nil {
+			ones, _ := ipnet.Mask.Size()
+			gwCIDR = fmt.Sprintf("%s/%d", n.Gateway, ones)
+		}
+	}
+	bridge, _ := netdrv.VNINetworkNames(id)
+	if err := netdrv.EnsureVNINetwork(id, n.Underlay, n.VXLANLocal, n.VNI, n.DstPort, n.MTU, peers, gwCIDR); err != nil {
+		return err
+	}
+	if err := s.net.SetNetworkBridge(id, bridge); err != nil {
+		return err
+	}
+	// Persist (best effort — the runtime segment already exists).
+	unit := netdrv.RenderVNINetworkUnit(id, n.Underlay, n.VXLANLocal, n.VNI, n.DstPort, n.MTU, peers, gwCIDR)
+	if err := os.WriteFile(vxlanNetUnitPath(id), []byte(unit), 0o644); err == nil {
+		_ = exec.Command("systemctl", "daemon-reload").Run()
+		_ = exec.Command("systemctl", "enable", fmt.Sprintf("vdx-net-%d.service", id)).Run()
+	}
+	return nil
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Service) DeleteNetwork(p *Principal, id int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
+	}
+	// Tear down a VXLAN network's segment + its systemd unit before dropping the
+	// row (best effort; order so a failure still removes the record).
+	if n, err := s.net.GetNetwork(p.OrgID, id); err == nil && n.Mode == "vxlan" {
+		netdrv.TeardownVNINetwork(id)
+		_ = os.Remove(vxlanNetUnitPath(id))
+		_ = exec.Command("systemctl", "disable", fmt.Sprintf("vdx-net-%d.service", id)).Run()
+		_ = exec.Command("systemctl", "daemon-reload").Run()
 	}
 	if err := s.net.DeleteNetwork(p.OrgID, id); err != nil {
 		return err

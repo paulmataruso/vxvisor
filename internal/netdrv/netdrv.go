@@ -124,29 +124,57 @@ type Network struct {
 	Gateway   string
 	PoolStart string
 	PoolEnd   string
+	// VXLAN segment params (mode=="vxlan"; zero/empty otherwise).
+	VNI       int
+	Underlay  string
+	VXLANLocal string
+	VXLANPeers string
+	DstPort   int
+	MTU       int
 	CreatedAt string
 }
 
+const netCols = `id,org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end,
+	COALESCE(vni,0),COALESCE(underlay,''),COALESCE(vxlan_local,''),COALESCE(vxlan_peers,''),COALESCE(vxlan_dstport,4789),COALESCE(vxlan_mtu,1450),created_at`
+
+func scanNetwork(sc interface{ Scan(...any) error }) (Network, error) {
+	var n Network
+	err := sc.Scan(&n.ID, &n.OrgID, &n.Name, &n.Mode, &n.Bridge, &n.VLANID, &n.CIDR, &n.Gateway, &n.PoolStart, &n.PoolEnd,
+		&n.VNI, &n.Underlay, &n.VXLANLocal, &n.VXLANPeers, &n.DstPort, &n.MTU, &n.CreatedAt)
+	return n, err
+}
+
 func (s *Store) CreateNetwork(n Network) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO networks(org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end)
-		VALUES(?,?,?,?,?,?,?,?,?)`, n.OrgID, n.Name, n.Mode, n.Bridge, n.VLANID, n.CIDR, n.Gateway, n.PoolStart, n.PoolEnd)
+	res, err := s.db.Exec(`INSERT INTO networks(org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end,
+		vni,underlay,vxlan_local,vxlan_peers,vxlan_dstport,vxlan_mtu)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, n.OrgID, n.Name, n.Mode, n.Bridge, n.VLANID, n.CIDR, n.Gateway, n.PoolStart, n.PoolEnd,
+		n.VNI, n.Underlay, n.VXLANLocal, n.VXLANPeers, defPort(n.DstPort), defMTU(n.MTU))
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
+func defPort(p int) int { if p <= 0 { return 4789 }; return p }
+func defMTU(m int) int  { if m <= 0 { return 1450 }; return m }
+
+// SetNetworkBridge records the realized bridge name for a network (VXLAN nets
+// learn their per-network bridge name only after the row id is assigned).
+func (s *Store) SetNetworkBridge(id int64, bridge string) error {
+	_, err := s.db.Exec(`UPDATE networks SET bridge=? WHERE id=?`, bridge, id)
+	return err
+}
+
 func (s *Store) ListNetworks(orgID int64) ([]Network, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end,created_at
-		FROM networks WHERE org_id=? ORDER BY name`, orgID)
+	rows, err := s.db.Query(`SELECT `+netCols+` FROM networks WHERE org_id=? ORDER BY name`, orgID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Network
 	for rows.Next() {
-		var n Network
-		if err := rows.Scan(&n.ID, &n.OrgID, &n.Name, &n.Mode, &n.Bridge, &n.VLANID, &n.CIDR, &n.Gateway, &n.PoolStart, &n.PoolEnd, &n.CreatedAt); err != nil {
+		n, err := scanNetwork(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -155,11 +183,7 @@ func (s *Store) ListNetworks(orgID int64) ([]Network, error) {
 }
 
 func (s *Store) GetNetwork(orgID, id int64) (Network, error) {
-	var n Network
-	err := s.db.QueryRow(`SELECT id,org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end,created_at
-		FROM networks WHERE id=? AND org_id=?`, id, orgID).
-		Scan(&n.ID, &n.OrgID, &n.Name, &n.Mode, &n.Bridge, &n.VLANID, &n.CIDR, &n.Gateway, &n.PoolStart, &n.PoolEnd, &n.CreatedAt)
-	return n, err
+	return scanNetwork(s.db.QueryRow(`SELECT `+netCols+` FROM networks WHERE id=? AND org_id=?`, id, orgID))
 }
 
 func (s *Store) DeleteNetwork(orgID, id int64) error {

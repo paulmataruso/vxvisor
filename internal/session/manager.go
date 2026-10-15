@@ -4,9 +4,13 @@ package session
 import (
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -62,25 +66,38 @@ type Session struct {
 	Display      string // vnc | spice
 	SPICEPort    int    // loopback SPICE port when display=spice (0 otherwise)
 	DiskBackend  string // qcow2 | zvol
+	MachineType  string // q35 | pc
+	DiskBus      string // virtio-blk | virtio-scsi | sata
+	NICModel     string // virtio | e1000e | rtl8139
+	VGA          string // qxl | virtio | std
+	GuestAgent   bool   // qemu-guest-agent virtio-serial channel
+	TPM          bool   // swtpm TPM 2.0 device
+	SecureBoot   bool   // UEFI Secure Boot (MS-keyed OVMF)
+	OSType       string // linux | windows
 	CreatedAt    string
 }
 
 // sessionCols is the canonical column list/scan order for a session row.
 const sessionCols = `id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,
 	COALESCE(boot_iso_id,0),mac,cpus,memory_mb,disk_gb,state,pid,vnc_port,ws_port,vnc_password,qmp_socket,
-	cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,COALESCE(pool_id,0),COALESCE(network_id,0),COALESCE(display,'vnc'),COALESCE(spice_port,0),COALESCE(disk_backend,'qcow2'),created_at`
+	cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,COALESCE(pool_id,0),COALESCE(network_id,0),COALESCE(display,'vnc'),COALESCE(spice_port,0),COALESCE(disk_backend,'qcow2'),
+	COALESCE(machine_type,'q35'),COALESCE(disk_bus,'virtio-blk'),COALESCE(nic_model,'virtio'),COALESCE(vga,'qxl'),COALESCE(guest_agent,0),COALESCE(tpm,0),COALESCE(secureboot,0),COALESCE(os_type,'linux'),created_at`
 
 func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	var s Session
-	var ci int
+	var ci, ga, tpmI, sbI int
 	err := sc.Scan(&s.ID, &s.Name, &s.OrgID, &s.OwnerID, &s.ImageName, &s.DiskPath, &s.Kind,
 		&s.Firmware, &s.OVMFVarsPath, &s.BootISOID, &s.MAC, &s.CPUs, &s.MemoryMB, &s.DiskGB, &s.State, &s.PID,
 		&s.VNCPort, &s.WSPort, &s.VNCPassword, &s.QMPSocket,
-		&ci, &s.CIUsername, &s.CIPassword, &s.CISSHKey, &s.SeedPath, &s.Passthrough, &s.PoolID, &s.NetworkID, &s.Display, &s.SPICEPort, &s.DiskBackend, &s.CreatedAt)
+		&ci, &s.CIUsername, &s.CIPassword, &s.CISSHKey, &s.SeedPath, &s.Passthrough, &s.PoolID, &s.NetworkID, &s.Display, &s.SPICEPort, &s.DiskBackend,
+		&s.MachineType, &s.DiskBus, &s.NICModel, &s.VGA, &ga, &tpmI, &sbI, &s.OSType, &s.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	s.CloudInit = ci != 0
+	s.GuestAgent = ga != 0
+	s.TPM = tpmI != 0
+	s.SecureBoot = sbI != 0
 	return &s, nil
 }
 
@@ -88,10 +105,27 @@ type Manager struct {
 	cfg *config.Config
 	db  *db.DB
 	mu  sync.Mutex // serializes port allocation + launch
+	// incoming tracks migration-receiver QEMU processes between LaunchReceiver and
+	// the migrate commit/abort, keyed by session id, so the destination can record
+	// the real pid in its DB when it adopts the migrated VM.
+	incomingMu sync.Mutex
+	incoming   map[string]*os.Process
+	// coldStaged tracks files written on the destination for an in-flight COLD
+	// migration (keyed by session id) so an aborted copy can be cleaned up exactly,
+	// without globbing.
+	coldMu     sync.Mutex
+	coldStaged map[string][]string
+	// blockExport/blockTarget track an in-flight block-live (NBD) migration receiver
+	// on the destination: the NBD export to tear down and the dest-local target disk
+	// (removed on abort, and recorded as the adopted VM's disk_path on commit).
+	blockMu     sync.Mutex
+	blockExport map[string]blockExportRec
+	blockTarget map[string]string
 }
 
 func NewManager(cfg *config.Config, d *db.DB) *Manager {
-	return &Manager{cfg: cfg, db: d}
+	return &Manager{cfg: cfg, db: d, incoming: map[string]*os.Process{},
+		coldStaged: map[string][]string{}, blockExport: map[string]blockExportRec{}, blockTarget: map[string]string{}}
 }
 
 // CreateOpts describes a new instance. It is a struct rather than a long
@@ -116,6 +150,14 @@ type CreateOpts struct {
 	DiskBackend    string // qcow2 | zvol
 	ZvolPool       string // ZFS pool/dataset name to create the zvol under (zvol backend)
 	Desktop        string // "" | xfce (cloud-init installs a lightweight desktop)
+	MachineType    string // q35|pc (default q35)
+	DiskBus        string // virtio-blk|virtio-scsi|sata (default virtio-blk, or sata for windows)
+	NICModel       string // virtio|e1000e|rtl8139 (default virtio, or e1000e for windows)
+	VGA            string // qxl|virtio|std (default qxl, or std for windows)
+	GuestAgent     bool   // add the qemu-guest-agent channel
+	TPM            bool   // attach a swtpm TPM 2.0 device
+	SecureBoot     bool   // UEFI Secure Boot (MS-keyed OVMF pair)
+	OSType         string // linux|windows (drives sensible hardware defaults)
 }
 
 // Create provisions a new session (overlay disk, firmware NVRAM, cloud-init seed
@@ -247,6 +289,12 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	var varsPath string
 	if o.Firmware == "uefi" {
 		_, varsTmpl, _ := qemu.OVMF()
+		// Secure Boot needs the MS-keyed vars template (ships the MS KEK/db).
+		if o.SecureBoot {
+			if _, msTmpl, ok := qemu.OVMFSecure(); ok {
+				varsTmpl = msTmpl
+			}
+		}
 		varsPath = filepath.Join(m.cfg.Paths.DiskDir, id+".ovmf_vars.fd")
 		if err := qemu.PrepareUEFIVars(varsTmpl, varsPath); err != nil {
 			return fail(err)
@@ -287,6 +335,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 			InstanceID: id, Hostname: sanitizeHostname(o.Name),
 			Username: o.CIUsername, Password: o.CIPassword, SSHKey: o.CISSHKey,
 			MAC: mac, StaticIP: staticIP, Gateway: gw, InstallRDP: installRDP, Desktop: o.Desktop,
+			InstallGuestAgent: o.GuestAgent,
 		}
 		if err := cloudinit.BuildSeedISO(m.cfg.Paths.DiskDir, seedPath, cfg); err != nil {
 			return fail(err)
@@ -314,16 +363,70 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	if display != "spice" {
 		display = "vnc"
 	}
+	hw := normalizeHardware(o)
+	ga, tpmI, sbI := b2i(hw.GuestAgent), b2i(hw.TPM), b2i(hw.SecureBoot)
 	_, err := m.db.Exec(`INSERT INTO sessions
 		(id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,boot_iso_id,mac,
-		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,network_id,storage_pool_id,display,disk_backend)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'stopped',?,?,?,?,?,?,?,?,?,?)`,
+		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,network_id,storage_pool_id,display,disk_backend,
+		 machine_type,disk_bus,nic_model,vga,guest_agent,tpm,secureboot,os_type)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'stopped',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, o.Name, o.OrgID, o.OwnerID, o.ImageName, disk, o.Kind, o.Firmware, varsPath, bootISO, mac,
-		o.CPUs, o.MemoryMB, o.DiskGB, ci, o.CIUsername, o.CIPassword, o.CISSHKey, seedPath, o.Passthrough, netID, poolID, display, diskBackend)
+		o.CPUs, o.MemoryMB, o.DiskGB, ci, o.CIUsername, o.CIPassword, o.CISSHKey, seedPath, o.Passthrough, netID, poolID, display, diskBackend,
+		hw.MachineType, hw.DiskBus, hw.NICModel, hw.VGA, ga, tpmI, sbI, hw.OSType)
 	if err != nil {
 		return fail(err)
 	}
 	return m.Get(id)
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// hwSpec is the normalized per-VM hardware profile.
+type hwSpec struct {
+	MachineType, DiskBus, NICModel, VGA, OSType string
+	GuestAgent, TPM, SecureBoot                 bool
+}
+
+// normalizeHardware resolves the requested hardware knobs into a valid profile,
+// applying OS-appropriate defaults. Windows guests get installer-friendly
+// defaults (SATA disk + e1000e NIC + std VGA + TPM) so an unattended install
+// "just works" without side-loading virtio drivers; the virtio-win ISO is still
+// mounted so the user can switch to virtio afterwards. Unknown values fall back
+// to the safe default rather than erroring, so the VM always launches.
+func normalizeHardware(o CreateOpts) hwSpec {
+	win := o.OSType == "windows"
+	h := hwSpec{OSType: "linux", GuestAgent: o.GuestAgent, TPM: o.TPM, SecureBoot: o.SecureBoot}
+	if win {
+		h.OSType = "windows"
+	}
+	h.MachineType = pick(o.MachineType, map[string]bool{"q35": true, "pc": true}, "q35")
+	defBus, defNIC, defVGA := "virtio-blk", "virtio", "qxl"
+	if win {
+		defBus, defNIC, defVGA = "sata", "e1000e", "std"
+		h.TPM = true // Win10/11 expect a TPM; harmless for older guests
+	}
+	h.DiskBus = pick(o.DiskBus, map[string]bool{"virtio-blk": true, "virtio-scsi": true, "sata": true}, defBus)
+	h.NICModel = pick(o.NICModel, map[string]bool{"virtio": true, "e1000e": true, "rtl8139": true}, defNIC)
+	h.VGA = pick(o.VGA, map[string]bool{"qxl": true, "virtio": true, "std": true}, defVGA)
+	// A raw zvol can only be driven by a block device, not the AHCI/SATA path we
+	// use for cdrom-style attach; keep virtio-blk for zvol regardless.
+	if o.DiskBackend == "zvol" && h.DiskBus == "sata" {
+		h.DiskBus = "virtio-blk"
+	}
+	return h
+}
+
+// pick returns want if it is in the allowed set, else def.
+func pick(want string, allowed map[string]bool, def string) string {
+	if allowed[want] {
+		return want
+	}
+	return def
 }
 
 // SetBootISO sets (or clears, with isoID<=0) the instance's attached boot ISO.
@@ -387,6 +490,12 @@ func (m *Manager) Start(id string) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// SAFETY: never (re)start a VM that is mid storage-move. Recovery decides
+	// which disk is authoritative first; starting now could boot a half-written
+	// target or diverge from the source.
+	if m.MigrationBusy(id) {
+		return nil, fmt.Errorf("instance is migrating its storage; try again when the move finishes")
+	}
 	s, err := m.Get(id)
 	if err != nil {
 		return nil, err
@@ -401,6 +510,8 @@ func (m *Manager) Start(id string) (*Session, error) {
 	}
 	qmpSock := filepath.Join(m.cfg.Paths.DiskDir, id+".qmp")
 	_ = os.Remove(qmpSock)
+	serialSock := filepath.Join(m.cfg.Paths.DiskDir, id+".serial")
+	_ = os.Remove(serialSock)
 
 	// Per-launch VNC password, written to a 0600 secret file (off the cmdline).
 	pw := randHex(16)
@@ -429,6 +540,35 @@ func (m *Manager) Start(id string) (*Session, error) {
 		Firmware:  s.Firmware,
 		SeedISO:   s.SeedPath,
 		DiskRaw:   s.DiskBackend == "zvol",
+		SerialSock: serialSock,
+		MachineType: s.MachineType,
+		DiskBus:     s.DiskBus,
+		NICModel:    s.NICModel,
+		VGA:         s.VGA,
+		Windows:     s.OSType == "windows",
+		GuestAgent:  s.GuestAgent,
+	}
+	// qemu-guest-agent channel socket (loopback/unix). Removed stale first so the
+	// server socket binds cleanly.
+	if s.GuestAgent {
+		spec.QGASocket = filepath.Join(m.cfg.Paths.DiskDir, id+".qga")
+		_ = os.Remove(spec.QGASocket)
+	}
+	// Windows: attach the virtio-win driver ISO (if present) so virtio devices
+	// and the guest agent can be installed inside the guest.
+	if s.OSType == "windows" {
+		spec.ExtraISO = qemu.VirtioWinISO(m.cfg.Paths.ISODir)
+	}
+	// TPM 2.0: start a per-VM swtpm and attach it. Must be up BEFORE QEMU, which
+	// connects to the socket at launch; failure is fatal to the start so we never
+	// silently boot a Windows 11 guest without its TPM.
+	if s.TPM {
+		tsock, err := m.startSwtpm(id)
+		if err != nil {
+			m.setError(id)
+			return nil, fmt.Errorf("swtpm: %w", err)
+		}
+		spec.TPMSock = tsock
 	}
 	// SPICE display: a loopback SPICE server + qxl, used by the guac desktop
 	// gateway. VNC stays enabled so the plain noVNC console still works too.
@@ -440,6 +580,11 @@ func (m *Manager) Start(id string) (*Session, error) {
 	}
 	if s.Firmware == "uefi" {
 		code, _, ok := qemu.OVMF()
+		if s.SecureBoot {
+			if sc, _, sok := qemu.OVMFSecure(); sok {
+				code, ok = sc, true
+			}
+		}
 		if ok {
 			spec.OVMFCodePath = code
 			spec.OVMFVarsPath = s.OVMFVarsPath
@@ -501,6 +646,7 @@ func (m *Manager) Start(id string) (*Session, error) {
 			spec.RunAsUID, spec.RunAsGID, spec.RunAsGroups = uid, gid, groups
 		}
 	}
+	spec.DiskLockingOff = onCIFS(s.DiskPath) // CIFS: disable image locking (migration)
 	proc, err := qemu.Launch(spec, qemu.LogPath(m.cfg.Paths.DiskDir, id))
 	if err != nil {
 		m.setError(id)
@@ -519,6 +665,9 @@ func (m *Manager) Start(id string) (*Session, error) {
 // Stop gracefully powers down a running session (ACPI via QMP), falling back to
 // SIGTERM then SIGKILL so a running guest's disk is not left dirty.
 func (m *Manager) Stop(id string) error {
+	if m.MigrationBusy(id) {
+		return fmt.Errorf("instance is migrating its storage; try again when the move finishes")
+	}
 	s, err := m.Get(id)
 	if err != nil {
 		return err
@@ -526,6 +675,8 @@ func (m *Manager) Stop(id string) error {
 	if s.PID > 0 {
 		m.gracefulShutdown(s)
 	}
+	// Reap this VM's software-TPM (if any). The NVRAM state dir is preserved.
+	m.stopSwtpm(id)
 	// Remove this VM's tap from the fabric (global bridge or a port group).
 	// Best effort: a missing tap is fine. The IP lease is kept so a restart
 	// reuses it.
@@ -590,7 +741,21 @@ func (m *Manager) List(orgID int64) ([]*Session, error) {
 
 // Delete soft-deletes a session (moves it to Trash) after stopping it. The
 // overlay disk is left in place until a purge; retention worker purges later.
+// GuestAgentInfo queries the VM's qemu-guest-agent (if enabled and running) and
+// returns whatever it can. Never blocks for more than ~1.5s; a VM without the
+// agent enabled or not running yields an empty (non-responsive) result.
+func (m *Manager) GuestAgentInfo(id string) qemu.GuestInfo {
+	s, err := m.Get(id)
+	if err != nil || !s.GuestAgent || !m.Running(s) {
+		return qemu.GuestInfo{}
+	}
+	return qemu.QueryGuestAgent(filepath.Join(m.cfg.Paths.DiskDir, id+".qga"))
+}
+
 func (m *Manager) Delete(id string) error {
+	if m.MigrationBusy(id) {
+		return fmt.Errorf("instance is migrating its storage; try again when the move finishes")
+	}
 	_ = m.Stop(id)
 	_, err := m.db.Exec(`UPDATE sessions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,
 		time.Now().UTC().Format(time.RFC3339), id)
@@ -603,6 +768,9 @@ func (m *Manager) Delete(id string) error {
 // snapshot (RAM+disk via QMP savevm); otherwise an offline disk snapshot. It
 // returns the snapshot tag and whether it was taken online.
 func (m *Manager) Snapshot(id, name string) (tag string, online bool, err error) {
+	if m.MigrationBusy(id) {
+		return "", false, fmt.Errorf("instance is migrating its storage; try again when the move finishes")
+	}
 	s, err := m.Get(id)
 	if err != nil {
 		return "", false, err
@@ -692,12 +860,130 @@ func (m *Manager) Purge(id string) error {
 	for _, f := range []string{disk, vars, seed,
 		filepath.Join(m.cfg.Paths.DiskDir, id+".vncpw"),
 		filepath.Join(m.cfg.Paths.DiskDir, id+".log"),
+		filepath.Join(m.cfg.Paths.DiskDir, id+".qga"),
 		filepath.Join(m.cfg.Paths.DiskDir, id+".qmp")} {
 		if f != "" {
 			_ = os.Remove(f)
 		}
 	}
+	// Remove the per-VM swtpm NVRAM state directory (purge only).
+	m.stopSwtpm(id)
+	_ = os.RemoveAll(m.tpmStateDir(id))
 	return nil
+}
+
+// AdoptRunningVMs rediscovers QEMU VMs already running on this host WITHOUT
+// relying on the DB, and repairs their session rows. This is the self-heal that
+// keeps a broken/restored/fresh control-plane DB from disrupting live VMs: it
+// scans /proc for `qemu-system-x86_64 -name vdx-<id>`, recovers each VM's VNC/WS
+// ports, QMP socket and VNC password from the live command line + on-disk files,
+// and updates the row to state='running' with the real pid. A live VM with no DB
+// row at all (created after the last good backup) is left running and logged —
+// never killed.
+func (m *Manager) AdoptRunningVMs() {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue // not a pid dir
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		args := strings.Split(string(raw), "\x00")
+		if len(args) == 0 || !strings.Contains(args[0], "qemu-system-x86_64") {
+			continue
+		}
+		pid, _ := strconv.Atoi(e.Name())
+		id, vncPort, wsPort, qmp := parseQemuCmdline(args)
+		if id == "" {
+			continue
+		}
+		m.adoptOne(id, pid, vncPort, wsPort, qmp)
+	}
+}
+
+// parseQemuCmdline extracts the VM id and recoverable runtime handles from a
+// qemu argv (split on NUL).
+func parseQemuCmdline(args []string) (id string, vncPort, wsPort int, qmp string) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-name":
+			if i+1 < len(args) && strings.HasPrefix(args[i+1], "vdx-") {
+				id = strings.TrimPrefix(args[i+1], "vdx-")
+			}
+		case "-vnc":
+			if i+1 < len(args) {
+				// e.g. 127.0.0.1:3,websocket=127.0.0.1:6903,password-secret=vncpw
+				for _, f := range strings.Split(args[i+1], ",") {
+					if d := strings.LastIndexByte(f, ':'); d >= 0 {
+						if strings.HasPrefix(f, "websocket=") {
+							wsPort = atoiSafe(f[d+1:])
+						} else if strings.HasPrefix(f, "127.0.0.1:") || strings.HasPrefix(f, "[::1]:") {
+							if disp := atoiSafe(f[d+1:]); disp >= 0 {
+								vncPort = 5900 + disp
+							}
+						}
+					}
+				}
+			}
+		case "-qmp":
+			if i+1 < len(args) {
+				v := strings.TrimPrefix(args[i+1], "unix:")
+				if c := strings.IndexByte(v, ','); c >= 0 {
+					v = v[:c]
+				}
+				qmp = v
+			}
+		}
+	}
+	return
+}
+
+func atoiSafe(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// adoptOne repairs a single live VM's DB row (or logs an orphan it can't place).
+func (m *Manager) adoptOne(id string, pid, vncPort, wsPort int, qmp string) {
+	var state string
+	var dbpid int
+	var dbstart string
+	err := m.db.QueryRow(`SELECT state,COALESCE(pid,0),COALESCE(pid_start_time,'') FROM sessions WHERE id=? AND deleted_at IS NULL`, id).
+		Scan(&state, &dbpid, &dbstart)
+	if err != nil {
+		// No row (fresh/rolled-back DB, or the VM was created after the last
+		// good backup). We cannot reconstruct org/owner/name safely — leave it
+		// running and untouched, and tell the operator.
+		log.Printf("adopt: live VM %s (pid %d) has no DB row — left RUNNING and unmanaged; recreate its record or stop it manually", id, pid)
+		return
+	}
+	start := procStartTime(pid)
+	if state == "running" && dbpid == pid && dbstart == start {
+		return // already correct
+	}
+	if _, err := m.db.Exec(`UPDATE sessions SET state='running', pid=?, pid_start_time=? WHERE id=?`, pid, start, id); err != nil {
+		return
+	}
+	if vncPort > 0 {
+		_, _ = m.db.Exec(`UPDATE sessions SET vnc_port=?, ws_port=? WHERE id=?`, vncPort, wsPort, id)
+	}
+	if qmp != "" {
+		_, _ = m.db.Exec(`UPDATE sessions SET qmp_socket=? WHERE id=?`, qmp, id)
+	}
+	if b, e := os.ReadFile(filepath.Join(m.cfg.Paths.DiskDir, id+".vncpw")); e == nil {
+		if pw := strings.TrimSpace(string(b)); pw != "" {
+			_, _ = m.db.Exec(`UPDATE sessions SET vnc_password=? WHERE id=?`, pw, id)
+		}
+	}
+	log.Printf("adopt: re-adopted live VM %s (pid %d; db said %q) and restored its console handles", id, pid, state)
 }
 
 // Reconcile marks as 'stopped' any row claiming 'running' whose process is gone.
@@ -872,14 +1158,275 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 		Firmware:  s.Firmware,
 		SeedISO:   s.SeedPath,
 		MAC:       s.MAC,
+		SerialSock: filepath.Join(m.cfg.Paths.DiskDir, s.ID+".serial"),
+		DiskRaw:    s.DiskBackend == "zvol",
+		DiskLockingOff: onCIFS(s.DiskPath), // CIFS shared disk: no image locking
+		// Hardware MUST be byte-identical to the source or live migration fails
+		// (or, worse, Windows reactivates/loses NICs). Mirror every knob.
+		MachineType: s.MachineType,
+		DiskBus:     s.DiskBus,
+		NICModel:    s.NICModel,
+		VGA:         s.VGA,
+		Windows:     s.OSType == "windows",
+		GuestAgent:  s.GuestAgent,
 	}
+	// Display backend + the shared virtio-serial controller must match the
+	// source's device topology, so mirror spice/guest-agent channels.
+	if s.Display == "spice" {
+		spec.Display = "spice"
+		spec.SPICEPort = s.VNCPort + 3000
+	}
+	if s.GuestAgent {
+		spec.QGASocket = filepath.Join(m.cfg.Paths.DiskDir, s.ID+".qga")
+		_ = os.Remove(spec.QGASocket)
+	}
+	if s.OSType == "windows" {
+		spec.ExtraISO = qemu.VirtioWinISO(m.cfg.Paths.ISODir)
+	}
+	// TPM-backed VMs are refused by the migrate path (swtpm NVRAM is host-local),
+	// so no TPM device is mirrored here.
 	if s.Firmware == "uefi" {
-		if code, _, ok := qemu.OVMF(); ok {
+		code, _, ok := qemu.OVMF()
+		if s.SecureBoot {
+			if sc, _, sok := qemu.OVMFSecure(); sok {
+				code, ok = sc, true
+			}
+		}
+		if ok {
 			spec.OVMFCodePath = code
 			spec.OVMFVarsPath = s.OVMFVarsPath
 		}
 	}
 	return spec, nil
+}
+
+// SerialSockFor returns a running session's serial-console unix socket path (and
+// whether the socket currently exists on disk — it is only present for VMs
+// launched since serial support was added, i.e. after a (re)start).
+func (m *Manager) SerialSockFor(id string) (string, bool, error) {
+	s, err := m.Get(id)
+	if err != nil {
+		return "", false, err
+	}
+	p := filepath.Join(m.cfg.Paths.DiskDir, s.ID+".serial")
+	_, statErr := os.Stat(p)
+	return p, statErr == nil, nil
+}
+
+// LaunchReceiver starts a QEMU on THIS node ready to receive an inbound live
+// migration. It decodes a base64-encoded qemu.Spec (shipped by the source over
+// the authenticated peer API), sets its Incoming listener to the given port, and
+// launches it. Replaces the old SSH-driven `vdxd migrate-recv` path — no inter-
+// node SSH keys required.
+func (m *Manager) LaunchReceiver(specB64 string, port int) (int, error) {
+	blob, err := base64.StdEncoding.DecodeString(specB64)
+	if err != nil {
+		return 0, fmt.Errorf("decode receiver spec: %w", err)
+	}
+	var spec qemu.Spec
+	if err := json.Unmarshal(blob, &spec); err != nil {
+		return 0, fmt.Errorf("unmarshal receiver spec: %w", err)
+	}
+	// Pick an incoming port that is actually free on THIS node. The old code used
+	// a single fixed port (49200) for every migration; a lingering/stuck receiver
+	// from a prior migration keeps that port bound, so the new receiver failed to
+	// launch ("Address already in use") while the source streamed into the stale
+	// listener and wrongly reported success — leaving the VM adopted but dead.
+	if port <= 0 || !portAvailable(port) {
+		if fp := freeTCPPort(49200); fp > 0 {
+			port = fp
+		} else if port <= 0 {
+			return 0, fmt.Errorf("no free incoming migration port")
+		}
+	}
+	spec.Incoming = fmt.Sprintf("tcp:0.0.0.0:%d", port)
+	// Drop privileges to the run-as user exactly as a normal Start does, so the
+	// receiver (and the VM it becomes) is not left running as root, and its
+	// disk/QMP/serial files have the right owner.
+	if m.cfg.VM.RunAs != "" {
+		if uid, gid, groups, ok := lookupUser(m.cfg.VM.RunAs); ok {
+			for _, f := range []string{spec.DiskPath, spec.OVMFVarsPath, spec.SeedISO} {
+				if f != "" {
+					_ = qemu.Chown(f, uid, gid)
+				}
+			}
+			_ = qemu.Chown(m.cfg.Paths.DiskDir, uid, gid)
+			spec.RunAsUID, spec.RunAsGID, spec.RunAsGroups = uid, gid, groups
+		}
+	}
+	logPath := qemu.LogPath(m.cfg.Paths.DiskDir, "recv-"+spec.ID)
+	proc, err := qemu.Launch(spec, logPath)
+	if err != nil {
+		return 0, fmt.Errorf("launch receiver: %w", err)
+	}
+	// Verify the receiver actually came up and bound its incoming port before we
+	// let the source stream to it. If QEMU exited immediately (e.g. a port clash),
+	// return the error with the log tail so the source aborts instead of streaming
+	// into the void / a stale listener.
+	time.Sleep(900 * time.Millisecond)
+	if !processAliveSince(proc.Pid, procStartTime(proc.Pid)) {
+		_ = proc.Kill()
+		return 0, fmt.Errorf("receiver exited on launch: %s", readLogTail(logPath, 300))
+	}
+	// Remember the receiver process so AdoptMigrated can record its real pid when
+	// the source commits the migration.
+	m.incomingMu.Lock()
+	m.incoming[spec.ID] = proc
+	m.incomingMu.Unlock()
+	return port, nil
+}
+
+// portAvailable reports whether a TCP port can be bound on all interfaces now.
+func portAvailable(p int) bool {
+	l, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", p))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// freeTCPPort scans upward from base for a bindable port (small race window
+// between the probe and QEMU's bind, acceptable for this control path).
+func freeTCPPort(base int) int {
+	for p := base; p < base+400; p++ {
+		if portAvailable(p) {
+			return p
+		}
+	}
+	return 0
+}
+
+// readLogTail returns up to n trailing bytes of a file (for error surfacing).
+func readLogTail(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(b))
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return s
+}
+
+// AdoptMigrated records a freshly-migrated VM in THIS node's DB, completing the
+// ownership handoff: the row is inserted (or revived, for a migrate-back) in the
+// running state, bound to the receiver QEMU's real pid. Called on the destination
+// when the source commits a completed live migration. Without this the migrated
+// VM would be invisible to the destination's control plane (and un-migratable
+// back). The runtime fields (pid/qmp/ports) come from the launched receiver and
+// the shipped record.
+func (m *Manager) AdoptMigrated(s *Session) error {
+	m.incomingMu.Lock()
+	proc := m.incoming[s.ID]
+	delete(m.incoming, s.ID)
+	m.incomingMu.Unlock()
+	if proc == nil {
+		return fmt.Errorf("no incoming migration receiver for %s", s.ID)
+	}
+	ci := 0
+	if s.CloudInit {
+		ci = 1
+	}
+	// Block-live migration: the disk lives at a DESTINATION-local path (its own disk
+	// dir), which may differ from the shipped (source) path when the source disk was
+	// in a pool. Record the dest path and clear pool_id so the adopted VM opens its
+	// own copy.
+	if t, ok := m.blockTargetPath(s.ID); ok && t != "" {
+		s.DiskPath = t
+		s.PoolID = 0
+		m.ColdDone(s.ID) // aux files (vars/seed) are the VM's now — drop cleanup tracking
+	}
+	nid := m.localNodeID()
+	start := procStartTime(proc.Pid)
+	_, err := m.db.Exec(`INSERT INTO sessions
+		(id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,boot_iso_id,mac,
+		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,
+		 network_id,display,disk_backend,pool_id,
+		 pid,pid_start_time,vnc_port,ws_port,vnc_password,qmp_socket,spice_port,node_id,last_started_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?,'running',?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET state='running',deleted_at=NULL,
+		 pid=excluded.pid,pid_start_time=excluded.pid_start_time,qmp_socket=excluded.qmp_socket,
+		 vnc_port=excluded.vnc_port,ws_port=excluded.ws_port,vnc_password=excluded.vnc_password,
+		 spice_port=excluded.spice_port,node_id=excluded.node_id`,
+		s.ID, s.Name, s.OrgID, s.OwnerID, s.ImageName, s.DiskPath, s.Kind, s.Firmware, s.OVMFVarsPath, nullIf0(s.BootISOID), s.MAC,
+		s.CPUs, s.MemoryMB, s.DiskGB, ci, s.CIUsername, s.CIPassword, s.CISSHKey, s.SeedPath, s.Passthrough,
+		nullIf0(s.NetworkID), s.Display, s.DiskBackend, nullIf0(s.PoolID),
+		proc.Pid, start, s.VNCPort, s.WSPort, s.VNCPassword, s.QMPSocket, s.SPICEPort, nid, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// AdoptColdMigrated records a COLD-migrated (stopped) VM into this node's DB.
+// Unlike AdoptMigrated there is no receiver QEMU: the row is inserted (or revived
+// for a migrate-back) in the STOPPED state with no runtime fields. The caller has
+// placed the disk at s.DiskPath on this node (unchanged for shared storage, or a
+// freshly-copied path for a local→local move). We refuse unless the disk is
+// actually present and readable here — so a failed/doomed handoff never strands
+// the source (which keeps its row until our 200).
+func (m *Manager) AdoptColdMigrated(s *Session) error {
+	if s.DiskPath == "" {
+		return fmt.Errorf("cold migrate: empty disk path")
+	}
+	if fi, err := os.Stat(s.DiskPath); err != nil || fi.IsDir() {
+		return fmt.Errorf("cold migrate: disk not present on destination (%s): %v", s.DiskPath, err)
+	}
+	ci := 0
+	if s.CloudInit {
+		ci = 1
+	}
+	nid := m.localNodeID()
+	_, err := m.db.Exec(`INSERT INTO sessions
+		(id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,boot_iso_id,mac,
+		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,
+		 network_id,display,disk_backend,pool_id,node_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?,'stopped',?,?,?,?,?,?, ?,?,?,?, ?)
+		ON CONFLICT(id) DO UPDATE SET state='stopped',deleted_at=NULL,
+		 disk_path=excluded.disk_path,ovmf_vars_path=excluded.ovmf_vars_path,seed_path=excluded.seed_path,
+		 pool_id=excluded.pool_id,node_id=excluded.node_id,
+		 pid=NULL,pid_start_time=NULL,qmp_socket=NULL,vnc_port=NULL,ws_port=NULL,vnc_password=NULL,spice_port=NULL`,
+		s.ID, s.Name, s.OrgID, s.OwnerID, s.ImageName, s.DiskPath, s.Kind, s.Firmware, s.OVMFVarsPath, nullIf0(s.BootISOID), s.MAC,
+		s.CPUs, s.MemoryMB, s.DiskGB, ci, s.CIUsername, s.CIPassword, s.CISSHKey, s.SeedPath, s.Passthrough,
+		nullIf0(s.NetworkID), s.Display, s.DiskBackend, nullIf0(s.PoolID), nid)
+	if err == nil {
+		m.ColdDone(s.ID) // adopted — the staged files are the VM's now, not garbage
+	}
+	return err
+}
+
+// AbortIncoming tears down a migration receiver that will not be committed (the
+// source migration failed), so a half-migrated QEMU is not left running.
+func (m *Manager) AbortIncoming(id string) {
+	m.incomingMu.Lock()
+	proc := m.incoming[id]
+	delete(m.incoming, id)
+	m.incomingMu.Unlock()
+	if proc != nil {
+		_ = proc.Kill()
+	}
+}
+
+// localNodeID returns this node's row id (role='local'), or NULL when unknown.
+func (m *Manager) localNodeID() any {
+	var id int64
+	if err := m.db.QueryRow(`SELECT id FROM nodes WHERE role='local'`).Scan(&id); err == nil {
+		return id
+	}
+	return nil
+}
+
+func nullIf0(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+
+// DeleteSessionRow hard-removes a session row (used on the SOURCE after a
+// completed migration hands ownership to the destination).
+func (m *Manager) DeleteSessionRow(id string) error {
+	_, err := m.db.Exec(`DELETE FROM sessions WHERE id=?`, id)
+	return err
 }
 
 // QMPSocketFor returns a running session's QMP control socket path.
@@ -975,6 +1522,22 @@ func processAliveSince(pid int, startTime string) bool {
 		return true // legacy row without a recorded start-time
 	}
 	return procStartTime(pid) == startTime
+}
+
+// onCIFS reports whether path lives on a CIFS/SMB mount, where QEMU's image file
+// locking must be disabled (the lock handoff during live migration fails). Uses
+// statfs; any error → false (keep locking on).
+func onCIFS(path string) bool {
+	const (
+		cifsMagic = 0xFF534D42 // legacy CIFS
+		smb2Magic = 0xFE534D42 // SMB2/SMB3 (modern cifs.ko) — what Ubuntu mounts use
+	)
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return false
+	}
+	t := int64(st.Type)
+	return t == cifsMagic || t == smb2Magic
 }
 
 // procStartTime reads field 22 (starttime, in clock ticks since boot) from

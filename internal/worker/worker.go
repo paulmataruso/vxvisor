@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"path/filepath"
 	"runtime"
 	"time"
 
@@ -25,19 +24,28 @@ import (
 )
 
 type Supervisor struct {
-	cfg *config.Config
-	db  *db.DB
-	mgr *session.Manager
-	stg *storage.Store
-	mc  *metrics.Collector
-	cl  *cluster.Store
-	g   *gossip.Cluster
-	svc *service.Service
+	cfg  *config.Config
+	db   *db.DB
+	mgr  *session.Manager
+	stg  *storage.Store
+	mc   *metrics.Collector
+	cl   *cluster.Store
+	g    *gossip.Cluster
+	svc  *service.Service
+	role *cluster.Role
+
+	// startedAt gates destructive auto-actions (retention) for a grace window
+	// after boot, so a restored/stale DB can't immediately deprovision VMs
+	// before boot adoption + an admin have a chance to react.
+	startedAt time.Time
 }
 
 func New(cfg *config.Config, d *db.DB, mgr *session.Manager, stg *storage.Store, mc *metrics.Collector, cl *cluster.Store) *Supervisor {
-	return &Supervisor{cfg: cfg, db: d, mgr: mgr, stg: stg, mc: mc, cl: cl}
+	return &Supervisor{cfg: cfg, db: d, mgr: mgr, stg: stg, mc: mc, cl: cl, startedAt: time.Now()}
 }
+
+// retentionGrace is how long after boot auto-retention is suppressed.
+const retentionGrace = 10 * time.Minute
 
 // SetGossip attaches the gossip membership handle. When present, node-health
 // advertises this node's live capacity into the mesh and reflects every peer's
@@ -48,8 +56,26 @@ func (s *Supervisor) SetGossip(g *gossip.Cluster) { s.g = g }
 // can run. Optional — without it those loops are no-ops.
 func (s *Supervisor) SetService(svc *service.Service) { s.svc = svc }
 
+// SetRole attaches the cluster election role. Cluster-singleton loops (warm pool
+// / idle desktop reclaim, account sync, HA monitor) run ONLY on the leader so a
+// multi-node cluster does not double-provision or double-write. A nil role (the
+// single-host default) is treated as "always leader".
+func (s *Supervisor) SetRole(role *cluster.Role) { s.role = role }
+
+// isLeader reports whether cluster-singleton work should run here.
+func (s *Supervisor) isLeader() bool { return s.role == nil || s.role.IsLeader() }
+
 // Run starts all background loops and blocks until ctx is cancelled.
 func (s *Supervisor) Run(ctx context.Context) {
+	// Before anything else, re-adopt any QEMU VMs already running on this host
+	// whose DB rows are missing/stale (e.g. after a DB restore or a fresh DB).
+	// This is what makes a broken/rolled-back control plane non-disruptive:
+	// live VMs are rediscovered and made manageable again rather than orphaned.
+	s.mgr.AdoptRunningVMs()
+	// Resolve any storage move interrupted by a crash/restart (prefer target only
+	// if it verifies; otherwise keep the untouched source). Runs before any
+	// reconcile could act on a half-moved VM.
+	s.mgr.RecoverMigrations()
 	go s.loop(ctx, "reconciler", 5*time.Second, s.reconcile)
 	go s.loop(ctx, "session-gc", 1*time.Hour, s.gcWebSessions)
 	go s.loop(ctx, "retention", 10*time.Minute, s.retention)
@@ -61,6 +87,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 	go s.loop(ctx, "metering", 60*time.Second, s.meter)
 	go s.loop(ctx, "node-health", 30*time.Second, s.nodeHealth)
 	go s.loop(ctx, "desktop-reclaim", 2*time.Minute, s.reclaimDesktops)
+	go s.loop(ctx, "account-sync", 10*time.Second, s.syncAccounts)
 	<-ctx.Done()
 }
 
@@ -97,6 +124,12 @@ func (s *Supervisor) gcWebSessions() {
 // retention soft-deletes (moves to Trash) any instance past its retention cutoff.
 // This mirrors the decompiled deprovision-past-cutoff behaviour, kept local.
 func (s *Supervisor) retention() {
+	// Boot grace: never auto-deprovision in the first minutes after start. If a
+	// stale/restored DB resurrected an expired retention_at, this prevents it
+	// from stopping a live VM before adoption + an operator can intervene.
+	if time.Since(s.startedAt) < retentionGrace {
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.db.Query(`SELECT id FROM sessions WHERE retention_at IS NOT NULL AND retention_at<=? AND deleted_at IS NULL`, now)
 	if err != nil {
@@ -111,6 +144,13 @@ func (s *Supervisor) retention() {
 	}
 	rows.Close()
 	for _, id := range ids {
+		// SAFETY: auto-retention must never stop a VM that is actually running.
+		// A running VM past its cutoff is skipped and logged for an operator —
+		// the user's rule is that control-plane state never disrupts live VMs.
+		if sess, err := s.mgr.Get(id); err == nil && s.mgr.Running(sess) {
+			log.Printf("retention: %s is past cutoff but RUNNING — skipping auto-deprovision (needs manual action)", id)
+			continue
+		}
 		if err := s.mgr.Delete(id); err == nil {
 			log.Printf("retention: auto-deprovisioned %s", id)
 		}
@@ -218,13 +258,23 @@ func (s *Supervisor) nodeHealth() {
 	}
 }
 
-// reclaimDesktops stops and frees pooled desktops idle past the timeout.
+// reclaimDesktops stops and frees pooled desktops idle past the timeout, and
+// tops warm pools back up. Cluster-singleton: leader only, so warm pools are not
+// double-provisioned across nodes.
 func (s *Supervisor) reclaimDesktops() {
-	if s.svc == nil {
+	if s.svc == nil || !s.isLeader() {
 		return
 	}
 	if n := s.svc.ReclaimIdle(); n > 0 {
 		log.Printf("desktop-reclaim: freed %d idle pooled desktop(s)", n)
+	}
+}
+
+// syncAccounts pulls the leader's account snapshot on a follower so logins and
+// API keys work cluster-wide. No-op on the leader / single-host.
+func (s *Supervisor) syncAccounts() {
+	if s.svc != nil {
+		s.svc.PullAccountsIfFollower()
 	}
 }
 
@@ -324,8 +374,9 @@ func (s *Supervisor) backupControlPlane() {
 	if s.cfg == nil || s.cfg.Paths.BackupDir == "" {
 		return
 	}
-	dest := filepath.Join(s.cfg.Paths.BackupDir, "controlplane-"+time.Now().UTC().Format("20060102T150405")+".db")
-	if _, err := s.db.Exec(`VACUUM INTO ?`, dest); err != nil {
+	if _, err := s.db.Backup(s.cfg.Paths.BackupDir); err != nil {
 		log.Printf("control-plane backup failed: %v", err)
+		return
 	}
+	db.PruneBackups(s.cfg.Paths.BackupDir, 24)
 }

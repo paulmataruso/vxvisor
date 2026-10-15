@@ -73,6 +73,8 @@ func (s *Server) desktopProxy(w http.ResponseWriter, r *http.Request) {
 		EnableAudio:     true,
 		EnableClipboard: true,
 		EnableMic:       true,
+		RemoteApp:       di.RemoteApp,
+		RemoteAppArgs:   di.RemoteAppArgs,
 	}
 	guac, _, err := gateway.Handshake(guacdAddr, params)
 	if err != nil {

@@ -46,6 +46,7 @@ type OverviewData struct {
 	// platform (admin)
 	Nodes        int
 	Members      int
+	Containers   int // LXC system containers (this node)
 	DesktopPools int
 	Routing      string // "", "off", or a short status line
 	// usage / quota
@@ -61,6 +62,7 @@ type RunnerRow struct {
 	ID   string
 	Name string
 	Kind string
+	Node string // owning node name (unified view); "" for the local-only view
 }
 
 // Overview gathers the landing-page snapshot for the principal's org. It reuses
@@ -71,7 +73,31 @@ func (s *Service) Overview(p *Principal) OverviewData {
 		return d
 	}
 
-	if sessions, err := s.ListSessions(p); err == nil {
+	// In the unified cluster view (request on the VIP, admin), the headline VM
+	// stats and the quick-access runners span the WHOLE cluster, not just this
+	// node — so the VIP landing page matches the unified Instances inventory.
+	if p.Unified && p.IsAdmin {
+		if cvms, err := s.ClusterVMs(p); err == nil {
+			for _, v := range cvms {
+				d.VMs.Total++
+				if v.State == "running" {
+					d.VMs.Running++
+					if len(d.Runners) < 6 {
+						d.Runners = append(d.Runners, RunnerRow{ID: v.ID, Name: v.Name, Kind: v.Kind, Node: v.Node})
+					}
+				} else {
+					d.VMs.Stopped++
+				}
+				if v.Kind == "server" {
+					d.VMs.Servers++
+				} else {
+					d.VMs.Desktop++
+				}
+				d.VCPUs += v.CPUs
+				d.MemoryMB += v.MemoryMB
+			}
+		}
+	} else if sessions, err := s.ListSessions(p); err == nil {
 		for _, sess := range sessions {
 			d.VMs.Total++
 			if sess.State == "running" {
@@ -91,6 +117,17 @@ func (s *Service) Overview(p *Principal) OverviewData {
 			d.MemoryMB += sess.MemoryMB
 			d.DiskGB += sess.DiskGB
 		}
+	}
+
+	// LXC containers (this node). Org-scoped for non-admins; all orgs for admins.
+	{
+		q := `SELECT COUNT(*) FROM containers`
+		args := []any{}
+		if !p.IsAdmin {
+			q += ` WHERE org_id=?`
+			args = append(args, p.OrgID)
+		}
+		_ = s.db.QueryRow(q, args...).Scan(&d.Containers)
 	}
 
 	if imgs, err := image.List(s.db); err == nil {

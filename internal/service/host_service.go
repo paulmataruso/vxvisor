@@ -2,6 +2,7 @@ package service
 
 import (
 	"vdxclone/internal/hostinfo"
+	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
 )
 
@@ -105,12 +106,13 @@ func (s *Service) DiskStatus(p *Principal) []DiskStatusRow {
 
 // ---- topology ------------------------------------------------------------
 
-// TopoVM is a VM attached to a port group via its tap.
+// TopoVM is a VM (or LXC container) attached to a port group.
 type TopoVM struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Tap   string `json:"tap"`
 	State string `json:"state"` // running | stopped | ""
+	Kind  string `json:"kind"`  // "" = VM, "container" = LXC container
 }
 
 // TopoPortGroup is a VMware-style port group (a network/VLAN) on a vSwitch.
@@ -187,6 +189,29 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		}
 		rows.Close()
 	}
+
+	// LXC containers attach to a host bridge by name (containers.bridge), via a
+	// randomly-named veth we can't match back — so group them by configured bridge
+	// and render them under that vSwitch like VMs. Leftovers (no/unknown bridge)
+	// fall through to the user-mode switch.
+	bridgeToCts := map[string][]TopoVM{}
+	if rows, err := s.db.Query(`SELECT name, COALESCE(bridge,''), COALESCE(lxcpath,''), status FROM containers`); err == nil {
+		for rows.Next() {
+			var name, brdg, lxcpath, status string
+			if rows.Scan(&name, &brdg, &lxcpath, &status) != nil {
+				continue
+			}
+			st := "stopped"
+			if status != "creating" && status != "error" {
+				if info, _ := lxc.Info(name, lxcpath); info.State == "RUNNING" {
+					st = "running"
+				}
+			}
+			bridgeToCts[brdg] = append(bridgeToCts[brdg], TopoVM{Name: name, Kind: "container", State: st})
+		}
+		rows.Close()
+	}
+	renderedBridges := map[string]bool{}
 
 	// Index interfaces by name and build the bond → (mode, members) map so an
 	// uplink that is a bond renders as a link-aggregation group.
@@ -286,7 +311,21 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			}
 		}
 		sw.PortGroups[0].VMs = append(sw.PortGroups[0].VMs, unbound...)
+		// LXC containers configured on this bridge.
+		if cts := bridgeToCts[br.Name]; len(cts) > 0 {
+			sw.PortGroups[0].VMs = append(sw.PortGroups[0].VMs, cts...)
+			renderedBridges[br.Name] = true
+		}
 		topo.Switches = append(topo.Switches, sw)
+	}
+
+	// Containers whose configured bridge isn't a live host bridge (or is empty)
+	// go on the user-mode switch so they're never hidden.
+	var looseCts []TopoVM
+	for brdg, cts := range bridgeToCts {
+		if !renderedBridges[brdg] {
+			looseCts = append(looseCts, cts...)
+		}
 	}
 
 	// User-mode / NAT vSwitch. Always included so the view is unified: it carries
@@ -310,7 +349,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			natDefault = append(natDefault, vm)
 		}
 	}
-	if len(natPGs) > 0 || len(natDefault) > 0 || len(topo.Switches) == 0 {
+	if len(natPGs) > 0 || len(natDefault) > 0 || len(looseCts) > 0 || len(topo.Switches) == 0 {
 		uplink := ""
 		for _, it := range ifaces { // the up physical NIC carrying the host IP
 			if it.Type == "physical" && it.State == "up" && len(it.Addrs) > 0 {
@@ -326,6 +365,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			natPGs = []TopoPortGroup{{Name: "VM Network (NAT)"}}
 		}
 		natPGs[0].VMs = append(natPGs[0].VMs, natDefault...)
+		natPGs[0].VMs = append(natPGs[0].VMs, looseCts...)
 		sw.PortGroups = natPGs
 		topo.Switches = append(topo.Switches, sw)
 	}

@@ -23,6 +23,11 @@ type Claims struct {
 	SessionID string `json:"sid"`
 	UserID    int64  `json:"uid"`
 	Expires   int64  `json:"exp"` // unix seconds
+	// RemoteApp, when set, pins a seamless single-app (RDP RemoteApp) launch into
+	// the token so the desktop proxy renders just that app. Signed, so a viewer
+	// can't tamper with which program runs.
+	RemoteApp     string `json:"app,omitempty"`
+	RemoteAppArgs string `json:"appargs,omitempty"`
 }
 
 // Signer mints and verifies connection tokens with a per-install secret.
@@ -50,7 +55,12 @@ func LoadOrCreateSecret(path string) ([]byte, error) {
 
 // Mint returns a token authorizing user uid to open session sid for ttl.
 func (s *Signer) Mint(sid string, uid int64, ttl time.Duration) string {
-	c := Claims{SessionID: sid, UserID: uid, Expires: time.Now().Add(ttl).Unix()}
+	return s.MintApp(sid, uid, ttl, "", "")
+}
+
+// MintApp is Mint plus a pinned RemoteApp (seamless single-app) launch.
+func (s *Signer) MintApp(sid string, uid int64, ttl time.Duration, remoteApp, remoteAppArgs string) string {
+	c := Claims{SessionID: sid, UserID: uid, Expires: time.Now().Add(ttl).Unix(), RemoteApp: remoteApp, RemoteAppArgs: remoteAppArgs}
 	payload, _ := json.Marshal(c)
 	p := base64.RawURLEncoding.EncodeToString(payload)
 	return p + "." + s.sign(p)

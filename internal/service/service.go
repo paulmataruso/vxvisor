@@ -17,9 +17,11 @@ import (
 	"vdxclone/internal/config"
 	"vdxclone/internal/db"
 	"vdxclone/internal/policy"
+	"vdxclone/internal/qemu"
 	"vdxclone/internal/cluster"
 	"vdxclone/internal/metrics"
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/peer"
 	"vdxclone/internal/platform"
 	"vdxclone/internal/session"
 	"vdxclone/internal/storage"
@@ -38,11 +40,22 @@ type Service struct {
 	cl     *cluster.Store
 	pools  *broker.PoolStore
 	signer *broker.Signer
+	role   *cluster.Role
+	peerc  *peer.Client
+	migtr  *migTracker
+	// adReload, when registered by the web layer, pushes a freshly-saved or
+	// freshly-replicated AD config to the live auth provider (no restart). Lets a
+	// follower apply the leader's AD settings the moment a snapshot lands.
+	adReload func(config.ADConfig)
 }
 
 func New(cfg *config.Config, d *db.DB, st *store.Store, stg *storage.Store, net *netdrv.Store, mgr *session.Manager, enf policy.Enforcer) *Service {
-	return &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf}
+	return &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker()}
 }
+
+// SetADReloadHook registers the callback that applies AD config to the live
+// auth provider. The web layer passes its provider's SetConfig.
+func (s *Service) SetADReloadHook(fn func(config.ADConfig)) { s.adReload = fn }
 
 // SetMetrics attaches the metrics collector so the web layer can read it.
 func (s *Service) SetMetrics(mc *metrics.Collector) { s.mc = mc }
@@ -51,6 +64,20 @@ func (s *Service) Metrics() *metrics.Collector      { return s.mc }
 // SetCluster attaches the cluster store.
 func (s *Service) SetCluster(cl *cluster.Store) { s.cl = cl }
 func (s *Service) Cluster() *cluster.Store      { return s.cl }
+
+// SetClusterRuntime attaches the live election role + a peer-API client (built
+// from the shared cluster secret) so the service can aggregate across nodes and
+// followers can pull account state from the leader.
+func (s *Service) SetClusterRuntime(role *cluster.Role, secret []byte) {
+	s.role = role
+	s.peerc = peer.NewClient(secret)
+}
+
+// Role returns the cluster election role (nil on a single-host install).
+func (s *Service) Role() *cluster.Role { return s.role }
+
+// ClusterEnabled reports whether this node runs in cluster mode.
+func (s *Service) ClusterEnabled() bool { return s.role != nil }
 
 func (s *Service) Store() *store.Store       { return s.store }
 func (s *Service) Storage() *storage.Store   { return s.stg }
@@ -76,6 +103,14 @@ type Principal struct {
 	ActorKind string   // "user" | "apikey"
 	Scopes    []string // for apikey principals; users are unrestricted
 	token     string
+	// Unified is set by the web layer per-request: true when the request arrived
+	// on the cluster management VIP (→ unified, cluster-wide "vCenter" view),
+	// false when it arrived on a node's own mgmt IP (→ standalone "ESXi host" view).
+	Unified bool
+	// TrustedPeer marks a principal built from an authenticated cluster-admin
+	// reverse-proxy request (another node acting for an admin on the VIP). CSRF is
+	// enforced at the originating node, so it is bypassed for these.
+	TrustedPeer bool
 }
 
 // HasScope reports whether the principal may perform an action of the given
@@ -123,6 +158,26 @@ func (s *Service) Principal(r *http.Request) *Principal {
 	}
 	role, _ := s.store.OrgRole(cur, u.ID)
 	return &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: isAdmin, Orgs: orgs, ActorKind: "user", token: token}
+}
+
+// TrustedAdminPrincipal builds a principal for an authenticated cluster-admin
+// reverse-proxy request (the owning node acting on behalf of an admin who is
+// logged in at the VIP). The HMAC cluster header is verified by the caller; here
+// we just load the named user and require instance-admin. Admins bypass per-org
+// scoping (see sessionInOrg), so the VM's org need not match.
+func (s *Service) TrustedAdminPrincipal(username string) *Principal {
+	u, err := auth.UserByName(s.db, username)
+	if err != nil || u == nil || u.Role != "admin" {
+		return nil
+	}
+	orgs, _ := s.store.UserOrgs(u.ID, true)
+	var cur int64
+	if len(orgs) > 0 {
+		cur = orgs[0].ID
+	}
+	role, _ := s.store.OrgRole(cur, u.ID)
+	return &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: true, Orgs: orgs,
+		ActorKind: "user", TrustedPeer: true}
 }
 
 // APIPrincipal resolves a caller for the REST API: a cookie session if present,
@@ -237,6 +292,15 @@ type CreateInput struct {
 	DiskBackend   string // qcow2 | zvol
 	ZvolPool      string // ZFS pool name for the zvol (zvol backend)
 	Desktop       string // "" | xfce
+	// Hardware profile knobs (empty => safe defaults; see normalizeHardware).
+	MachineType string // q35 | pc
+	DiskBus     string // virtio-blk | virtio-scsi | sata
+	NICModel    string // virtio | e1000e | rtl8139
+	VGA         string // qxl | virtio | std
+	GuestAgent  bool   // qemu-guest-agent channel
+	TPM         bool   // swtpm TPM 2.0
+	SecureBoot  bool   // UEFI Secure Boot
+	OSType      string // linux | windows
 }
 
 func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*session.Session, error) {
@@ -270,6 +334,8 @@ func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*sessi
 		CloudInit: in.CloudInit, CIUsername: in.CIUsername, CIPassword: in.CIPassword, CISSHKey: in.CISSHKey,
 		Passthrough: in.Passthrough, NetworkID: in.NetworkID, StoragePoolID: in.StoragePoolID, Display: in.Display,
 		DiskBackend: in.DiskBackend, ZvolPool: in.ZvolPool, Desktop: in.Desktop,
+		MachineType: in.MachineType, DiskBus: in.DiskBus, NICModel: in.NICModel, VGA: in.VGA,
+		GuestAgent: in.GuestAgent, TPM: in.TPM, SecureBoot: in.SecureBoot, OSType: in.OSType,
 	})
 	if err != nil {
 		return nil, err
@@ -336,6 +402,16 @@ func (s *Service) sessionInOrg(p *Principal, id string) (*session.Session, error
 		return nil, ErrUnauthorized
 	}
 	return sess, nil
+}
+
+// GuestAgentInfo returns qemu-guest-agent data for a VM this org owns (and that
+// is hosted on this node). It degrades to an empty/non-responsive result rather
+// than erroring, so the UI can always render.
+func (s *Service) GuestAgentInfo(p *Principal, id string) (qemu.GuestInfo, error) {
+	if _, err := s.sessionInOrg(p, id); err != nil {
+		return qemu.GuestInfo{}, err
+	}
+	return s.mgr.GuestAgentInfo(id), nil
 }
 
 func (s *Service) StartSession(p *Principal, id, ip string) (*session.Session, error) {
@@ -418,6 +494,10 @@ type DesktopInfo struct {
 	Port      string
 	Username  string
 	Password  string
+	// RemoteApp (RDP only), when set, launches a single seamless published app
+	// instead of a full desktop — carried from the published-app token.
+	RemoteApp     string
+	RemoteAppArgs string
 }
 
 // DesktopTarget authorizes browser-desktop access (same check as ConsoleTarget)
@@ -459,7 +539,13 @@ func (s *Service) DesktopTargetByToken(token, id string) (*DesktopInfo, error) {
 	if s.pools != nil {
 		s.pools.Touch(id)
 	}
-	return s.desktopInfoFor(sess), nil
+	di := s.desktopInfoFor(sess)
+	// A published RemoteApp pins the seamless program into the (signed) token.
+	if c.RemoteApp != "" {
+		di.RemoteApp = c.RemoteApp
+		di.RemoteAppArgs = c.RemoteAppArgs
+	}
+	return di, nil
 }
 
 // desktopInfoFor resolves how guacd should reach a guest. With a routable
@@ -504,6 +590,9 @@ func (s *Service) CreateOrg(p *Principal, name, slug, ip string) (int64, error) 
 	if !p.IsAdmin {
 		return 0, ErrUnauthorized
 	}
+	if err := s.guardClusterWrite(); err != nil {
+		return 0, err
+	}
 	id, err := s.store.CreateOrg(name, slug)
 	if err != nil {
 		return 0, err
@@ -524,6 +613,9 @@ func (s *Service) AddMember(p *Principal, username, role, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
+	if err := s.guardClusterWrite(); err != nil {
+		return err
+	}
 	if roleRank[role] == 0 {
 		return errors.New("invalid role")
 	}
@@ -542,6 +634,9 @@ func (s *Service) RemoveMember(p *Principal, userID int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
+	if err := s.guardClusterWrite(); err != nil {
+		return err
+	}
 	if err := s.store.RemoveMember(p.OrgID, userID); err != nil {
 		return err
 	}
@@ -556,11 +651,70 @@ func (s *Service) ListUsers(p *Principal) ([]store.User, error) {
 	return s.store.ListUsers()
 }
 
+// minPasswordLen is intentionally small: this is an on-prem/self-hosted control
+// plane where operators set their own policy (and bootstrap with short demo
+// passwords). Keep it permissive, just reject empties/typos.
+const minPasswordLen = 4
+
+func validatePassword(pw string) error {
+	if len(pw) < minPasswordLen {
+		return fmt.Errorf("password must be at least %d characters", minPasswordLen)
+	}
+	return nil
+}
+
+// ChangeOwnPassword lets any authenticated interactive user change their own
+// password after re-entering their current one. Not available to API-key
+// principals (they have no password). In cluster mode it is guarded to the
+// leader so the new hash replicates to followers.
+func (s *Service) ChangeOwnPassword(p *Principal, current, next, ip string) error {
+	if p.ActorKind == "apikey" || p.User == nil {
+		return ErrUnauthorized
+	}
+	if err := s.guardClusterWrite(); err != nil {
+		return err
+	}
+	if err := validatePassword(next); err != nil {
+		return err
+	}
+	if !auth.CheckPassword(s.db, p.User.ID, current) {
+		return errors.New("current password is incorrect")
+	}
+	if err := auth.SetPassword(s.db, p.User.ID, next); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "user.password.change", "user", p.User.Username, ip, nil)
+	return nil
+}
+
+// AdminResetPassword lets an instance admin set another user's password without
+// knowing the current one. Guarded to the cluster leader like other account
+// writes so the change replicates.
+func (s *Service) AdminResetPassword(p *Principal, userID int64, next, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	if err := s.guardClusterWrite(); err != nil {
+		return err
+	}
+	if err := validatePassword(next); err != nil {
+		return err
+	}
+	if err := auth.SetPassword(s.db, userID, next); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "user.password.reset", "user", fmt.Sprint(userID), ip, nil)
+	return nil
+}
+
 // ---- API keys ------------------------------------------------------------
 
 func (s *Service) CreateAPIKey(p *Principal, label string, readonly bool, ip string) (string, error) {
 	if !p.atLeast("admin") {
 		return "", ErrUnauthorized
+	}
+	if err := s.guardClusterWrite(); err != nil {
+		return "", err
 	}
 	scopes := `["read","write"]`
 	if readonly {

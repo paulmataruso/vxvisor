@@ -1,7 +1,7 @@
 {{define "dashboard.html"}}{{template "head" .}}
 <div class="card">
   <div class="card-head">
-    <h2>Instances</h2>
+    <h2>Instances{{if .ClusterMode}} <span class="muted" style="font-weight:400;font-size:12px">· all nodes</span>{{end}}</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       {{if .Templates}}
       {{range .Templates}}
@@ -15,12 +15,44 @@
       <button class="btn primary" data-modal="m-launch" {{if and (not .Images) (not .ISOs)}}disabled title="Pull a base image or add a boot ISO first"{{end}}>+ New instance</button>
     </div>
   </div>
+  {{if .ClusterMode}}
+  {{/* Unified cluster-wide inventory (served on the management VIP). Every node's
+       VMs in one pane; actions route to the owning node over the cluster API. */}}
+  {{if .ClusterVMs}}
+  <table>
+    <tr><th>Name</th><th>Node</th><th>Type</th><th>Specs</th><th>Owner</th><th>State</th><th></th></tr>
+    {{range .ClusterVMs}}
+    <tr>
+      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td><span class="host-tag{{if ne .Node $.SelfNode}} remote{{end}}">{{.Node}}</span>{{if eq .Node $.SelfNode}} <span class="muted" style="font-size:11px">this node</span>{{end}}</td>
+      <td>{{.Kind}}</td>
+      <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB</td>
+      <td class="muted">{{.Owner}}</td>
+      <td><span class="pill {{.State}}">{{.State}}</span></td>
+      <td style="text-align:right;white-space:nowrap">
+        <a class="btn sm" href="/instances/{{.ID}}">Details</a>
+        {{if eq .State "running"}}
+          <a class="btn sm" href="/console/{{.ID}}" target="_blank" rel="noopener">VNC</a>
+          <a class="btn sm" href="/console/{{.ID}}/serial" target="_blank" rel="noopener">Serial</a>
+          <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
+          <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/restart" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restart</button></form>
+        {{else}}
+          <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>
+        {{end}}
+        <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Move {{.Name}} to Trash? It will stop if running.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:12px 0 0">Unified view via the management VIP — every node's VMs, fully manageable from here. Details, console, lifecycle, resize, snapshots and migration are transparently proxied to the owning node (the same management is also available on each host's own IP).</p>
+  {{else}}<div class="empty">No instances across the cluster yet.</div>{{end}}
+  {{else}}
   {{if .Sessions}}
   <table>
     <tr><th>Name</th><th>Type</th><th>Image</th><th>Specs</th><th>State</th><th></th></tr>
     {{range .Sessions}}
     <tr>
-      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong>{{if $.Clustered}} <span class="host-tag">{{$.NodeName}}</span>{{end}}<br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
       <td>{{.Kind}}{{if eq .Firmware "uefi"}} · <span class="muted">uefi</span>{{end}}</td>
       <td>{{.ImageName}}</td>
       <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .DiskGB}} · {{.DiskGB}} GB{{end}}</td>
@@ -40,6 +72,7 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No instances in this organization yet.{{if not .Images}} Pull a base image first — <span class="mono">vdxd image pull ubuntu-24.04</span>.{{end}}</div>{{end}}
+  {{end}}
 </div>
 
 <div class="modal" id="m-launch"><div class="modal-card lg">
@@ -66,6 +99,16 @@
     <label class="fld">Password<input type="text" name="ci_password" placeholder="(auto-generated)"></label>
     <label class="fld full">SSH public key (optional)<input type="text" name="ci_ssh_key" placeholder="ssh-ed25519 AAAA…"></label>
     <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="cloud_init" value="1" checked style="width:auto"> cloud-init</label>
+    <div class="full" style="border-top:1px solid var(--border,#333);margin-top:6px;padding-top:8px"><strong style="font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,#8a8a8a)">Advanced hardware</strong></div>
+    <label class="fld">OS type<select name="os_type" id="os-type"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>
+    <label class="fld">Machine<select name="machine_type"><option value="q35">q35 (modern)</option><option value="pc">pc (i440fx, legacy)</option></select></label>
+    <label class="fld">Disk bus<select name="disk_bus"><option value="">auto</option><option value="virtio-blk">virtio-blk (fastest)</option><option value="virtio-scsi">virtio-scsi</option><option value="sata">SATA/AHCI (best compat)</option></select></label>
+    <label class="fld">NIC model<select name="nic_model"><option value="">auto</option><option value="virtio">virtio (fastest)</option><option value="e1000e">e1000e (compat)</option><option value="rtl8139">rtl8139 (legacy)</option></select></label>
+    <label class="fld">Graphics<select name="vga"><option value="">auto</option><option value="qxl">qxl</option><option value="virtio">virtio-gpu</option><option value="std">std (VGA)</option></select></label>
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="guest_agent" value="1" checked style="width:auto"> QEMU guest agent (report guest IPs / OS / disk usage)</label>
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="tpm" value="1" style="width:auto"> TPM 2.0 (auto-enabled for Windows; required for Windows 11)</label>
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="secureboot" value="1" style="width:auto"> UEFI Secure Boot</label>
+    <p class="muted full" style="margin:0;font-size:11px">Leave bus / NIC / graphics on <em>auto</em> unless you have a reason. Windows guests get installer-friendly defaults (SATA, e1000e, std VGA, TPM) and the virtio-win driver ISO is mounted automatically so you can switch to virtio afterwards.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create</button></div>
   </form>
 </div></div>

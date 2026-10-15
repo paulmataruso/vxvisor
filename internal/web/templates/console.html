@@ -13,7 +13,10 @@
  select.cbtn,input.cpaste{height:30px}
  .cpaste{background:#0e121a;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:4px 8px;font:inherit;font-size:12px;width:150px}
  .sep{width:1px;height:24px;background:#2a2f3c;margin:0 2px}
- #screen{height:calc(100% - 46px)}
+ /* #wrap is the scroll area below the toolbar; #screen is the noVNC target and
+    is sized by the display-mode logic (100% to fill, or an exact WxH). */
+ #wrap{position:absolute;top:46px;left:0;right:0;bottom:0;overflow:auto;background:#000}
+ #screen{width:100%;height:100%}
 </style></head><body>
 <div id="bar">
   <a href="/instances">←</a><b>{{.Session.Name}}</b>
@@ -38,11 +41,25 @@
   <input class="cpaste" id="k-paste" placeholder="paste text → guest">
   <button class="cbtn" id="k-send">Send</button>
   <span class="sep"></span>
-  <button class="cbtn" id="k-fit" title="Toggle scale-to-fit">Fit</button>
+  <select class="cbtn" id="k-disp" title="Display mode / resolution">
+    <optgroup label="Mode">
+      <option value="auto" selected>Auto-resize to window</option>
+      <option value="fit">Fit (scale to window)</option>
+      <option value="actual">Actual size (scroll)</option>
+    </optgroup>
+    <optgroup label="Set guest resolution">
+      <option value="1920x1080">1920 × 1080</option>
+      <option value="1600x900">1600 × 900</option>
+      <option value="1366x768">1366 × 768</option>
+      <option value="1280x1024">1280 × 1024</option>
+      <option value="1280x720">1280 × 720</option>
+      <option value="1024x768">1024 × 768</option>
+    </optgroup>
+  </select>
   <button class="cbtn" id="k-full" title="Fullscreen">⛶ Full</button>
   <span id="status">connecting…</span>
 </div>
-<div id="screen"></div>
+<div id="wrap"><div id="screen"></div></div>
 <script type="module">
  import RFB from "/static/novnc/core/rfb.js";
  const status = document.getElementById("status");
@@ -53,19 +70,56 @@
    bksp:0xff08, del:0xffff, f1:0xffbe, f2:0xffbf, f3:0xffc0, f7:0xffc4,
    c:0x0063, v:0x0076, z:0x007a };
  let rfb;
- function combo(...syms){ if(!rfb) return; rfb.focus();
+ const screen = document.getElementById("screen");
+ // Keyboard capture needs the noVNC canvas to hold focus. A programmatic focus()
+ // right after connect is often ignored by the browser (no user gesture), and
+ // clicking a toolbar control moves focus off the canvas — so the guest stops
+ // receiving keys ("can't type"). Refocus aggressively: on connect, on any click
+ // in the screen area, and whenever the window/tab regains focus.
+ function grab(){ try { rfb && rfb.focus(); } catch(e){} }
+ function combo(...syms){ if(!rfb) return; grab();
    for(const s of syms) rfb.sendKey(s, null, true);
    for(let i=syms.length-1;i>=0;i--) rfb.sendKey(syms[i], null, false);
  }
+ // Display modes. "auto" = remote resize: the guest framebuffer follows this
+ // window (dynamic resize) — needs a guest GPU driver that honors ExtendedDesktop
+ // Size (qxl/virtio-gpu + modesetting, like Proxmox's noVNC). "fit" scales the
+ // guest display to the window without changing its resolution. "actual" shows it
+ // 1:1 (scroll). A WxH value asks the guest to switch to exactly that resolution.
+ function applyDisplay(v){
+   if(!rfb) return;
+   const m = /^(\d+)x(\d+)$/.exec(v);
+   if(m){
+     // Specific resolution: size the target to WxH and let noVNC request it.
+     rfb.scaleViewport = false; rfb.clipViewport = false;
+     screen.style.width = m[1]+"px"; screen.style.height = m[2]+"px";
+     rfb.resizeSession = true;            // request the guest to match WxH
+     status.textContent = "requested "+v+" (guest must support resize)";
+   } else {
+     screen.style.width = "100%"; screen.style.height = "100%";
+     rfb.resizeSession = (v === "auto");
+     rfb.scaleViewport = (v === "fit");
+     rfb.clipViewport  = (v === "actual");
+   }
+   try { window.dispatchEvent(new Event("resize")); } catch(e){}
+   grab();
+ }
  try {
-   rfb = new RFB(document.getElementById("screen"), url,
+   rfb = new RFB(screen, url,
      { credentials: { password: "{{.Session.VNCPassword}}" } });
-   rfb.scaleViewport = true;
-   rfb.addEventListener("connect", () => { status.textContent = "connected"; rfb.focus(); });
+   rfb.resizeSession = true;   // default: dynamic resize to the window
+   rfb.scaleViewport = false;
+   rfb.clipViewport = false;
+   rfb.focusOnClick = true;
+   rfb.addEventListener("connect", () => { status.textContent = "connected — click the screen to type"; grab(); });
    rfb.addEventListener("disconnect", e =>
      status.textContent = e.detail.clean ? "disconnected" : "connection failed — is the VM running?");
    rfb.addEventListener("clipboard", e => { /* guest copied; available if needed */ });
  } catch (err) { status.textContent = "noVNC failed to load: " + err; }
+ // Click anywhere on the screen → focus the canvas so keystrokes reach the guest.
+ screen.addEventListener("mousedown", grab);
+ screen.addEventListener("touchstart", grab, {passive:true});
+ window.addEventListener("focus", grab);
 
  document.getElementById("k-cad").onclick = () => rfb && rfb.sendCtrlAltDel();
  document.getElementById("k-combo").onchange = (e) => {
@@ -89,7 +143,7 @@
    const inp = document.getElementById("k-paste");
    if(rfb && inp.value){ rfb.clipboardPasteFrom(inp.value); status.textContent = "sent to guest clipboard — paste in the guest"; }
  };
- document.getElementById("k-fit").onclick = () => { if(rfb){ rfb.scaleViewport = !rfb.scaleViewport; } };
+ document.getElementById("k-disp").onchange = (e) => applyDisplay(e.target.value);
  document.getElementById("k-full").onclick = () => {
    const el = document.documentElement;
    if(!document.fullscreenElement){ el.requestFullscreen && el.requestFullscreen(); }

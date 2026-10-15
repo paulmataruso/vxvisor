@@ -1,0 +1,45 @@
+{{define "container_console.html"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Console — {{.Name}}</title>
+<link rel="stylesheet" href="/static/xterm/xterm.css">
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#e7e9ee;font:14px system-ui,sans-serif}
+ #bar{height:46px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#161922;border-bottom:1px solid #2a2f3c}
+ #bar a{color:#5b8cff;text-decoration:none}
+ #status{color:#8b93a3;font-size:13px;margin-left:auto}
+ .cbtn{background:#222736;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px}
+ .cbtn:hover{border-color:#5b8cff}
+ #term{height:calc(100% - 46px);padding:4px 6px;box-sizing:border-box}
+</style></head><body>
+<div id="bar">
+  <a href="/containers">←</a><b>{{.Name}}</b> <span style="color:#8b93a3">container shell</span>
+  <button class="cbtn" id="k-clear">Clear</button>
+  <span id="status">connecting…</span>
+</div>
+<div id="term"></div>
+<script src="/static/xterm/xterm.js"></script>
+<script src="/static/xterm/addon-fit.js"></script>
+<script>
+ const status = document.getElementById("status");
+ const term = new Terminal({ cursorBlink:true, fontFamily:"Fira Code, ui-monospace, monospace", fontSize:14,
+   theme:{ background:"#000000" }, scrollback:5000 });
+ const fit = new FitAddon.FitAddon();
+ term.loadAddon(fit); term.open(document.getElementById("term"));
+ try { fit.fit(); } catch(e){}
+
+ const scheme = location.protocol === "https:" ? "wss" : "ws";
+ const ws = new WebSocket(`${scheme}://${location.host}/containers/{{.ID}}/console/ws`, "binary");
+ ws.binaryType = "arraybuffer";
+ const enc = new TextEncoder();
+ const sendResize = () => { try { if (ws.readyState===1) ws.send(JSON.stringify({resize:[term.cols, term.rows]})); } catch(e){} };
+
+ ws.onopen = () => { status.textContent = "connected"; term.focus(); sendResize(); try{ws.send(enc.encode("\r"));}catch(e){} };
+ ws.onmessage = (ev) => { term.write(new Uint8Array(ev.data)); };
+ ws.onclose = () => { status.textContent = "disconnected"; term.write("\r\n[container console closed]\r\n"); };
+ ws.onerror = () => { status.textContent = "connection error — is the container running?"; };
+
+ term.onData(d => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+ window.addEventListener("resize", () => { try { fit.fit(); } catch(e){} sendResize(); });
+ term.onResize(sendResize);
+ document.getElementById("k-clear").onclick = () => { term.clear(); term.focus(); };
+</script></body></html>{{end}}

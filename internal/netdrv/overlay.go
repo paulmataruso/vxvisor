@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 )
 
 // OverlayConfig describes the VXLAN fabric for one node. Every node in the
@@ -187,4 +188,107 @@ func hostOf(cidr string) string {
 		}
 	}
 	return cidr
+}
+
+// ---- per-network VXLAN segments (general VXLAN, not the single cluster overlay)
+
+// VNINetworkNames returns the deterministic bridge + vxlan device names for a
+// user VXLAN network, keyed on the NETWORK ROW ID so they never collide with the
+// cluster overlay's vdxvx<VNI> devices or with each other.
+func VNINetworkNames(id int64) (bridge, vxdev string) {
+	return "vdxubr" + strconv.FormatInt(id, 10), "vdxuvx" + strconv.FormatInt(id, 10)
+}
+
+// EnsureVNINetwork idempotently builds one VXLAN L2 segment: a per-network bridge
+// with a VXLAN device enslaved to it (VM taps enslave to the bridge). Peers get
+// static head-end FDB entries (unicast BUM replication) so the segment spans
+// nodes without multicast. Optional gatewayCIDR puts an L3 gateway on the bridge.
+func EnsureVNINetwork(id int64, underlay, local string, vni, dstport, mtu int, peers []string, gatewayCIDR string) error {
+	if underlay == "" {
+		return fmt.Errorf("vxlan network: underlay NIC is required")
+	}
+	if vni <= 0 {
+		return fmt.Errorf("vxlan network: a VNI is required")
+	}
+	if dstport <= 0 {
+		dstport = 4789
+	}
+	if mtu <= 0 {
+		mtu = 1450
+	}
+	bridge, vx := VNINetworkNames(id)
+	if !ifaceExists(bridge) {
+		if err := run("ip", "link", "add", bridge, "type", "bridge"); err != nil {
+			return err
+		}
+	}
+	_ = run("ip", "link", "set", bridge, "mtu", strconv.Itoa(mtu))
+	if err := run("ip", "link", "set", bridge, "up"); err != nil {
+		return err
+	}
+	if !ifaceExists(vx) {
+		args := []string{"ip", "link", "add", vx, "type", "vxlan",
+			"id", strconv.Itoa(vni), "dev", underlay, "dstport", strconv.Itoa(dstport)}
+		if local != "" {
+			args = append(args, "local", local)
+		}
+		if err := run(args...); err != nil {
+			return err
+		}
+		if err := run("ip", "link", "set", vx, "master", bridge); err != nil {
+			return err
+		}
+	}
+	_ = run("ip", "link", "set", vx, "mtu", strconv.Itoa(mtu))
+	if err := run("ip", "link", "set", vx, "up"); err != nil {
+		return err
+	}
+	for _, p := range peers {
+		if p = strings.TrimSpace(p); p != "" {
+			// append (not replace) the all-zero FDB entry per peer = head-end BUM.
+			_ = run("bridge", "fdb", "append", "00:00:00:00:00:00", "dev", vx, "dst", p)
+		}
+	}
+	if gatewayCIDR != "" {
+		_ = run("ip", "addr", "add", gatewayCIDR, "dev", bridge) // idempotent-ignore
+	}
+	return nil
+}
+
+// TeardownVNINetwork removes a user VXLAN network's devices (best effort).
+func TeardownVNINetwork(id int64) {
+	bridge, vx := VNINetworkNames(id)
+	_ = run("ip", "link", "del", vx)
+	_ = run("ip", "link", "del", bridge)
+}
+
+// RenderVNINetworkUnit returns a systemd oneshot unit that recreates the segment
+// at boot (RemainAfterExit) so VXLAN VM networks survive a reboot.
+func RenderVNINetworkUnit(id int64, underlay, local string, vni, dstport, mtu int, peers []string, gatewayCIDR string) string {
+	bridge, vx := VNINetworkNames(id)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Unit]\nDescription=VXVisor VXLAN network %d (%s)\nAfter=network-online.target\nWants=network-online.target\n\n", id, bridge)
+	b.WriteString("[Service]\nType=oneshot\nRemainAfterExit=yes\n")
+	ex := func(f string, a ...any) { fmt.Fprintf(&b, "ExecStart=-%s\n", fmt.Sprintf(f, a...)) }
+	ex("/sbin/ip link add %s type bridge", bridge)
+	ex("/sbin/ip link set %s mtu %d", bridge, mtu)
+	ex("/sbin/ip link set %s up", bridge)
+	local2 := ""
+	if local != "" {
+		local2 = " local " + local
+	}
+	ex("/sbin/ip link add %s type vxlan id %d dev %s dstport %d%s", vx, vni, underlay, dstport, local2)
+	ex("/sbin/ip link set %s master %s", vx, bridge)
+	ex("/sbin/ip link set %s mtu %d", vx, mtu)
+	ex("/sbin/ip link set %s up", vx)
+	for _, p := range peers {
+		if p = strings.TrimSpace(p); p != "" {
+			ex("/sbin/bridge fdb append 00:00:00:00:00:00 dev %s dst %s", vx, p)
+		}
+	}
+	if gatewayCIDR != "" {
+		ex("/sbin/ip addr add %s dev %s", gatewayCIDR, bridge)
+	}
+	b.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
+	return b.String()
 }

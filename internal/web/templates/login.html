@@ -46,5 +46,6 @@
   <button>Sign in</button>
   {{if .Error}}<div class="err">Invalid credentials or too many attempts.</div>{{end}}
   {{if .OIDC}}<a class="sso" href="/oidc/login">Sign in with SSO</a>{{end}}
+  {{if .AD}}<p style="text-align:center;margin-top:14px;font-size:12px;opacity:.7">Use your Active Directory username &amp; password</p>{{end}}
 </form>
 </body></html>{{end}}

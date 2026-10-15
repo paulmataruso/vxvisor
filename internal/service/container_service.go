@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 
 	"vdxclone/internal/lxc"
@@ -134,6 +135,21 @@ func (s *Service) containerByID(p *Principal, id int64) (ContainerRow, error) {
 		return c, ErrUnauthorized
 	}
 	return c, nil
+}
+
+// ContainerConsole authorizes and returns the lxc-attach command to open an
+// interactive shell in the container, plus its display name. Errors if the
+// container isn't running. The web layer wires the command to a PTY↔websocket.
+func (s *Service) ContainerConsole(p *Principal, id int64) (*exec.Cmd, string, error) {
+	c, err := s.containerByID(p, id)
+	if err != nil {
+		return nil, "", err
+	}
+	info, _ := lxc.Info(c.Name, c.Lxcpath)
+	if info.State != "RUNNING" {
+		return nil, "", fmt.Errorf("container is not running")
+	}
+	return lxc.ConsoleCmd(c.Name, c.Lxcpath), c.Name, nil
 }
 
 func (s *Service) StartContainer(p *Principal, id int64, ip string) error {

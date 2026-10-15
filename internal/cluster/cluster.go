@@ -13,11 +13,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"runtime"
 	"time"
 
 	"vdxclone/internal/db"
+	"vdxclone/internal/peer"
 	"vdxclone/internal/qemu"
 )
 
@@ -35,9 +37,16 @@ type Node struct {
 	CreatedAt string
 }
 
-type Store struct{ db *db.DB }
+type Store struct {
+	db    *db.DB
+	peerc *peer.Client
+}
 
 func New(d *db.DB) *Store { return &Store{db: d} }
+
+// SetPeerClient attaches the authenticated peer-API client used to launch
+// migration receivers on destination nodes (built from the shared cluster secret).
+func (s *Store) SetPeerClient(c *peer.Client) { s.peerc = c }
 
 // EnsureLocalNode registers (once) the control node this daemon runs on.
 func (s *Store) EnsureLocalNode(hostname string) {
@@ -201,7 +210,21 @@ type MigrateReq struct {
 	// When false, BlockMigrate must be true (copy the disk inline over the wire).
 	SharedStorage bool
 	BlockMigrate  bool
+	// BlockLive runs the NBD + drive-mirror live migration for a RUNNING VM on
+	// LOCAL storage: the disk is mirrored to the destination over NBD while the
+	// guest runs, then RAM + a sub-second switchover complete the move. The source
+	// disk is only ever READ and is retained aside on success (never destroyed).
+	BlockLive   bool
+	VirtualSize int64 // source disk virtual size in bytes (dest pre-creates the target)
 	ReceiverSpec  qemu.Spec // spec launched on the destination with Incoming set
+	// SessionRecord is the full session row (JSON) shipped to the destination so
+	// it can adopt the VM into its own DB on a completed migration (ownership
+	// handoff). Opaque to this package.
+	SessionRecord []byte
+	// Progress, when set, is invoked on each poll tick (and at start/finish) with
+	// the live migration status and RAM byte counts, so the caller can surface a
+	// progress indicator. Called from Migrate's own goroutine; must not block.
+	Progress func(status string, remaining, total int64)
 }
 
 // Migrate performs a live migration of a running VM from src to dst without
@@ -219,13 +242,22 @@ func (s *Store) Migrate(req MigrateReq) error {
 	if req.Dst.Role == "local" || req.Dst.Address == "" {
 		return fmt.Errorf("destination node has no routable address")
 	}
+	// Running VM on LOCAL storage → the NBD + drive-mirror live dance (own file).
+	if req.BlockLive {
+		return s.migrateBlockLive(req)
+	}
 	if !req.SharedStorage && !req.BlockMigrate {
 		return fmt.Errorf("live migration requires shared storage across nodes, or block migration; refusing to migrate a local-only disk")
 	}
 	dstHost := hostOnly(req.Dst.Address)
 	port := req.IncomingPort
 
-	// 1. Ship the receiver spec to the destination and launch the incoming QEMU.
+	// 1. Ship the receiver spec to the destination over the authenticated peer API
+	// (cluster secret, cluster NIC) and launch the incoming QEMU there. This
+	// replaces an SSH-driven launcher — no inter-node SSH keys required.
+	if s.peerc == nil {
+		return fmt.Errorf("cluster peer client not configured; cannot launch migration receiver")
+	}
 	spec := req.ReceiverSpec
 	spec.Incoming = fmt.Sprintf("tcp:0.0.0.0:%d", port)
 	blob, err := json.Marshal(spec)
@@ -233,13 +265,23 @@ func (s *Store) Migrate(req MigrateReq) error {
 		return fmt.Errorf("encode receiver spec: %w", err)
 	}
 	enc := base64.StdEncoding.EncodeToString(blob)
-	// setsid so the receiver outlives the ssh session; it waits for the stream.
-	recvCmd := fmt.Sprintf("setsid vdxd migrate-recv %d %s >/tmp/vdx-recv-%s.log 2>&1 &",
-		port, enc, req.SessionID)
-	if out, err := sshCombined(req.Dst, recvCmd); err != nil {
-		return fmt.Errorf("start receiver on %s: %v: %s", req.Dst.Name, err, out)
+	base := peer.BaseURL(req.Dst.Address, peer.APIPort)
+	body, code, err := s.peerc.PostBody(base, fmt.Sprintf("/cluster/v1/migrate-recv?port=%d", port), []byte(enc))
+	if err != nil {
+		return fmt.Errorf("start receiver on %s: %w", req.Dst.Name, err)
+	} else if code != 200 {
+		return fmt.Errorf("start receiver on %s: HTTP %d: %s", req.Dst.Name, code, string(body))
 	}
-	time.Sleep(1500 * time.Millisecond) // let the receiver bind its incoming port
+	// The destination may have bound a different free port than requested (the old
+	// fixed-port scheme collided with lingering receivers); stream to the port it
+	// actually reports. The receiver handler already verified QEMU is alive + bound.
+	var rr struct {
+		Port int `json:"port"`
+	}
+	if json.Unmarshal(body, &rr) == nil && rr.Port > 0 {
+		port = rr.Port
+	}
+	time.Sleep(500 * time.Millisecond) // brief settle before connecting
 
 	// 2. Drive the source QEMU to stream its state to the destination.
 	q, err := qemu.DialQMP(req.LocalQMP)
@@ -254,6 +296,9 @@ func (s *Store) Migrate(req MigrateReq) error {
 	if err := q.Migrate(uri, req.BlockMigrate); err != nil {
 		return fmt.Errorf("start migration: %w", err)
 	}
+	if req.Progress != nil {
+		req.Progress("active", 0, 0)
+	}
 
 	// 3. Poll to completion.
 	deadline := time.Now().Add(5 * time.Minute)
@@ -262,12 +307,30 @@ func (s *Store) Migrate(req MigrateReq) error {
 		if err != nil {
 			return fmt.Errorf("query-migrate: %w", err)
 		}
+		if req.Progress != nil {
+			req.Progress(st.Status, st.Remaining, st.Total)
+		}
 		switch st.Status {
 		case "completed":
-			// Flip ownership so the control plane now schedules/queries on dst.
-			_, _ = s.db.Exec(`UPDATE sessions SET node_id=? WHERE id=?`, req.Dst.ID, req.SessionID)
+			// Ownership handoff: the destination adopts the VM into its own DB
+			// (recording the receiver's real pid), THEN we remove our local row and
+			// quit the paused source QEMU. Without the adopt the VM would be live on
+			// dst but invisible to its control plane and impossible to migrate back.
+			base := peer.BaseURL(req.Dst.Address, peer.APIPort)
+			if body, code, cerr := s.peerc.PostBody(base, "/cluster/v1/migrate-commit", req.SessionRecord); cerr != nil || code != 200 {
+				log.Printf("cluster: migrate-commit to %s failed (code=%d err=%v body=%s) — VM is live on dst but un-adopted", req.Dst.Name, code, cerr, string(body))
+			}
+			// Remove the source row (the VM now lives on dst) and terminate the
+			// paused source QEMU so it does not linger / duplicate the guest.
+			_, _ = s.db.Exec(`DELETE FROM sessions WHERE id=?`, req.SessionID)
+			_ = q.Quit()
 			return nil
 		case "failed", "cancelled":
+			// Tear down the half-migrated receiver on dst and resume our own
+			// (paused) VM so the guest keeps running on the source.
+			base := peer.BaseURL(req.Dst.Address, peer.APIPort)
+			_, _, _ = s.peerc.Post(base, "/cluster/v1/migrate-abort?id="+req.SessionID)
+			_, _ = q.Execute("cont", nil)
 			return fmt.Errorf("migration %s", st.Status)
 		}
 		if time.Now().After(deadline) {

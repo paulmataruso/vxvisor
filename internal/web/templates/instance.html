@@ -4,10 +4,12 @@
   <div style="display:flex;align-items:center;gap:14px">
     <h2 style="margin:0">{{$s.Name}}</h2>
     <span class="pill {{$s.State}}">{{$s.State}}</span>
+    {{if .Clustered}}<span class="host-tag" title="This instance runs on cluster node {{.NodeName}}">{{.NodeName}}</span>{{end}}
     <div class="spacer" style="flex:1"></div>
     {{if .Running}}
-      <a class="btn sm primary" href="/console/{{$s.ID}}">Open console</a>
-      <a class="btn sm" href="/desktop/{{$s.ID}}" title="Full desktop in the browser via the guacd gateway — clipboard, audio, microphone, webcam">Open desktop</a>
+      <a class="btn sm primary" href="/console/{{$s.ID}}" target="_blank" rel="noopener" title="Graphical VNC console (noVNC). Best for GUI guests; cloud images/cirros put their shell on the serial console instead.">VNC console</a>
+      <a class="btn sm" href="/console/{{$s.ID}}/serial" target="_blank" rel="noopener" title="Text serial console (xterm.js) → guest ttyS0. The console that accepts input for cloud images/cirros/headless servers. Needs the VM (re)started since serial was enabled.">Serial console</a>
+      <a class="btn sm" href="/desktop/{{$s.ID}}" target="_blank" rel="noopener" title="Full desktop via the guacd gateway — RDP (Windows/xrdp) or SPICE{{if eq $s.Display "spice"}} (this VM uses SPICE){{end}}, with clipboard, audio, microphone, webcam">Desktop</a>
       <form method="post" action="/sessions/{{$s.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
     {{else}}
       <form method="post" action="/sessions/{{$s.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>
@@ -34,8 +36,20 @@
     <tr><th>Firmware</th><td>{{$s.Firmware}}</td><th>Created</th><td class="muted">{{$s.CreatedAt}}</td></tr>
     <tr><th>vCPUs</th><td>{{$s.CPUs}}</td><th>Memory</th><td>{{$s.MemoryMB}} MB</td></tr>
     <tr><th>Disk</th><td>{{if $s.DiskGB}}{{$s.DiskGB}} GB{{else}}image default{{end}}</td><th>Networking</th><td class="muted">user (NAT)</td></tr>
+    <tr><th>OS / Machine</th><td>{{$s.OSType}} · {{$s.MachineType}}</td><th>Disk bus</th><td>{{$s.DiskBus}}</td></tr>
+    <tr><th>NIC / Graphics</th><td>{{$s.NICModel}} · {{$s.VGA}}</td><th>Features</th><td class="muted">{{if $s.GuestAgent}}<span class="pill">agent</span> {{end}}{{if $s.TPM}}<span class="pill">tpm 2.0</span> {{end}}{{if $s.SecureBoot}}<span class="pill">secure boot</span>{{end}}{{if not (or $s.GuestAgent $s.TPM $s.SecureBoot)}}—{{end}}</td></tr>
   </table>
 </div>
+
+{{if $s.GuestAgent}}
+<div class="card" id="guest-card">
+  <div class="card-head">
+    <h2>Guest agent <span class="muted" style="font-weight:400;font-size:12px">— live, from inside the guest</span></h2>
+    <span class="muted" id="guest-status" style="font-size:12px">{{if .Running}}checking…{{else}}instance stopped{{end}}</span>
+  </div>
+  <div id="guest-body" class="muted" style="font-size:13px">{{if .Running}}Querying the guest agent…{{else}}Start the instance to query its guest agent.{{end}}</div>
+</div>
+{{end}}
 
 {{if $s.CloudInit}}
 <div class="card">
@@ -105,13 +119,13 @@
   <p class="muted" style="margin:0">Take a compressed copy now, schedule recurring backups, or set an auto-deprovision date. See all backups and schedules under <a href="/backups">Backups</a>.</p>
 </div>
 
-{{if and .IsAdmin .Running}}
+{{if .IsAdmin}}
 <div class="card">
   <div class="card-head">
-    <h2>Live migration</h2>
+    <h2>Migrate / move storage</h2>
     <button class="btn primary" data-modal="m-migrate">Migrate</button>
   </div>
-  <p class="muted" style="margin:0">Move this running instance to another cluster node without disconnecting it. The guest keeps its IP because every node shares one L2 segment (the VXLAN overlay); QEMU streams RAM to the destination and relearns the MAC there. Needs a second node plus shared storage — otherwise it refuses rather than risk the disk.</p>
+  <p class="muted" style="margin:0">Move this instance to another <strong>host</strong> (live migration — the guest keeps its IP over the VXLAN overlay; needs shared storage, auto-detected) or move its disk to different <strong>storage</strong> (live via drive-mirror or while stopped). Storage moves are fail-safe: the original disk is only read and is kept until the move is verified, so the instance is always recoverable.</p>
 </div>
 {{end}}
 
@@ -198,17 +212,49 @@
 
 {{if and .IsAdmin .Running}}
 <div class="modal" id="m-migrate"><div class="modal-card">
-  <div class="modal-head"><h3>Live migration</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
-  <form class="mform" method="post" action="/sessions/{{$s.ID}}/migrate" onsubmit="return confirm('Live-migrate this instance to the selected node?')">
+  <div class="modal-head"><h3>Migrate / move storage</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/migrate" onsubmit="return confirm('Relocate this instance as selected?')">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Destination node
+    <label class="fld">Destination host
       <select name="dst_node">
-        {{range .Nodes}}<option value="{{.ID}}">{{.Name}} ({{.Status}}{{if eq .Role "local"}} — this node{{end}})</option>{{end}}
+        <option value="0">— same host —</option>
+        {{range .Nodes}}{{if ne .Role "local"}}<option value="{{.ID}}">{{.Name}} ({{.Status}})</option>{{end}}{{end}}
       </select>
     </label>
-    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="shared_storage" style="width:auto"> shared storage present</label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Migrate</button></div>
+    <label class="fld">Destination storage
+      <select name="storage_pool_id">
+        <option value="-1">— keep current storage —</option>
+        <option value="0">default disk directory (local)</option>
+        {{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+      </select>
+    </label>
+    <p class="muted" style="margin:0;font-size:11px">Change <strong>host</strong> or <strong>storage</strong> — one at a time. Host move needs shared storage (auto-detected). Storage move keeps the original disk safe until verified.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Go</button></div>
   </form>
 </div></div>
+{{end}}
+{{if and $s.GuestAgent .Running}}
+<script>
+(function(){
+  var id={{$s.ID}}, body=document.getElementById('guest-body'), st=document.getElementById('guest-status');
+  if(!body) return;
+  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+  function hb(n){if(!n)return'';var u=['B','KB','MB','GB','TB'],i=0;n=Number(n);while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];}
+  function render(g){
+    if(!g||!g.responsive){st.textContent='agent not responding';body.innerHTML='The qemu-guest-agent is enabled but not answering yet. Install <span class="mono">qemu-guest-agent</span> in the guest (Linux) or from the mounted virtio-win ISO (Windows), and ensure its service is running.';return;}
+    st.textContent='connected';
+    var h='<table style="width:100%">';
+    if(g.hostname) h+='<tr><th style="width:120px">Hostname</th><td class="mono">'+esc(g.hostname)+'</td></tr>';
+    if(g.os) h+='<tr><th>OS</th><td>'+esc(g.os)+(g.os_kernel?' <span class="muted">('+esc(g.os_kernel)+')</span>':'')+'</td></tr>';
+    if(g.agent_version) h+='<tr><th>Agent</th><td class="muted">'+esc(g.agent_version)+'</td></tr>';
+    if(g.interfaces&&g.interfaces.length){var ni=g.interfaces.map(function(n){return '<div><span class="mono">'+esc(n.name)+'</span> '+(n.ips||[]).map(function(x){return '<span class="pill">'+esc(x)+'</span>';}).join(' ')+'</div>';}).join('');h+='<tr><th>Interfaces</th><td>'+ni+'</td></tr>';}
+    if(g.filesystems&&g.filesystems.length){var fs=g.filesystems.filter(function(f){return f.total;}).map(function(f){var pct=f.total?Math.round(100*f.used/f.total):0;return '<div><span class="mono">'+esc(f.mount)+'</span> <span class="muted">'+hb(f.used)+' / '+hb(f.total)+' ('+pct+'%)</span></div>';}).join('');if(fs)h+='<tr><th>Filesystems</th><td>'+fs+'</td></tr>';}
+    h+='</table>';
+    body.className='';body.innerHTML=h;
+  }
+  function poll(){fetch('/api/instances/'+id+'/guest',{headers:{'Accept':'application/json'}}).then(function(r){return r.ok?r.json():null;}).then(render).catch(function(){st.textContent='unavailable';});}
+  poll(); setInterval(poll, 10000);
+})();
+</script>
 {{end}}
 {{template "foot" .}}{{end}}
