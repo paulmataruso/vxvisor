@@ -57,6 +57,14 @@ type Spec struct {
 	// qcow2 file: use format=raw with cache=none,aio=native (best for raw block).
 	DiskRaw bool
 
+	// DiskLockingOff disables QEMU's image file locking (file.locking=off). Needed
+	// for disks on filesystems that don't coordinate OFD/byte-range locks across
+	// hosts (CIFS/SMB): there the migration source→destination lock handoff fails
+	// ("Failed to get write lock"). The control plane guarantees a single writer,
+	// so the lock is redundant on shared storage. NFS/CephFS coordinate locks and
+	// keep it on.
+	DiskLockingOff bool
+
 	// Networking. MAC pins the NIC address. In user mode HostFwds publish guest
 	// ports on the host (hostfwd). In bridge/vlan mode TapName names a host tap.
 	MAC      string
@@ -79,6 +87,34 @@ type Spec struct {
 	// stream (e.g. "tcp:0.0.0.0:49200"). The destination node launches with this;
 	// the source then streams its RAM/device state in over QMP migrate.
 	Incoming string
+
+	// SerialSock, when set, exposes the guest's first serial port (ttyS0) on a
+	// loopback unix socket so the browser serial console (xterm.js) can attach.
+	// Cloud images and cirros put their login/getty on ttyS0, so this is the
+	// text console that actually accepts input for headless guests. Loopback/
+	// unix only — the sole external path is the authenticated websocket proxy.
+	SerialSock string
+
+	// ---- Hardware profile (per-VM knobs; empty => safe default) ----
+	MachineType string // q35 (default) | pc (i440fx)
+	DiskBus     string // virtio-blk (default) | virtio-scsi | sata
+	NICModel    string // virtio (default) | e1000e | rtl8139
+	VGA         string // qxl (default) | virtio | std
+	Windows     bool   // apply Windows tweaks: localtime RTC + Hyper-V enlightenments
+
+	// GuestAgent adds a qemu-guest-agent virtio-serial channel
+	// (org.qemu.guest_agent.0) over QGASocket. The channel shares the single
+	// virtio-serial-pci controller with the SPICE vdagent when both are on.
+	GuestAgent bool
+	QGASocket  string // unix socket for the guest agent (loopback/unix only)
+
+	// TPMSock, when set, is the control socket of a per-VM swtpm instance the
+	// caller has already started; QEMU attaches it as a TPM 2.0 CRB device.
+	TPMSock string
+
+	// ExtraISO is an optional second cdrom (e.g. the virtio-win driver ISO for
+	// Windows guests), attached read-only after the seed/boot ISOs.
+	ExtraISO string
 }
 
 // HostFwd is a user-mode port forward: host_ip:host_port → guest_port.
@@ -120,6 +156,39 @@ func CreateBlank(path string, gib int) error {
 }
 
 // ConvertToRaw writes a base image onto a raw target (e.g. a ZFS zvol device).
+// ConvertToQcow2 copies any-format source to a new qcow2 at dst (used by offline
+// storage vMotion). The source is only READ; dst is created fresh.
+func ConvertToQcow2(src, dst string) error {
+	cmd := exec.Command("qemu-img", "convert", "-O", "qcow2", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img convert to qcow2: %v: %s", err, out)
+	}
+	return nil
+}
+
+// CreateQcow2Sized creates an empty qcow2 of an exact virtual byte size. Used to
+// pre-create a drive-mirror target so a dropped-privilege QEMU can open an
+// already-owned file (mode=existing) instead of creating one in a root-owned dir.
+func CreateQcow2Sized(path string, bytes int64) error {
+	cmd := exec.Command("qemu-img", "create", "-f", "qcow2", path, strconv.FormatInt(bytes, 10))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img create sized: %v: %s", err, out)
+	}
+	return nil
+}
+
+// ImageOK runs `qemu-img check` and returns nil only if the image passes. Used
+// to verify a freshly-written vMotion target before trusting it. Raw images have
+// no consistency structure, so a successful check is qcow2-only; callers verify
+// raw targets by size instead.
+func ImageOK(path string) error {
+	cmd := exec.Command("qemu-img", "check", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img check: %v: %s", err, out)
+	}
+	return nil
+}
+
 func ConvertToRaw(src, dst string) error {
 	cmd := exec.Command("qemu-img", "convert", "-O", "raw", src, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -143,11 +212,20 @@ func (s Spec) Args() []string {
 	if s.VNCPwFile != "" {
 		vnc += ",password-secret=vncpw"
 	}
+	mach := s.MachineType
+	if mach == "" {
+		mach = "q35"
+	}
 	a := []string{
 		"-name", "vdx-" + s.ID,
-		"-machine", "q35",
+		"-machine", mach,
 		"-smp", strconv.Itoa(s.CPUs),
 		"-m", strconv.Itoa(s.MemoryMB),
+	}
+	// Windows keeps its hardware clock in local time; without this the guest
+	// clock is off by the UTC offset on every boot.
+	if s.Windows {
+		a = append(a, "-rtc", "base=localtime")
 	}
 	// UEFI firmware: readonly code (unit 0) + per-VM writable vars (unit 1). The
 	// pflash drives must come before the OS disk so unit ordering is stable.
@@ -162,6 +240,9 @@ func (s Spec) Args() []string {
 	// qcow2 (aio=native can block on ZFS/NFS). writeback uses the host page cache
 	// for speed; discard/detect-zeroes keep the thin qcow2 small.
 	diskOpts := "file=" + s.DiskPath + ",if=none,id=disk0,discard=unmap,detect-zeroes=unmap"
+	if s.DiskLockingOff {
+		diskOpts += ",file.locking=off"
+	}
 	if s.DiskRaw {
 		// Raw block (zvol): O_DIRECT + native AIO is fastest for real block devices.
 		diskOpts += ",format=raw,cache=none,aio=native"
@@ -175,11 +256,30 @@ func (s Spec) Args() []string {
 	if blkQ < 1 {
 		blkQ = 1
 	}
-	a = append(a,
-		"-object", "iothread,id=iothread0",
-		"-drive", diskOpts,
-		"-device", fmt.Sprintf("virtio-blk-pci,drive=disk0,iothread=iothread0,num-queues=%d", blkQ),
-	)
+	// Disk controller selected by DiskBus. virtio-blk (default) and virtio-scsi
+	// get the dedicated IOThread; AHCI/SATA (used for Windows installs, which have
+	// no in-box virtio driver) does not support iothread, so it is omitted there.
+	switch s.DiskBus {
+	case "virtio-scsi":
+		a = append(a,
+			"-object", "iothread,id=iothread0",
+			"-drive", diskOpts,
+			"-device", "virtio-scsi-pci,id=scsi0,iothread=iothread0",
+			"-device", "scsi-hd,bus=scsi0.0,drive=disk0",
+		)
+	case "sata":
+		a = append(a,
+			"-drive", diskOpts,
+			"-device", "ich9-ahci,id=ahci0",
+			"-device", "ide-hd,bus=ahci0.0,drive=disk0",
+		)
+	default: // virtio-blk
+		a = append(a,
+			"-object", "iothread,id=iothread0",
+			"-drive", diskOpts,
+			"-device", fmt.Sprintf("virtio-blk-pci,drive=disk0,iothread=iothread0,num-queues=%d", blkQ),
+		)
+	}
 	// Optical drives (cloud-init seed and/or an installer ISO), attached to the
 	// q35 SATA bus by default. Seed media is never booted; only BootISO changes
 	// the boot order.
@@ -192,25 +292,50 @@ func (s Spec) Args() []string {
 	} else {
 		a = append(a, "-boot", "order=c")
 	}
+	// Extra read-only ISO (e.g. virtio-win drivers for a Windows guest), on its
+	// own cdrom so the installer/user can load drivers or the guest agent.
+	if s.ExtraISO != "" {
+		a = append(a, "-drive", "file="+s.ExtraISO+",media=cdrom,readonly=on")
+	}
 	if s.VNCPwFile != "" {
 		// Secret read from a 0600 file, so it never lands on the command line.
 		a = append(a, "-object", "secret,id=vncpw,file="+s.VNCPwFile+",format=raw")
 	}
-	dev := "virtio-net-pci,netdev=n0"
+	// NIC model. virtio (default) is fastest but needs a guest driver (built into
+	// Linux; from virtio-win on Windows). e1000e/rtl8139 have in-box drivers on
+	// most OSes, so they are the installer-friendly fallback (e.g. Windows setup).
+	nicDev := "virtio-net-pci"
+	switch s.NICModel {
+	case "e1000e":
+		nicDev = "e1000e"
+	case "rtl8139":
+		nicDev = "rtl8139"
+	}
+	dev := nicDev + ",netdev=n0"
 	if s.MAC != "" {
 		dev += ",mac=" + s.MAC
 	}
 	// virtio-net multiqueue on bridged (tap) NICs: one queue per vCPU (capped 8),
 	// vectors = 2*queues + 2. Lets RX/TX scale across vCPUs (guest still needs
 	// `ethtool -L <nic> combined N`). SLIRP user-net doesn't support multiqueue.
-	if nq := s.netQueues(); nq > 1 {
-		dev += fmt.Sprintf(",mq=on,vectors=%d", 2*nq+2)
+	// Only virtio-net supports multiqueue; emulated NICs ignore it.
+	if nicDev == "virtio-net-pci" {
+		if nq := s.netQueues(); nq > 1 {
+			dev += fmt.Sprintf(",mq=on,vectors=%d", 2*nq+2)
+		}
+	}
+	// VGA adapter. qxl (default) gives the guest a real KMS/DRM GPU and renders
+	// cleanly over VNC and SPICE; std is the safe choice for Windows (in-box
+	// driver, no black screen before the QXL/virtio driver is installed); virtio
+	// (virtio-gpu) is the modern Linux option.
+	vgaModel := s.VGA
+	switch vgaModel {
+	case "std", "virtio", "qxl":
+	default:
+		vgaModel = "qxl"
 	}
 	a = append(a,
-		// qxl gives the guest a real KMS/DRM GPU. The default (std/VGA) makes
-		// GNOME/GDM black-screen and crawl; qxl renders cleanly over both VNC and
-		// SPICE and has broad Linux/Windows driver support.
-		"-vga", "qxl",
+		"-vga", vgaModel,
 		"-vnc", vnc,
 		// QMP control socket for lifecycle operations (shutdown, query).
 		"-qmp", "unix:"+s.QMPSocket+",server=on,wait=off",
@@ -227,19 +352,57 @@ func (s Spec) Args() []string {
 		"-device", "virtio-rng-pci",
 		"-device", "virtio-balloon-pci",
 	)
-	// SPICE display (loopback only): a SPICE server + the guest-agent virtio
-	// channel for clipboard/resolution (qxl VGA is already set above). The guac
-	// gateway dials this loopback port; it is never exposed to the network.
-	if s.Display == "spice" && s.SPICEPort > 0 {
+	// A SINGLE virtio-serial controller carries both the SPICE vdagent channel
+	// (clipboard/resolution) and the qemu-guest-agent channel. Emitting two
+	// controllers is wrong, so build one and attach whichever ports are enabled.
+	spiceOn := s.Display == "spice" && s.SPICEPort > 0
+	if spiceOn || s.GuestAgent {
+		a = append(a, "-device", "virtio-serial-pci,id=vserial0")
+	}
+	if spiceOn {
 		a = append(a,
 			"-spice", fmt.Sprintf("port=%d,addr=127.0.0.1,disable-ticketing=on", s.SPICEPort),
-			"-device", "virtio-serial-pci",
 			"-chardev", "spicevmc,id=vdagent,name=vdagent",
-			"-device", "virtserialport,chardev=vdagent,name=com.redhat.spice.0",
+			"-device", "virtserialport,bus=vserial0.0,chardev=vdagent,name=com.redhat.spice.0",
+		)
+	}
+	// qemu-guest-agent channel on a loopback unix socket. The guest's agent
+	// (qemu-ga; from virtio-win on Windows) connects to org.qemu.guest_agent.0;
+	// vdxd queries it over this socket for IPs/OS/filesystem info. If no agent is
+	// installed in the guest the socket simply never answers — harmless.
+	if s.GuestAgent && s.QGASocket != "" {
+		a = append(a,
+			"-chardev", "socket,id=qga0,path="+s.QGASocket+",server=on,wait=off",
+			"-device", "virtserialport,bus=vserial0.0,chardev=qga0,name=org.qemu.guest_agent.0",
+		)
+	}
+	// TPM 2.0 via a per-VM swtpm the caller already started on TPMSock. tpm-crb is
+	// the modern CRB interface Windows 11 expects on q35/UEFI.
+	if s.TPMSock != "" {
+		a = append(a,
+			"-chardev", "socket,id=chrtpm,path="+s.TPMSock,
+			"-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+			"-device", "tpm-crb,tpmdev=tpm0",
+		)
+	}
+	// Serial console on a loopback unix socket (server mode, non-blocking) so the
+	// browser xterm.js console can attach to the guest's ttyS0. Nothing boots
+	// differently; it just surfaces the serial line that cloud images/cirros use.
+	if s.SerialSock != "" {
+		a = append(a,
+			"-chardev", "socket,id=serial0,path="+s.SerialSock+",server=on,wait=off",
+			"-serial", "chardev:serial0",
 		)
 	}
 	if s.EnableKVM {
-		a = append(a, "-enable-kvm", "-cpu", "host")
+		cpu := "host"
+		// Hyper-V enlightenments make Windows guests substantially faster and more
+		// stable under KVM (they teach Windows it is virtualized). Harmless to add
+		// only for Windows guests.
+		if s.Windows {
+			cpu += ",hv_relaxed,hv_vapic,hv_time,hv_spinlocks=0x1fff,hv_vpindex,hv_synic,hv_stimer,hv_frequencies"
+		}
+		a = append(a, "-enable-kvm", "-cpu", cpu)
 	} else {
 		a = append(a, "-cpu", "max")
 	}
@@ -347,6 +510,35 @@ func OVMF() (code, varsTemplate string, ok bool) {
 	return "", "", false
 }
 
+// ovmfSecurePairs are the Microsoft-keyed OVMF pairs required for UEFI Secure
+// Boot (the vars template ships with the MS KEK/db so Windows boots SB-enabled).
+var ovmfSecurePairs = [][2]string{
+	{"/usr/share/OVMF/OVMF_CODE_4M.ms.fd", "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"},
+	{"/usr/share/OVMF/OVMF_CODE.secboot.fd", "/usr/share/OVMF/OVMF_VARS.ms.fd"},
+}
+
+// OVMFSecure returns a Secure-Boot-capable (MS-keyed) OVMF pair if present.
+func OVMFSecure() (code, varsTemplate string, ok bool) {
+	for _, p := range ovmfSecurePairs {
+		if fileExists(p[0]) && fileExists(p[1]) {
+			return p[0], p[1], true
+		}
+	}
+	return "", "", false
+}
+
+// VirtioWinISO returns the path to the virtio-win driver ISO if one is present
+// in isoDir (looked up by the caller), or "" if none. Checked at launch time so
+// a freshly-downloaded ISO is picked up without restarting vdxd.
+func VirtioWinISO(isoDir string) string {
+	for _, name := range []string{"virtio-win.iso", "virtio-win-latest.iso"} {
+		if p := isoDir + "/" + name; fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // PrepareUEFIVars copies the OVMF vars template to a per-VM writable image if it
@@ -375,7 +567,10 @@ func ResizeDisk(overlay string, gib int) error {
 
 // VirtualSizeBytes reports a qcow2's virtual (guest-visible) size.
 func VirtualSizeBytes(path string) (int64, error) {
-	out, err := exec.Command("qemu-img", "info", "--output=json", path).Output()
+	// -U (force-share) so this works on an image currently OPEN by a running VM
+	// (storage vMotion reads the virtual size of a live source); without it
+	// qemu-img fails to take the image lock and exits non-zero.
+	out, err := exec.Command("qemu-img", "info", "-U", "--output=json", path).Output()
 	if err != nil {
 		return 0, err
 	}

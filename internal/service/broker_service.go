@@ -308,3 +308,121 @@ func shortID(s string) string {
 	}
 	return s
 }
+
+// ---- published app library -----------------------------------------------
+
+// ListApps returns all published apps in the admin's org.
+func (s *Service) ListApps(p *Principal) ([]broker.App, error) {
+	if !p.IsAdmin || s.pools == nil {
+		return nil, ErrUnauthorized
+	}
+	return s.pools.ListApps(p.OrgID)
+}
+
+// CreateApp publishes an app (admin). Pool-backed kinds require a pool; web
+// requires a target URL.
+func (s *Service) CreateApp(p *Principal, a broker.App, ip string) (int64, error) {
+	if !p.IsAdmin || s.pools == nil {
+		return 0, ErrUnauthorized
+	}
+	a.OrgID = p.OrgID
+	switch a.Kind {
+	case "web":
+		if a.Target == "" {
+			return 0, errors.New("a web app needs a target URL")
+		}
+		a.PoolID = 0
+	case "desktop", "remoteapp":
+		if a.PoolID == 0 {
+			return 0, errors.New("a desktop/remoteapp app needs a backing pool")
+		}
+		if a.Kind == "remoteapp" && a.Target == "" {
+			return 0, errors.New("a RemoteApp needs a program (target)")
+		}
+	default:
+		return 0, errors.New("unknown app kind")
+	}
+	id, err := s.pools.CreateApp(a)
+	if err != nil {
+		return 0, err
+	}
+	s.audit(p, p.OrgID, "app.create", "app", fmt.Sprint(id), ip, map[string]any{"name": a.Name, "kind": a.Kind})
+	return id, nil
+}
+
+// DeleteApp removes a published app (admin).
+func (s *Service) DeleteApp(p *Principal, id int64, ip string) error {
+	if !p.IsAdmin || s.pools == nil {
+		return ErrUnauthorized
+	}
+	if err := s.pools.DeleteApp(p.OrgID, id); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "app.delete", "app", fmt.Sprint(id), ip, nil)
+	return nil
+}
+
+// MyApps returns the apps a portal user may launch.
+func (s *Service) MyApps(p *Principal) ([]broker.App, error) {
+	if s.pools == nil || p.User == nil {
+		return nil, nil
+	}
+	return s.pools.AppsForUser(p.User.ID)
+}
+
+// ConnectApp launches a published app. For a web app it returns (webURL) and the
+// caller redirects there. For desktop/remoteapp it leases the backing pool VM
+// and returns a desktop redirect ("/desktop/{sid}?t={token}"); a RemoteApp pins
+// its seamless program into the token.
+func (s *Service) ConnectApp(p *Principal, appID int64, ip string) (redirect string, err error) {
+	if s.pools == nil || p.User == nil {
+		return "", errors.New("broker not configured")
+	}
+	// Authorization: the app must be in the user's launchable set.
+	apps, err := s.pools.AppsForUser(p.User.ID)
+	if err != nil {
+		return "", err
+	}
+	var app *broker.App
+	for i := range apps {
+		if apps[i].ID == appID {
+			app = &apps[i]
+			break
+		}
+	}
+	if app == nil {
+		return "", ErrUnauthorized
+	}
+	if app.Kind == "web" {
+		s.audit(p, p.OrgID, "app.launch", "app", fmt.Sprint(appID), ip, map[string]any{"kind": "web"})
+		return app.Target, nil
+	}
+	if s.signer == nil {
+		return "", errors.New("broker not configured")
+	}
+	pool, err := s.pools.Get(app.PoolID)
+	if err != nil {
+		return "", ErrNotFound
+	}
+	sid, err := s.acquireDesktop(p, &pool)
+	if err != nil {
+		return "", err
+	}
+	sess, err := s.mgr.Get(sid)
+	if err != nil {
+		return "", err
+	}
+	if !s.mgr.Running(sess) {
+		if _, err := s.mgr.Start(sid); err != nil {
+			return "", fmt.Errorf("start app: %w", err)
+		}
+	}
+	s.pools.Touch(sid)
+	remoteApp := ""
+	if app.Kind == "remoteapp" {
+		remoteApp = app.Target
+	}
+	s.audit(p, p.OrgID, "app.launch", "app", fmt.Sprint(appID), ip, map[string]any{"kind": app.Kind, "pool": pool.Name})
+	token := s.signer.MintApp(sid, p.User.ID, 2*time.Minute, remoteApp, app.Args)
+	return "/desktop/" + sid + "?t=" + token, nil
+}

@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -38,6 +39,7 @@ import (
 	"vdxclone/internal/license"
 	"vdxclone/internal/metrics"
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/peer"
 	"vdxclone/internal/platform"
 	"vdxclone/internal/policy"
 	"vdxclone/internal/qemu"
@@ -98,9 +100,16 @@ func open(cfgPath string) (*config.Config, *db.DB) {
 	if err := cfg.EnsureDirs(); err != nil {
 		log.Fatalf("mkdirs: %v", err)
 	}
-	d, err := db.Open(cfg.DBPath())
+	d, err := db.OpenResilient(cfg.DBPath(), cfg.Paths.BackupDir)
 	if err != nil {
 		log.Fatalf("db: %v", err)
+	}
+	// Take a verified snapshot at boot and prune to a rolling set, so there is
+	// always a recent known-good backup to self-heal from.
+	if bak, err := d.Backup(cfg.Paths.BackupDir); err != nil {
+		log.Printf("db: startup backup skipped: %v", err)
+	} else if bak != "" {
+		db.PruneBackups(cfg.Paths.BackupDir, 24)
 	}
 	return cfg, d
 }
@@ -141,23 +150,57 @@ func cmdServe(cfgPath string) {
 	}
 
 	// Decentralized membership: discover peers over mDNS and/or seeds and gossip
-	// live capacity. No central coordinator — every node holds the same view.
+	// live capacity. No central coordinator — every node holds the same view. In
+	// cluster mode gossip is always on (seeds required) and authenticated with the
+	// shared cluster secret, because leadership — and thus VIP ownership — rides it.
 	var gc *gossip.Cluster
-	if cfg.Cluster.MDNS || len(cfg.Cluster.Seeds) > 0 {
+	var role *cluster.Role
+	var clusterSecret []byte
+	clusterMode := cfg.Cluster.Enabled
+	mgmtAddr := cfg.Cluster.MgmtAddr
+	if clusterMode && mgmtAddr == "" {
+		mgmtAddr = defaultSrcIP()
+	}
+	if clusterMode {
+		sk, err := broker.LoadOrCreateSecret(cfg.ClusterSecretPath())
+		if err != nil {
+			log.Fatalf("cluster secret %s: %v", cfg.ClusterSecretPath(), err)
+		}
+		clusterSecret = sk
+	}
+	if clusterMode || cfg.Cluster.MDNS || len(cfg.Cluster.Seeds) > 0 {
 		g, err := gossip.Start(gossip.Config{
-			NodeName: nodeName,
-			BindAddr: cfg.Cluster.GossipBind,
-			BindPort: cfg.Cluster.GossipPort,
-			Seeds:    cfg.Cluster.Seeds,
-			MDNS:     cfg.Cluster.MDNS,
+			NodeName:  nodeName,
+			BindAddr:  cfg.Cluster.GossipBind,
+			BindPort:  cfg.Cluster.GossipPort,
+			Seeds:     cfg.Cluster.Seeds,
+			MDNS:      cfg.Cluster.MDNS,
+			Advertise: cfg.Cluster.Advertise,
+			MgmtAddr:  mgmtAddr,
+			Primary:   cfg.Cluster.Primary,
+			SecretKey: clusterSecret,
 		})
 		if err != nil {
 			log.Printf("gossip disabled: %v", err)
 		} else {
 			gc = g
 			defer gc.Shutdown()
-			log.Printf("gossip up: node=%s members=%d", nodeName, gc.NumMembers())
+			log.Printf("gossip up: node=%s members=%d (cluster mode=%v, primary=%v)", nodeName, gc.NumMembers(), clusterMode, cfg.Cluster.Primary)
 		}
+	}
+
+	// Cluster mode: leader election + floating management VIP. Exactly one node
+	// holds the lease and owns the VIP (single pane of glass); every node still
+	// runs its own VMs (active/active).
+	clusterStop := make(chan struct{})
+	if clusterMode && gc != nil {
+		role = cluster.NewRole(gc, nodeName, cfg.Cluster.Primary, cfg.ClusterAdminPort())
+		vipm := cluster.NewVIPManager(role, clusterSecret, cfg.Cluster.VIPIface, cfg.Cluster.VIP, cfg.Cluster.VIPDHCP)
+		vipm.CleanupStale() // drop any VIP left over from a crashed previous run
+		vipm.Attach()
+		go role.Run(clusterStop)
+		defer close(clusterStop)
+		log.Printf("cluster: election running (vip_iface=%s dhcp=%v)", cfg.Cluster.VIPIface, cfg.Cluster.VIPDHCP)
 	}
 
 	// Enforcer selection: licensing is OFF by default (NoopEnforcer, no network).
@@ -174,6 +217,10 @@ func cmdServe(cfgPath string) {
 	svc := service.New(cfg, d, st, stg, net, mgr, enf)
 	svc.SetMetrics(mc)
 	svc.SetCluster(cl)
+	if clusterMode && role != nil {
+		svc.SetClusterRuntime(role, clusterSecret)
+		cl.SetPeerClient(peer.NewClient(clusterSecret))
+	}
 
 	// VDI broker: desktop pools + per-connection tokens. The token secret is a
 	// key file under the data dir (created on first run); never hardcoded.
@@ -195,12 +242,38 @@ func cmdServe(cfgPath string) {
 	srv.Routes(mux)
 	api.New(svc).Routes(mux)
 
+	// Node-to-node cluster API on a SEPARATE listener bound to the cluster NIC
+	// only (HMAC-authenticated with the shared secret): aggregation, lifecycle
+	// proxying, console relay, and account sync between peers.
+	var peerSrv *http.Server
+	if clusterMode && role != nil {
+		srv.SetClusterPeer(clusterSecret)
+		pmux := http.NewServeMux()
+		srv.PeerRoutes(pmux)
+		addr := cfg.Cluster.APIAddr
+		if addr == "" {
+			host := cfg.Cluster.Advertise
+			if host == "" {
+				host = "0.0.0.0"
+			}
+			addr = fmt.Sprintf("%s:%d", host, service.ClusterAPIPort)
+		}
+		peerSrv = &http.Server{Addr: addr, Handler: pmux}
+		go func() {
+			log.Printf("vdxd cluster peer API listening on %s", addr)
+			if err := peerSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("peer API listener error: %v", err)
+			}
+		}()
+	}
+
 	// Background workers (reconciler, session GC).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	sup := worker.New(cfg, d, mgr, stg, mc, cl)
 	sup.SetGossip(gc)
 	sup.SetService(svc)
+	sup.SetRole(role)
 	go sup.Run(ctx)
 
 	httpSrv := &http.Server{Addr: cfg.Server.Addr, Handler: logReq(mux)}
@@ -233,11 +306,19 @@ func cmdServe(cfgPath string) {
 
 	<-ctx.Done()
 	log.Println("shutting down…")
+	// Release the VIP synchronously BEFORE exit so the macvlan is gone and no
+	// stale dual-VIP lingers. Closing clusterStop alone races the process exit.
+	if role != nil {
+		role.Shutdown()
+	}
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutCtx)
 	if publicSrv != nil {
 		_ = publicSrv.Shutdown(shutCtx)
+	}
+	if peerSrv != nil {
+		_ = peerSrv.Shutdown(shutCtx)
 	}
 }
 
@@ -445,6 +526,17 @@ func prompt(label string) string {
 func kvmStr() bool {
 	_, err := os.Stat("/dev/kvm")
 	return err == nil
+}
+
+// defaultSrcIP returns the source IP the kernel uses to reach the default route
+// (the mgmt NIC's address), used as the VIP-probe target when not configured.
+func defaultSrcIP() string {
+	out, err := exec.Command("sh", "-c",
+		`ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'`).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func logReq(h http.Handler) http.Handler {

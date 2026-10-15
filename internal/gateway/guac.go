@@ -97,6 +97,13 @@ type Params struct {
 	EnableClipboard bool
 	EnableMic       bool
 	EnablePrinting  bool
+
+	// RDP extras. Domain is the AD/Windows domain; RemoteApp (plus Dir/Args)
+	// launches a single seamless published application instead of a full desktop.
+	Domain        string
+	RemoteApp     string
+	RemoteAppDir  string
+	RemoteAppArgs string
 }
 
 // Handshake connects to guacd and negotiates a session, leaving conn positioned
@@ -231,6 +238,14 @@ func (p Params) value(name string, w, h, dpi int) string {
 		return onoff(!p.EnableClipboard)
 	case "resize-method":
 		return "display-update"
+	case "domain":
+		return p.Domain
+	case "remote-app":
+		return p.RemoteApp
+	case "remote-app-dir":
+		return p.RemoteAppDir
+	case "remote-app-args":
+		return p.RemoteAppArgs
 	default:
 		return ""
 	}

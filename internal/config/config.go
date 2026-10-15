@@ -22,6 +22,7 @@ type Config struct {
 	Public  PublicConfig  `toml:"public"`
 	Broker  BrokerConfig  `toml:"broker"`
 	OIDC    OIDCConfig    `toml:"oidc"`
+	AD      ADConfig      `toml:"ad"`
 	Update  UpdateConfig  `toml:"update"`
 	License LicenseConfig `toml:"license"`
 }
@@ -62,6 +63,40 @@ type ClusterConfig struct {
 	MDNS       bool     `toml:"mdns"`
 	// NodeName overrides the gossip/registry name for this node (default: hostname).
 	NodeName string `toml:"node_name"`
+
+	// ---- cluster mode (leader election, VIP, single-pane) --------------------
+	// Enabled turns on cluster mode: gossip-based leader election, the floating
+	// management VIP, cluster-wide account sync, and the leader-aggregated view.
+	// Off (default) keeps the single-host behaviour untouched.
+	Enabled bool `toml:"enabled"`
+	// Primary marks this node as the startup/tiebreak-preferred leader and the
+	// node that keeps the VIP on a cluster-link-only partition. Exactly one node
+	// in a 2-node cluster should set this (the other stays secondary).
+	Primary bool `toml:"primary"`
+	// Advertise is the cluster-network IP this node announces for gossip,
+	// migration and the peer API (e.g. 10.10.2.11). MUST be the dedicated cluster
+	// NIC's address, never the mgmt NIC.
+	Advertise string `toml:"advertise"`
+	// MgmtAddr is this node's management IP (ens18) the VIP floats near and that
+	// peers probe for liveness before promoting. Default: auto-detected.
+	MgmtAddr string `toml:"mgmt_addr"`
+	// APIAddr is the peer cluster-API listen address, bound to the cluster NIC
+	// (e.g. 10.10.2.11:8767). Used for aggregation, proxying and account sync.
+	APIAddr string `toml:"api_addr"`
+	// SecretFile holds the shared cluster secret (gossip encryption key + peer-API
+	// HMAC + VIP MAC derivation). Empty = <data_dir>/cluster.key, auto-created.
+	// The SAME file contents must exist on every node (copy it when joining).
+	SecretFile string `toml:"secret_file"`
+	// VIPDHCP obtains the floating management VIP via DHCP on a stable virtual MAC
+	// (the lease follows the MAC, so the IP floats to the leader). VIPIface is the
+	// mgmt NIC the macvlan child attaches to (e.g. ens18).
+	VIPDHCP  bool   `toml:"vip_dhcp"`
+	VIPIface string `toml:"vip_iface"`
+	// VIP is a static alternative to DHCP ("10.0.0.5/24"); when set, VIPDHCP is
+	// ignored and this address is added/removed on VIPIface by the leader.
+	VIP string `toml:"vip"`
+	// AdminPort is the mgmt-UI port peers probe for liveness (default 8766).
+	AdminPort int `toml:"admin_port"`
 }
 
 // GatewayConfig configures the browser-desktop gateway: a WebSocket↔guacd tunnel
@@ -122,6 +157,27 @@ type OIDCConfig struct {
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
 	RedirectURL  string `toml:"redirect_url"`  // https://<this-host>/oidc/callback
+}
+
+// ADConfig configures Active Directory / LDAP bind authentication. When enabled,
+// a user who is not a local account (or whose local password fails) is
+// authenticated by binding to AD; on success a local account is JIT-provisioned.
+// Set up is intentionally minimal: URL + domain is enough for UPN-bind auth; the
+// service-account + group fields are only needed for admin-group → role mapping.
+type ADConfig struct {
+	Enabled bool   `toml:"enabled"`
+	URL     string `toml:"url"`     // ldap://dc.example.com:389 or ldaps://dc.example.com:636
+	Domain  string `toml:"domain"`  // AD domain for UPN bind, e.g. corp.example.com (user → user@domain)
+	StartTLS bool  `toml:"starttls"` // upgrade a plain ldic:// connection to TLS before bind
+	Insecure bool  `toml:"insecure"` // skip TLS cert verification (lab/self-signed only)
+
+	// Optional directory search (for role mapping and/or sAMAccountName→DN). Needs
+	// a read-only service account to bind as first.
+	BindDN       string `toml:"bind_dn"`       // service account DN (or UPN)
+	BindPassword string `toml:"bind_password"`
+	BaseDN       string `toml:"base_dn"`       // search base, e.g. DC=corp,DC=example,DC=com
+	UserFilter   string `toml:"user_filter"`   // default (&(objectClass=user)(sAMAccountName=%s))
+	AdminGroup   string `toml:"admin_group"`   // users in this group (CN or full DN) become instance admins
 }
 
 type UpdateConfig struct {
@@ -192,6 +248,7 @@ func Default() *Config {
 			MigratePort: 49200,
 			GossipBind:  "0.0.0.0",
 			GossipPort:  7946,
+			AdminPort:   8766,
 		},
 		Gateway: GatewayConfig{
 			GuacdAddr: "127.0.0.1:4822",
@@ -229,3 +286,20 @@ func (c *Config) EnsureDirs() error {
 }
 
 func (c *Config) DBPath() string { return filepath.Join(c.Paths.DataDir, "vdxclone.db") }
+
+// ClusterSecretPath is the shared cluster secret file (gossip key + peer-API
+// HMAC + VIP MAC seed). Defaults to <data_dir>/cluster.key.
+func (c *Config) ClusterSecretPath() string {
+	if c.Cluster.SecretFile != "" {
+		return c.Cluster.SecretFile
+	}
+	return filepath.Join(c.Paths.DataDir, "cluster.key")
+}
+
+// ClusterAdminPort is the mgmt-UI port peers probe for liveness.
+func (c *Config) ClusterAdminPort() int {
+	if c.Cluster.AdminPort > 0 {
+		return c.Cluster.AdminPort
+	}
+	return 8766
+}

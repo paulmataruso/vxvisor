@@ -8,12 +8,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"vdxclone/internal/config"
+	"vdxclone/internal/ad"
 	"vdxclone/internal/oidc"
+	"vdxclone/internal/peer"
 	"vdxclone/internal/service"
 )
 
@@ -24,10 +28,12 @@ var tmplFS embed.FS
 var staticFS embed.FS
 
 type Server struct {
-	cfg  *config.Config
-	svc  *service.Service
-	tmpl *template.Template
-	oidc *oidc.Provider
+	cfg         *config.Config
+	svc         *service.Service
+	tmpl        *template.Template
+	oidc        *oidc.Provider
+	ad          *ad.Provider
+	clusterAuth *peer.Auth
 }
 
 // tmplFuncs are helpers available to every template.
@@ -59,7 +65,15 @@ func NewServer(cfg *config.Config, svc *service.Service) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, svc: svc, tmpl: t, oidc: oidc.New(cfg.OIDC)}, nil
+	srv := &Server{cfg: cfg, svc: svc, tmpl: t, oidc: oidc.New(cfg.OIDC), ad: ad.New(cfg.AD)}
+	// Apply the DB-persisted AD settings (Settings → Authentication) over the TOML
+	// [ad] default, so GUI-managed config is live from boot. Falls back to cfg.AD
+	// when nothing has been saved.
+	srv.ad.SetConfig(svc.ADConfig())
+	// Register the live-reload hook so a save here — or a replicated snapshot on a
+	// cluster follower — updates the auth provider without a restart.
+	svc.SetADReloadHook(srv.ad.SetConfig)
+	return srv, nil
 }
 
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -78,17 +92,24 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /containers/{id}/stop", s.auth(s.stopContainer))
 	mux.HandleFunc("POST /containers/{id}/delete", s.auth(s.deleteContainer))
 	mux.HandleFunc("POST /containers/{id}/snapshot", s.auth(s.snapshotContainer))
+	mux.HandleFunc("GET /containers/{id}/console", s.auth(s.containerConsole))
+	mux.HandleFunc("GET /containers/{id}/console/ws", s.auth(s.containerConsoleWS))
 	mux.HandleFunc("POST /switch-org", s.auth(s.switchOrg))
 
 	mux.HandleFunc("POST /sessions", s.auth(s.createSession))
-	mux.HandleFunc("GET /instances/{id}", s.auth(s.instanceDetail))
-	mux.HandleFunc("POST /sessions/{id}/start", s.auth(s.startSession))
-	mux.HandleFunc("POST /sessions/{id}/stop", s.auth(s.stopSession))
-	mux.HandleFunc("POST /sessions/{id}/resize", s.auth(s.resizeSession))
-	mux.HandleFunc("POST /sessions/{id}/eject-iso", s.auth(s.ejectISO))
-	mux.HandleFunc("POST /sessions/{id}/delete", s.auth(s.deleteSession))
+	// VM-scoped admin routes are cluster-transparent: on the VIP a request for a
+	// VM owned by another node is reverse-proxied to that node (vmManage), so full
+	// per-VM management works from the unified view and from each host's own IP.
+	mux.HandleFunc("GET /instances/{id}", s.auth(s.vmManage(s.instanceDetail)))
+	mux.HandleFunc("POST /sessions/{id}/start", s.auth(s.vmManage(s.startSession)))
+	mux.HandleFunc("POST /sessions/{id}/stop", s.auth(s.vmManage(s.stopSession)))
+	mux.HandleFunc("POST /sessions/{id}/resize", s.auth(s.vmManage(s.resizeSession)))
+	mux.HandleFunc("POST /sessions/{id}/eject-iso", s.auth(s.vmManage(s.ejectISO)))
+	mux.HandleFunc("POST /sessions/{id}/delete", s.auth(s.vmManage(s.deleteSession)))
 	mux.HandleFunc("GET /console/{id}", s.auth(s.console))
 	mux.HandleFunc("GET /console/{id}/ws", s.auth(s.vncProxy))
+	mux.HandleFunc("GET /console/{id}/serial", s.auth(s.serialConsole))
+	mux.HandleFunc("GET /console/{id}/serial/ws", s.auth(s.serialProxy))
 	// Full browser desktop via the guacd gateway (RDP with device redirection,
 	// or VNC fallback). Separate route so the console page stays plugin-free noVNC.
 	mux.HandleFunc("GET /desktop/{id}", s.auth(s.desktop))
@@ -106,12 +127,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /templates/{id}/delete", s.auth(s.deleteTemplate))
 	mux.HandleFunc("POST /templates/{id}/launch", s.auth(s.launchTemplate))
 
-	mux.HandleFunc("POST /sessions/{id}/snapshots", s.auth(s.createSnapshot))
-	mux.HandleFunc("POST /sessions/{id}/snapshots/{sid}/revert", s.auth(s.revertSnapshot))
-	mux.HandleFunc("POST /sessions/{id}/snapshots/{sid}/delete", s.auth(s.deleteSnapshot))
-	mux.HandleFunc("POST /sessions/{id}/backup", s.auth(s.createBackup))
-	mux.HandleFunc("POST /sessions/{id}/schedule", s.auth(s.createSchedule))
-	mux.HandleFunc("POST /sessions/{id}/retention", s.auth(s.setRetention))
+	mux.HandleFunc("POST /sessions/{id}/snapshots", s.auth(s.vmManage(s.createSnapshot)))
+	mux.HandleFunc("POST /sessions/{id}/snapshots/{sid}/revert", s.auth(s.vmManage(s.revertSnapshot)))
+	mux.HandleFunc("POST /sessions/{id}/snapshots/{sid}/delete", s.auth(s.vmManage(s.deleteSnapshot)))
+	mux.HandleFunc("POST /sessions/{id}/backup", s.auth(s.vmManage(s.createBackup)))
+	mux.HandleFunc("POST /sessions/{id}/schedule", s.auth(s.vmManage(s.createSchedule)))
+	mux.HandleFunc("POST /sessions/{id}/retention", s.auth(s.vmManage(s.setRetention)))
 
 	mux.HandleFunc("GET /backups", s.auth(s.backups))
 	mux.HandleFunc("POST /backups/{id}/restore", s.auth(s.restoreBackup))
@@ -140,7 +161,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /shared/{id}/unmount", s.auth(s.unmountShared))
 	mux.HandleFunc("POST /shared/iscsi/login", s.auth(s.iscsiLogin))
 	mux.HandleFunc("POST /shared/iscsi/{id}/logout", s.auth(s.iscsiLogout))
+	mux.HandleFunc("POST /shared/iscsi/adopt", s.auth(s.iscsiAdopt))
+	mux.HandleFunc("POST /shared/overlay", s.auth(s.addOverlay))
+	mux.HandleFunc("POST /shared/overlay/{id}/delete", s.auth(s.deleteOverlay))
 	mux.HandleFunc("GET /api/iscsi/discover", s.auth(s.apiISCSIDiscover))
+	mux.HandleFunc("GET /api/migrations", s.auth(s.apiMigrations))
+	mux.HandleFunc("GET /api/instances/{id}/guest", s.auth(s.apiGuestInfo))
 
 	// Host-introspection JSON APIs (interface picker, disk picker, path
 	// autocomplete, topology). Admin-gated inside the service.
@@ -181,8 +207,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/bonds/{name}/delete", s.auth(s.deleteBond))
 	mux.HandleFunc("POST /networks/vswitches", s.auth(s.createVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/delete", s.auth(s.deleteVSwitch))
-	mux.HandleFunc("POST /sessions/{id}/forwards", s.auth(s.addPortForward))
-	mux.HandleFunc("POST /sessions/{id}/forwards/{pfid}/delete", s.auth(s.deletePortForward))
+	mux.HandleFunc("POST /sessions/{id}/forwards", s.auth(s.vmManage(s.addPortForward)))
+	mux.HandleFunc("POST /sessions/{id}/forwards/{pfid}/delete", s.auth(s.vmManage(s.deletePortForward)))
 
 	// M5: observability
 	mux.HandleFunc("GET /observability", s.auth(s.observability))
@@ -204,18 +230,28 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/nodes", s.auth(s.addNode))
 	mux.HandleFunc("POST /cluster/nodes/{id}/probe", s.auth(s.probeNode))
 	mux.HandleFunc("POST /cluster/nodes/{id}/delete", s.auth(s.deleteNode))
+	mux.HandleFunc("POST /cluster/vms/{node}/{id}/{action}", s.auth(s.clusterVMAction))
 	mux.HandleFunc("POST /cluster/import", s.auth(s.importImage))
-	mux.HandleFunc("POST /sessions/{id}/migrate", s.auth(s.migrateSession))
+	mux.HandleFunc("POST /sessions/{id}/migrate", s.auth(s.vmManage(s.migrateSession)))
+
+	// Settings: Active Directory / LDAP authentication (admin).
+	mux.HandleFunc("GET /settings/auth", s.auth(s.settingsAuth))
+	mux.HandleFunc("POST /settings/auth", s.auth(s.saveAuthSettings))
+	mux.HandleFunc("POST /settings/auth/test", s.auth(s.testAuthSettings))
 
 	// VDI broker: desktop pool administration (admin creates pools + grants).
 	mux.HandleFunc("GET /pools", s.auth(s.adminPools))
 	mux.HandleFunc("POST /pools", s.auth(s.createPool))
 	mux.HandleFunc("POST /pools/{id}/delete", s.auth(s.deletePool))
 	mux.HandleFunc("POST /pools/{id}/grant", s.auth(s.grantPool))
+	mux.HandleFunc("POST /apps", s.auth(s.createApp))
+	mux.HandleFunc("POST /apps/{id}/delete", s.auth(s.deleteApp))
 
 	mux.HandleFunc("GET /members", s.auth(s.members))
 	mux.HandleFunc("POST /members/add", s.auth(s.addMember))
 	mux.HandleFunc("POST /members/{uid}/remove", s.auth(s.removeMember))
+	mux.HandleFunc("POST /account/password", s.auth(s.changePassword))
+	mux.HandleFunc("POST /members/{uid}/password", s.auth(s.resetPassword))
 
 	mux.HandleFunc("GET /apikeys", s.auth(s.apiKeys))
 	mux.HandleFunc("POST /apikeys/create", s.auth(s.createAPIKey))
@@ -232,11 +268,18 @@ func (s *Server) Routes(mux *http.ServeMux) {
 // login page when unauthenticated.
 func (s *Server) auth(h func(http.ResponseWriter, *http.Request, *service.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Cluster-admin reverse-proxy: another node forwarding an admin's action
+		// from the VIP. Trusted via the shared-secret HMAC header.
+		if p := s.clusterAdminPrincipal(r); p != nil {
+			h(w, r, p)
+			return
+		}
 		p := s.svc.Principal(r)
 		if p == nil {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		p.Unified = s.requestOnVIP(r)
 		h(w, r, p)
 	}
 }
@@ -253,10 +296,122 @@ func csrfToken(sessionToken string) string {
 }
 
 func (s *Server) checkCSRF(p *service.Principal, r *http.Request) bool {
+	// Cluster-admin reverse-proxy requests are HMAC-authenticated and had CSRF
+	// enforced at the originating (VIP) node, so skip the synchronizer check.
+	if p != nil && p.TrustedPeer {
+		return true
+	}
 	return r.FormValue("csrf") == csrfToken(p.Token())
 }
 
 func (s *Server) badCSRF(w http.ResponseWriter) { http.Error(w, "bad csrf token", http.StatusForbidden) }
+
+// clusterAdminPrincipal returns a trusted admin principal when the request
+// carries a valid cluster-admin reverse-proxy signature (another node forwarding
+// an admin's action from the VIP), else nil.
+func (s *Server) clusterAdminPrincipal(r *http.Request) *service.Principal {
+	if s.clusterAuth == nil {
+		return nil
+	}
+	sig := r.Header.Get("X-Cluster-Admin")
+	user := r.Header.Get("X-Cluster-Admin-User")
+	if sig == "" || user == "" {
+		return nil
+	}
+	if !s.clusterAuth.Verify(sig, r.URL.Path, 30*time.Second) {
+		return nil
+	}
+	return s.svc.TrustedAdminPrincipal(user)
+}
+
+// vmManage wraps a VM-scoped admin handler so that, on the VIP, a request for a
+// VM owned by ANOTHER node is transparently reverse-proxied to that node — giving
+// full per-VM management (details, resize, snapshots, migrate, delete) from the
+// unified view, not just the aggregated list. Local VMs and non-admins fall
+// through to the normal handler.
+func (s *Server) vmManage(h func(http.ResponseWriter, *http.Request, *service.Principal)) func(http.ResponseWriter, *http.Request, *service.Principal) {
+	return func(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+		if p.IsAdmin && !p.TrustedPeer && p.ActorKind == "user" {
+			if mgmt, ok := s.svc.RemoteVMOwnerMgmt(r.PathValue("id")); ok {
+				s.proxyToOwner(w, r, p, mgmt)
+				return
+			}
+		}
+		h(w, r, p)
+	}
+}
+
+// proxyToOwner forwards the current admin request to the owning node's admin
+// listener, authenticated with the cluster-admin HMAC header, and streams the
+// response back. Redirects are passed through (not followed) so the browser stays
+// on the VIP and re-proxies the next hop.
+func (s *Server) proxyToOwner(w http.ResponseWriter, r *http.Request, p *service.Principal, mgmt string) {
+	if s.clusterAuth == nil || p.User == nil {
+		http.Error(w, "cluster management proxy unavailable", http.StatusBadGateway)
+		return
+	}
+	host := mgmt
+	if h, _, e := net.SplitHostPort(mgmt); e == nil {
+		host = h
+	}
+	port := s.cfg.Cluster.AdminPort
+	if port == 0 {
+		port = 8766
+	}
+	target := "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + r.URL.Path
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	req, err := http.NewRequest(r.Method, target, r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+	req.Header.Set("X-Cluster-Admin", s.clusterAuth.Header(r.URL.Path))
+	req.Header.Set("X-Cluster-Admin-User", p.User.Username)
+	cl := &http.Client{
+		Timeout:       45 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		http.Error(w, "reach owning node: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// requestOnVIP reports whether this request arrived on the floating management
+// VIP (as opposed to the node's own mgmt IP). The admin listener binds 0.0.0.0,
+// so both addresses hit the same server; we distinguish them by the destination
+// IP of the TCP connection. A VIP request drives the unified cluster-wide view;
+// a node-IP request drives the standalone single-host view. "" VIP (follower or
+// single host) → always standalone.
+func (s *Server) requestOnVIP(r *http.Request) bool {
+	vip := s.svc.ClusterVIP()
+	if vip == "" {
+		return false
+	}
+	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || la == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(la.String())
+	if err != nil {
+		host = la.String()
+	}
+	return host == vip
+}
 
 // ---- rendering -----------------------------------------------------------
 
@@ -266,6 +421,14 @@ func (s *Server) render(w http.ResponseWriter, p *service.Principal, name, activ
 		"CSRF":      csrfToken(p.Token()),
 		"Active":    active,
 		"PortalURL": s.portalURL(),
+	}
+	// Cluster mode indicators for the chrome (topbar badge, nav). Unified = the
+	// request came in on the VIP; NodeName/VIP label the current view.
+	view["Unified"] = p.Unified
+	view["Clustered"] = s.svc.ClusterEnabledRole()
+	view["NodeName"] = s.svc.ClusterSelfName()
+	if _, vip, _ := s.svc.ClusterLeader(); vip != "" {
+		view["VIP"] = vip
 	}
 	for k, v := range data {
 		view[k] = v

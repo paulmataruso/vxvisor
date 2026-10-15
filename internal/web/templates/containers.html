@@ -10,7 +10,7 @@
     <tr><th>Name</th><th>Template</th><th>Spec</th><th>State</th><th>IP</th><th></th></tr>
     {{range .Containers}}
     <tr{{if eq .Status "creating"}} data-creating{{end}}>
-      <td><strong>{{.Name}}</strong></td>
+      <td><strong>{{.Name}}</strong>{{if $.Clustered}} <span class="host-tag">{{$.NodeName}}</span>{{end}}</td>
       <td class="muted">{{.Dist}}/{{.Release}} · {{.Arch}}</td>
       <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .Bridge}} · {{.Bridge}}{{end}}</td>
       <td>
@@ -21,6 +21,7 @@
       <td class="mono" style="font-size:12px">{{if .IP}}{{.IP}}{{else}}—{{end}}</td>
       <td style="text-align:right;white-space:nowrap">
         {{if eq .State "RUNNING"}}
+          <a class="btn sm primary" href="/containers/{{.ID}}/console" target="_blank" rel="noopener" title="Open a root shell in the container">Console</a>
           <form method="post" action="/containers/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
         {{else if or (eq .Status "stopped") (eq .State "STOPPED")}}
           <form method="post" action="/containers/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>

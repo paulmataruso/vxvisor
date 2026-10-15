@@ -17,6 +17,15 @@ Environment=TMPDIR=/var/lib/vdxclone/tmp
 ExecStart=/usr/local/bin/vdxd serve
 Restart=on-failure
 RestartSec=3
+# Only kill the main vdxd process on stop/restart, NOT its QEMU children. VMs are
+# launched in this cgroup but must survive a control-plane restart/upgrade; vdxd
+# re-adopts the running guests by PID on startup (the reconciler). Without this a
+# `systemctl restart vdxd` would SIGTERM every running VM.
+KillMode=process
+# Safety net: guarantee the floating management VIP is torn down whenever the
+# service stops for ANY reason (crash, OOM, kill), so a dead node never leaves a
+# stale VIP that duplicates the new leader's address. '-' ignores absence.
+ExecStopPost=-/bin/sh -c 'dhcpcd -k vdxvip0 2>/dev/null; ip link del vdxvip0 2>/dev/null; true'
 # Needs /dev/kvm for accelerated guests and the kvm group for access.
 SupplementaryGroups=kvm
 # Reasonable hardening that still allows QEMU, bridges, and loopback sockets.

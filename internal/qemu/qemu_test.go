@@ -44,7 +44,7 @@ func TestArgsUEFI(t *testing.T) {
 	a := strings.Join(s.Args(), " ")
 	code := strings.Index(a, "readonly=on,file=/ovmf/code.fd")
 	vars := strings.Index(a, "if=pflash,format=raw,file=/vm/vars.fd")
-	disk := strings.Index(a, "file=/d.qcow2,if=virtio")
+	disk := strings.Index(a, "file=/d.qcow2,if=none,id=disk0")
 	if code < 0 || vars < 0 || disk < 0 {
 		t.Fatalf("missing pflash/disk args: %s", a)
 	}

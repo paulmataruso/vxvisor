@@ -40,6 +40,11 @@ type Config struct {
 	// boot so the VNC/SPICE console shows a graphical login. XFCE is far lighter
 	// than GNOME and usable even on weak hosts. Requires guest internet.
 	Desktop string
+
+	// InstallGuestAgent installs and enables qemu-guest-agent on first boot so the
+	// control plane can read the guest's IPs/OS/filesystem usage. Small package;
+	// needs guest package access (repo mirror reachable).
+	InstallGuestAgent bool
 }
 
 // userData renders a minimal, broadly-compatible cloud-config. It enables
@@ -76,6 +81,10 @@ func (c Config) userData() string {
 			"[ bash, -c, \"echo xfce4-session > /home/"+c.Username+"/.xsession\" ]",
 			"[ systemctl, enable, --now, xrdp ]",
 			"[ adduser, xrdp, ssl-cert ]")
+	}
+	if c.InstallGuestAgent {
+		pkgs = append(pkgs, "qemu-guest-agent")
+		cmds = append(cmds, "[ systemctl, enable, --now, qemu-guest-agent ]")
 	}
 	if c.Desktop == "xfce" {
 		// Lightweight graphical console: XFCE + lightdm on the local display.

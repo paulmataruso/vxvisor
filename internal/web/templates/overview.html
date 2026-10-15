@@ -105,15 +105,10 @@
   <!-- Running instances -->
   <div class="card">
     <h2>Compute</h2>
-    {{if .Runners}}
-    <p class="muted" style="margin:0 0 4px">Running now — open a console:</p>
-    <div class="chiprow">
-      {{range .Runners}}<a class="chip" href="/instances/{{.ID}}"><span class="d"></span>{{.Name}} <span class="muted">{{.Kind}}</span></a>{{end}}
-    </div>
-    {{else}}
-    <div class="empty">No instances running. <a href="/instances">Launch one →</a></div>
-    {{end}}
-    <div class="kv" style="margin-top:12px"><span class="k">Total instances</span><span class="v">{{.VMs.Total}}</span></div>
+    <div class="kv"><span class="k">Total instances</span><span class="v">{{.VMs.Total}}</span></div>
+    <div class="kv"><span class="k">Servers</span><span class="v">{{.VMs.Servers}}</span></div>
+    <div class="kv"><span class="k">Desktops</span><span class="v">{{.VMs.Desktop}}</span></div>
+    <div class="kv"><span class="k">LXC containers</span><span class="v">{{.Containers}}</span></div>
     <div class="kv"><span class="k">Desktop pools</span><span class="v">{{.DesktopPools}}</span></div>
   </div>
 

@@ -71,5 +71,23 @@
   {{else}}
   <div class="empty">No desktops are assigned to you yet. Ask an administrator to grant you a desktop pool.</div>
   {{end}}
+
+  {{if .Apps}}
+  <h1 style="margin-top:34px">My Apps</h1>
+  <p class="sub">Launch a single published app — it opens in this tab, nothing else to install.</p>
+  <div class="grid">
+    {{range .Apps}}
+    <div class="card">
+      <div class="name">{{if .Icon}}{{.Icon}} {{end}}{{.Name}}</div>
+      <span class="pill">{{.Kind}}</span>
+      {{if eq .Kind "web"}}
+        <a class="btn primary" style="width:100%" href="{{.Target}}" target="_blank" rel="noopener noreferrer">Open</a>
+      {{else}}
+        <form method="post" action="/apps/launch"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="app_id" value="{{.ID}}"><button class="btn primary" style="width:100%">Launch</button></form>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+  {{end}}
 </main>
 </body></html>{{end}}

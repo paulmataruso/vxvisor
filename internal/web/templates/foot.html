@@ -57,6 +57,60 @@
 
  // Toast status cards (bottom-right), used for background uploads / downloads so
  // the user is never stuck watching a modal. Returns a handle to update it.
+ // Live migration status card (bottom-right, collapsible). Polls /api/migrations
+ // — on the VIP this aggregates every node's in-flight + recently-finished
+ // migrations; on a node IP it's that node's. Fail-soft: stops polling after
+ // repeated errors so it never spams the console on a standalone/offline box.
+ (function(){
+   var el=null, fails=0, stopped=false, KEY='vdxMigCollapsed';
+   function panel(){
+     if(el) return el;
+     el=document.createElement('div'); el.id='vdx-migs';
+     el.innerHTML='<div class="mh"><b>Migrations</b><span class="chev">▾</span></div><div class="mbody"></div>';
+     document.body.appendChild(el);
+     try{ if(localStorage.getItem(KEY)==='1') el.classList.add('collapsed'); }catch(e){}
+     el.querySelector('.mh').addEventListener('click',function(){
+       el.classList.toggle('collapsed');
+       try{ localStorage.setItem(KEY, el.classList.contains('collapsed')?'1':'0'); }catch(e){}
+     });
+     return el;
+   }
+   function bytes(n){ if(!n||n<0) return ''; var u=['B','KB','MB','GB','TB'],i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (n<10&&i>0?n.toFixed(1):Math.round(n))+' '+u[i]; }
+   function render(list){
+     if(!list.length){ if(el) el.classList.remove('show'); return; }
+     var p=panel(); p.classList.add('show');
+     var act=list.filter(function(m){return m.status==='starting'||m.status==='active';}).length;
+     p.querySelector('.mh b').textContent = act ? ('Migrating — '+act+' active') : 'Migrations';
+     var body=p.querySelector('.mbody'); body.innerHTML='';
+     list.forEach(function(m){
+       var row=document.createElement('div'); row.className='mrow';
+       var ok=m.status==='completed', bad=(m.status==='failed'||m.status==='cancelled');
+       var indet=(m.status==='starting' || (m.status==='active' && !m.total));
+       if(ok) row.classList.add('ok'); if(bad) row.classList.add('err'); if(indet) row.classList.add('indet');
+       var st = ok?'done': m.status==='failed'?'failed': m.status==='cancelled'?'cancelled': m.status==='starting'?'starting…': ((m.pct||0)+'%');
+       var sub = (m.status==='active'&&m.total)? (bytes(m.total-m.remaining)+' / '+bytes(m.total)) : (bad&&m.err?m.err:'');
+       row.innerHTML='<div class="mt"><span class="mname"></span><span class="mpct"></span></div>'+
+         '<div class="mpath"></div><div class="mbar"><i></i></div>'+(sub?'<div class="mpath msub"></div>':'');
+       row.querySelector('.mname').textContent=m.name||m.id;
+       row.querySelector('.mpct').textContent=st;
+       row.querySelector('.mpath').textContent=(m.src||'?')+' → '+(m.dst||'?');
+       if(sub) row.querySelector('.msub').textContent=sub;
+       if(!indet && !ok && !bad) row.querySelector('.mbar>i').style.width=(m.pct||0)+'%';
+       body.appendChild(row);
+     });
+   }
+   function poll(){
+     if(stopped) return;
+     fetch('/api/migrations',{headers:{'Accept':'application/json'},credentials:'same-origin'}).then(function(r){
+       if(r.status===401||r.status===403){ stopped=true; return null; }
+       if(!r.ok) throw new Error('http '+r.status);
+       return r.json();
+     }).then(function(d){ if(d===null) return; fails=0; render(Array.isArray(d)?d:[]); })
+       .catch(function(){ if(++fails>=5) stopped=true; });
+   }
+   poll(); setInterval(poll, 2500);
+ })();
+
  window.VDXToast = (function(){
    function container(){
      var c=document.getElementById('vdx-toasts');

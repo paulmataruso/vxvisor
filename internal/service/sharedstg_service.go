@@ -4,11 +4,24 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	osuser "os/user"
 	"path/filepath"
 
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/sharedstg"
 )
+
+// joinCSV joins two comma-separated option strings, dropping empties.
+func joinCSV(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "," + b
+	}
+}
 
 // Shared storage (NFS/CIFS/Ceph mounts + iSCSI sessions). A HARD RULE applies:
 // every network storage backend must ride a dedicated storage interface, and its
@@ -157,7 +170,7 @@ func (s *Service) recordMount(p *Principal, kind, name, spec, opts, mp, ip strin
 }
 
 // AddNFS mounts an NFS export over the storage NIC and registers it as a pool.
-func (s *Service) AddNFS(p *Principal, name, server, export, opts, ip string) error {
+func (s *Service) AddNFS(p *Principal, name, server, export, vers, opts, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
@@ -166,14 +179,14 @@ func (s *Service) AddNFS(p *Principal, name, server, export, opts, ip string) er
 		return err
 	}
 	mp := s.mountpointFor(name)
-	if err := sharedstg.NFSMount(server, export, mp, clientAddr, opts); err != nil {
+	if err := sharedstg.NFSMount(server, export, mp, clientAddr, vers, opts); err != nil {
 		return err
 	}
 	return s.recordMount(p, "nfs", name, server+":"+export, opts, mp, ip)
 }
 
 // AddCIFS mounts an SMB/CIFS share over the storage NIC.
-func (s *Service) AddCIFS(p *Principal, name, unc, username, password, opts, ip string) error {
+func (s *Service) AddCIFS(p *Principal, name, unc, username, password, domain, vers, opts, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
@@ -184,10 +197,20 @@ func (s *Service) AddCIFS(p *Principal, name, unc, username, password, opts, ip 
 		return err
 	}
 	mp := s.mountpointFor(name)
-	if err := sharedstg.CIFSMount(unc, mp, username, password, opts); err != nil {
+	// CIFS/SMB has no real per-file ownership — the whole mount is mapped to one
+	// uid/gid. Map it to the VM run-as user so a dropped-privilege QEMU can open
+	// (write) its disk file; otherwise every VM on a CIFS pool fails to start with
+	// "Permission denied". User-supplied opts win (appended last).
+	mopts := opts
+	if ru := s.cfg.VM.RunAs; ru != "" {
+		if u, err := osuser.Lookup(ru); err == nil {
+			mopts = joinCSV(fmt.Sprintf("uid=%s,gid=%s,file_mode=0660,dir_mode=0770", u.Uid, u.Gid), opts)
+		}
+	}
+	if err := sharedstg.CIFSMount(unc, mp, username, password, domain, vers, mopts); err != nil {
 		return err
 	}
-	return s.recordMount(p, "cifs", name, unc, opts, mp, ip)
+	return s.recordMount(p, "cifs", name, unc, mopts, mp, ip)
 }
 
 // AddCeph mounts CephFS over the storage NIC.
@@ -239,25 +262,77 @@ type ISCSISession struct {
 	Target    string
 	Status    string
 	CreatedAt string
+	Live      bool // currently logged in per the kernel (iscsiadm -m session)
+	Persisted bool // recorded in the DB (re-logs on demand; survives this list)
 }
 
+// ListISCSI returns the UNION of live kernel iSCSI sessions and DB-recorded
+// targets, so an admin always sees what is actually attached — even a LUN that
+// was logged in outside the UI (e.g. the OCFS2-backed shared pool). Each row is
+// annotated Live (kernel has it) and Persisted (DB has it); a live-but-unsaved
+// session can be adopted, a saved-but-offline one re-attached or removed.
 func (s *Service) ListISCSI(p *Principal) ([]ISCSISession, error) {
 	if !p.IsAdmin {
 		return nil, ErrUnauthorized
 	}
+	type key struct{ portal, target string }
+	byKey := map[key]*ISCSISession{}
+	var order []key
+
 	rows, err := s.db.Query(`SELECT id,portal,target,status,created_at FROM iscsi_targets ORDER BY portal`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ISCSISession
 	for rows.Next() {
 		var t ISCSISession
 		if rows.Scan(&t.ID, &t.Portal, &t.Target, &t.Status, &t.CreatedAt) == nil {
-			out = append(out, t)
+			t.Persisted = true
+			k := key{t.Portal, t.Target}
+			cp := t
+			byKey[k] = &cp
+			order = append(order, k)
 		}
 	}
+	// Overlay the authoritative kernel session list.
+	if live, _ := sharedstg.ISCSISessions(); live != nil {
+		for _, ls := range live {
+			k := key{ls.Portal, ls.Target}
+			if e, ok := byKey[k]; ok {
+				e.Live = true
+			} else {
+				byKey[k] = &ISCSISession{Portal: ls.Portal, Target: ls.Target, Status: "loggedin", Live: true}
+				order = append(order, k)
+			}
+		}
+	}
+	out := make([]ISCSISession, 0, len(order))
+	for _, k := range order {
+		e := byKey[k]
+		if !e.Live && e.Persisted {
+			e.Status = "offline" // recorded but not currently attached
+		}
+		out = append(out, *e)
+	}
 	return out, nil
+}
+
+// ISCSIAdopt records an already-live iSCSI session in the DB so it is tracked and
+// can be re-attached later. It does not re-run the subnet guard (the session is
+// already attached); it only persists what the kernel already has.
+func (s *Service) ISCSIAdopt(p *Principal, portal, target, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	if portal == "" || target == "" {
+		return errors.New("portal and target are required")
+	}
+	if _, err := s.db.Exec(`INSERT INTO iscsi_targets(portal,target,status) VALUES(?,?,'loggedin')
+		ON CONFLICT(portal,target) DO UPDATE SET status='loggedin'`, portal, target); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "iscsi.adopt", "iscsi", target, ip, map[string]any{"portal": portal})
+	return nil
 }
 
 // ISCSIDiscover lists targets at a portal (must be on the storage subnet).
@@ -273,7 +348,7 @@ func (s *Service) ISCSIDiscover(p *Principal, portal string) ([]string, error) {
 
 // ISCSILogin logs into a target over the storage NIC; the LUN then appears as a
 // host disk usable for ZFS/LVM pools.
-func (s *Service) ISCSILogin(p *Principal, portal, target, ip string) error {
+func (s *Service) ISCSILogin(p *Principal, portal, target string, chap sharedstg.CHAP, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
@@ -281,7 +356,7 @@ func (s *Service) ISCSILogin(p *Principal, portal, target, ip string) error {
 	if err != nil {
 		return err
 	}
-	if err := sharedstg.ISCSILogin(portal, target, iface); err != nil {
+	if err := sharedstg.ISCSILogin(portal, target, iface, chap); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`INSERT INTO iscsi_targets(portal,target,status) VALUES(?,?,'loggedin')

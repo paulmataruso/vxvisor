@@ -59,8 +59,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **20**
-  (`disk-backend`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **26**
+  (`published-apps`). Add `{N, "name", "SQL"}`.
 - `ALTER TABLE sessions ADD COLUMN ...` is the pattern for new VM fields.
 
 ### `sessions` column discipline (`internal/session/manager.go`)

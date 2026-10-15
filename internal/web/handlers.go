@@ -20,11 +20,21 @@ func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
 	_ = s.tmpl.ExecuteTemplate(w, "login.html", map[string]any{
 		"Error": r.URL.Query().Get("error"),
 		"OIDC":  s.oidc.Enabled(),
+		"AD":    s.ad.Enabled(),
 	})
 }
 
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
-	u, err := auth.Authenticate(s.svc.DB(), r.FormValue("username"), r.FormValue("password"))
+	username, password := r.FormValue("username"), r.FormValue("password")
+	u, err := auth.Authenticate(s.svc.DB(), username, password)
+	if err != nil && s.ad.Enabled() {
+		// Fall back to Active Directory: bind, then JIT-provision/re-sync locally.
+		// Covers both a user with no local account and a local account whose
+		// password is managed in AD.
+		if id, aerr := s.ad.Authenticate(username, password); aerr == nil {
+			u, err = auth.UpsertADUser(s.svc.DB(), id.Username, id.DN, id.Admin)
+		}
+	}
 	if err != nil {
 		http.Redirect(w, r, "/login?error=1", http.StatusSeeOther)
 		return
@@ -68,7 +78,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 	networks, _ := s.svc.ListNetworks(p)
 	pools, _ := s.svc.ListPools(p)
 	zfspools, _ := s.svc.ZFSPools(p) // for the raw-zvol disk option (admin; empty otherwise)
-	s.render(w, p, "dashboard.html", "compute", map[string]any{
+	data := map[string]any{
 		"Sessions":  sessions,
 		"Images":    images,
 		"ISOs":      isos,
@@ -76,7 +86,17 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 		"Networks":  networks,
 		"Pools":     pools,
 		"ZFSPools":  zfspools,
-	})
+	}
+	// Unified cluster view (VIP, admin): list every node's VMs — the single pane.
+	// Actions route to the owning node; the local table is used otherwise.
+	if p.Unified && p.IsAdmin {
+		if cvms, err := s.svc.ClusterVMs(p); err == nil {
+			data["ClusterMode"] = true
+			data["ClusterVMs"] = cvms
+			data["SelfNode"] = s.svc.ClusterSelfName()
+		}
+	}
+	s.render(w, p, "dashboard.html", "compute", data)
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request, p *service.Principal) {
@@ -113,6 +133,14 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request, p *servic
 		DiskBackend:   r.FormValue("disk_backend"),
 		ZvolPool:      r.FormValue("zvol_pool"),
 		Desktop:       r.FormValue("desktop"),
+		MachineType:   r.FormValue("machine_type"),
+		DiskBus:       r.FormValue("disk_bus"),
+		NICModel:      r.FormValue("nic_model"),
+		VGA:           r.FormValue("vga"),
+		GuestAgent:    r.FormValue("guest_agent") != "",
+		TPM:           r.FormValue("tpm") != "",
+		SecureBoot:    r.FormValue("secureboot") != "",
+		OSType:        r.FormValue("os_type"),
 	}
 	sess, err := s.svc.CreateSession(p, in, clientIP(r))
 	if err != nil {
@@ -132,6 +160,7 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 	snapshots, _ := s.svc.ListSnapshots(p, sess.ID)
 	forwards, _ := s.svc.ListPortForwards(p, sess.ID)
 	nodes, _ := s.svc.ListNodes(p)
+	pools, _ := s.svc.ListPools(p)
 	s.render(w, p, "instance.html", "compute", map[string]any{
 		"Session":     sess,
 		"Running":     s.svc.Manager().Running(sess),
@@ -140,6 +169,7 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 		"Forwards":    forwards,
 		"ForwardHost": s.svc.ForwardHost(),
 		"Nodes":       nodes,
+		"Pools":       pools,
 		"IsAdmin":     p.IsAdmin,
 	})
 }
@@ -217,8 +247,21 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request, p *servic
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// apiGuestInfo returns qemu-guest-agent data for a VM as JSON (polled by the
+// instance page). Fail-soft: any error yields an empty, non-responsive result.
+func (s *Server) apiGuestInfo(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	gi, err := s.svc.GuestAgentInfo(p, r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, map[string]any{"responsive": false})
+		return
+	}
+	writeJSON(w, gi)
+}
+
 func (s *Server) console(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	sess, err := s.svc.ConsoleTarget(p, r.PathValue("id"))
+	// Cluster-aware: renders the console for a VM on this node or (admin, cluster
+	// mode) on another node — the websocket relay reaches the owning node.
+	sess, _, err := s.svc.ConsoleTargetCluster(p, r.PathValue("id"))
 	if err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
@@ -234,7 +277,23 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request, p *service.Prin
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
-	s.render(w, p, "members.html", "members", map[string]any{"Members": members})
+	flash := ""
+	switch r.URL.Query().Get("pw") {
+	case "ok":
+		flash = "Your password was changed."
+	case "reset":
+		flash = "Password reset."
+	}
+	self := ""
+	if p.User != nil {
+		self = p.User.Username
+	}
+	s.render(w, p, "members.html", "members", map[string]any{
+		"Members": members,
+		"IsAdmin": p.IsAdmin,
+		"Self":    self,
+		"PWFlash": flash,
+	})
 }
 
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request, p *service.Principal) {
@@ -259,6 +318,37 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request, p *service
 		return
 	}
 	http.Redirect(w, r, "/members", http.StatusSeeOther)
+}
+
+// changePassword lets the logged-in user change their own password.
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	next := r.FormValue("new_password")
+	if next != r.FormValue("confirm_password") {
+		http.Error(w, "the new passwords do not match", http.StatusBadRequest)
+		return
+	}
+	if err := s.svc.ChangeOwnPassword(p, r.FormValue("current_password"), next, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/members?pw=ok", http.StatusSeeOther)
+}
+
+// resetPassword lets an instance admin set another user's password.
+func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.AdminResetPassword(p, int64(atoi(r.PathValue("uid"))), r.FormValue("new_password"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/members?pw=reset", http.StatusSeeOther)
 }
 
 func (s *Server) apiKeys(w http.ResponseWriter, r *http.Request, p *service.Principal) {

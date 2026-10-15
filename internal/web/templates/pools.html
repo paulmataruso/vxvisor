@@ -40,6 +40,48 @@
   {{else}}<div class="empty">No pools yet. Create one, then grant users.</div>{{end}}
 </div>
 
+<!-- ===================== Published apps ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Published apps</h2>
+    <button class="btn primary" data-modal="m-app">+ Publish app</button>
+  </div>
+  {{if .Apps}}
+  <table>
+    <tr><th>Name</th><th>Kind</th><th>Pool / target</th><th></th></tr>
+    {{range .Apps}}
+    <tr>
+      <td><strong>{{if .Icon}}{{.Icon}} {{end}}{{.Name}}</strong></td>
+      <td><span class="pill">{{.Kind}}</span></td>
+      <td class="muted">{{if eq .Kind "web"}}<span class="mono" style="font-size:12px">{{.Target}}</span>{{else}}{{.PoolName}}{{if .Target}} · <span class="mono" style="font-size:12px">{{.Target}}</span>{{end}}{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/apps/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Unpublish {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No published apps. Publish a full desktop, a Windows RemoteApp (seamless single app), or a web app (a throwaway browser tile).</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">A <strong>desktop</strong> / <strong>remoteapp</strong> app is backed by a pool and inherits that pool's user grants; a <strong>web</strong> app is a link tile for everyone in the org.</p>
+</div>
+
+<div class="modal" id="m-app"><div class="modal-card lg">
+  <div class="modal-head"><h3>Publish app</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/apps">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input name="name" placeholder="Firefox" required></label>
+    <label class="fld">Icon<input name="icon" placeholder="(optional) emoji, e.g. 🦊" maxlength="4"></label>
+    <label class="fld">Kind
+      <select name="kind">
+        <option value="desktop">Full desktop (from a pool)</option>
+        <option value="remoteapp">RemoteApp — single seamless app (Windows pool)</option>
+        <option value="web">Web app (link tile / throwaway browser)</option>
+      </select>
+    </label>
+    <label class="fld">Backing pool<select name="pool_id"><option value="0">— none (web) —</option>{{range .Pools}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld full">Target<input name="target" placeholder="web: https://… · remoteapp: ||firefox or C:\\path\\app.exe"></label>
+    <label class="fld full">RemoteApp args<input name="args" placeholder="(optional) arguments passed to the RemoteApp"></label>
+    <div class="modal-actions full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Publish</button></div>
+  </form>
+</div></div>
+
 <div class="modal" id="m-pool"><div class="modal-card lg">
   <div class="modal-head"><h3>New desktop pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/pools">

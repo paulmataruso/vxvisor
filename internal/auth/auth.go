@@ -84,6 +84,42 @@ func UpsertOIDCUser(d *db.DB, sub, username, email string) (*User, error) {
 	return &User{ID: uid, Username: username, Role: "user"}, nil
 }
 
+// UpsertADUser JIT-provisions (or re-syncs) a user authenticated via Active
+// Directory. The admin flag — derived from AD group membership — is re-evaluated
+// on EVERY login (unlike OIDC, which is sticky) so revoking an AD admin group
+// takes effect on next sign-in. A new user gets an unusable random local
+// password (they can only ever authenticate via AD) and default-org membership.
+func UpsertADUser(d *db.DB, username, dn string, admin bool) (*User, error) {
+	role := "user"
+	orgRole := "member"
+	if admin {
+		role, orgRole = "admin", "owner"
+	}
+	var id int64
+	err := d.QueryRow(`SELECT id FROM users WHERE ad_dn=? OR username=?`, dn, username).Scan(&id)
+	if err == nil {
+		// Existing user → re-sync role + DN from AD each login.
+		_, _ = d.Exec(`UPDATE users SET role=?, ad_dn=? WHERE id=?`, role, dn, id)
+		_, _ = d.Exec(`UPDATE org_members SET role=? WHERE user_id=? AND org_id=(SELECT id FROM orgs WHERE slug='default')`, orgRole, id)
+		return &User{ID: id, Username: username, Role: role}, nil
+	}
+	randPw := make([]byte, 24)
+	_, _ = rand.Read(randPw)
+	hash, err := bcrypt.GenerateFromPassword(randPw, bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	res, err := d.Exec(`INSERT INTO users(username, password_hash, role, ad_dn) VALUES(?,?,?,?)`,
+		username, string(hash), role, dn)
+	if err != nil {
+		return nil, err
+	}
+	uid, _ := res.LastInsertId()
+	_, _ = d.Exec(`INSERT OR IGNORE INTO org_members(org_id, user_id, role)
+		SELECT id, ?, ? FROM orgs WHERE slug='default'`, uid, orgRole)
+	return &User{ID: uid, Username: username, Role: role}, nil
+}
+
 // ---- login throttle (per-username) ---------------------------------------
 //
 // bcrypt verification is deliberately expensive, which makes unthrottled login
@@ -155,6 +191,37 @@ func Authenticate(d *db.DB, username, password string) (*User, error) {
 	return &u, nil
 }
 
+// SetPassword replaces a user's password with a fresh bcrypt hash. Used by the
+// self-service "change password" flow and by an admin resetting another user.
+// In cluster mode the caller must run this on the leader so the new hash
+// replicates out via the account snapshot (ON CONFLICT updates password_hash).
+func SetPassword(d *db.DB, userID int64, password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	res, err := d.Exec(`UPDATE users SET password_hash=? WHERE id=?`, string(hash), userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("no such user")
+	}
+	return nil
+}
+
+// CheckPassword verifies a plaintext password against a user's stored hash by
+// user id (the self-change "current password" confirmation). It deliberately
+// does NOT touch the login throttle or the disabled flag — it is a re-auth of an
+// already-authenticated session, not a login.
+func CheckPassword(d *db.DB, userID int64, password string) bool {
+	var hash string
+	if err := d.QueryRow(`SELECT password_hash FROM users WHERE id=?`, userID).Scan(&hash); err != nil {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
 // ---- API keys ------------------------------------------------------------
 
 // NewAPIKey mints a key: the plaintext (shown once) and its storage fields.
@@ -222,6 +289,18 @@ func EndSession(d *db.DB, w http.ResponseWriter, r *http.Request) {
 }
 
 // FromRequest resolves the authenticated user from the session cookie, or nil.
+// UserByName loads a user by username (for the cluster-admin reverse-proxy, which
+// acts as a named, already-authenticated admin from another node).
+func UserByName(d *db.DB, username string) (*User, error) {
+	var u User
+	err := d.QueryRow(`SELECT id, username, role FROM users WHERE username=?`, username).
+		Scan(&u.ID, &u.Username, &u.Role)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 func FromRequest(d *db.DB, r *http.Request) *User {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
