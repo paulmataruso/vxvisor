@@ -3,8 +3,10 @@ package web
 import (
 	"net/http"
 	neturl "net/url"
+	"strings"
 
 	"vdxclone/internal/service"
+	"vdxclone/internal/vmware"
 )
 
 func (s *Server) cluster(w http.ResponseWriter, r *http.Request, p *service.Principal) {
@@ -26,6 +28,7 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request, p *service.Prin
 		"LeaderName":   leaderName,
 		"VIP":          vip,
 		"IsLeaderHere": isLeaderHere,
+		"Joins":        s.svc.JoinStates(p),
 	})
 }
 
@@ -75,6 +78,90 @@ func (s *Server) addNode(w http.ResponseWriter, r *http.Request, p *service.Prin
 		return
 	}
 	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+}
+
+// joinNode kicks off a zero-touch worker-node join (async). Progress is polled
+// via GET /api/node-join. The SSH/sudo password is used in memory only.
+func (s *Server) joinNode(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	in := service.JoinInput{
+		Address:      r.FormValue("address"),
+		SSHUser:      r.FormValue("ssh_user"),
+		SSHPass:      r.FormValue("ssh_pass"),
+		SSHKey:       r.FormValue("ssh_key"),
+		MgmtIface:    r.FormValue("mgmt_iface"),
+		MgmtCIDR:     r.FormValue("mgmt_cidr"),
+		Gateway:      r.FormValue("gateway"),
+		ClusterIface: r.FormValue("cluster_iface"),
+		ClusterCIDR:  r.FormValue("cluster_cidr"),
+		Bootstrap:    r.FormValue("bootstrap") != "",
+	}
+	if dns := r.FormValue("dns"); dns != "" {
+		for _, d := range strings.Split(dns, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				in.DNS = append(in.DNS, d)
+			}
+		}
+	}
+	if _, err := s.svc.JoinNode(p, in, clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Worker join started — watch progress below. The node auto-reverts if it can't be reached on the new IP.")
+	}
+	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+}
+
+// apiNodeJoin returns the live/recent join progress as JSON for the poller.
+func (s *Server) apiNodeJoin(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	writeJSON(w, map[string]any{"joins": s.svc.JoinStates(p)})
+}
+
+// ---- vCenter / ESXi import -----------------------------------------------
+
+func vmwareCredsFromForm(r *http.Request) vmware.Creds {
+	return vmware.Creds{
+		URL:      r.FormValue("vc_url"),
+		User:     r.FormValue("vc_user"),
+		Pass:     r.FormValue("vc_pass"),
+		Insecure: r.FormValue("vc_insecure") != "",
+	}
+}
+
+// vmwareConnect connects read-only and returns the VM inventory as JSON.
+func (s *Server) vmwareConnect(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	vms, err := s.svc.VMwareConnectList(p, vmwareCredsFromForm(r), clientIP(r))
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"vms": vms})
+}
+
+// vmwareImport starts an async import and redirects back with progress polling.
+func (s *Server) vmwareImport(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if _, err := s.svc.VMwareImport(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Import started — the source VM is only read, never changed. Watch progress below; the disk lands as a base image.")
+	}
+	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+}
+
+// apiVmwareImport returns live/recent import progress for the poller.
+func (s *Server) apiVmwareImport(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	writeJSON(w, map[string]any{"imports": s.svc.VMwareImportStates(p)})
 }
 
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, p *service.Principal) {

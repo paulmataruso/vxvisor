@@ -11,7 +11,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"vdxclone/internal/config"
@@ -104,7 +106,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /sessions/{id}/start", s.auth(s.vmManage(s.startSession)))
 	mux.HandleFunc("POST /sessions/{id}/stop", s.auth(s.vmManage(s.stopSession)))
 	mux.HandleFunc("POST /sessions/{id}/resize", s.auth(s.vmManage(s.resizeSession)))
+	mux.HandleFunc("POST /sessions/{id}/spec", s.auth(s.vmManage(s.updateSessionSpec)))
+	mux.HandleFunc("POST /sessions/{id}/network", s.auth(s.vmManage(s.setSessionNetwork)))
+	mux.HandleFunc("POST /sessions/{id}/spec-field", s.auth(s.vmManage(s.setSpecField)))
 	mux.HandleFunc("POST /sessions/{id}/eject-iso", s.auth(s.vmManage(s.ejectISO)))
+	mux.HandleFunc("POST /sessions/{id}/eject-virtio", s.auth(s.vmManage(s.ejectVirtio)))
+	mux.HandleFunc("POST /sessions/{id}/mount-virtio", s.auth(s.vmManage(s.mountVirtio)))
 	mux.HandleFunc("POST /sessions/{id}/delete", s.auth(s.vmManage(s.deleteSession)))
 	mux.HandleFunc("GET /console/{id}", s.auth(s.console))
 	mux.HandleFunc("GET /console/{id}/ws", s.auth(s.vncProxy))
@@ -135,6 +142,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /sessions/{id}/retention", s.auth(s.vmManage(s.setRetention)))
 
 	mux.HandleFunc("GET /backups", s.auth(s.backups))
+	mux.HandleFunc("POST /backups/create", s.auth(s.createBackup))
+	mux.HandleFunc("POST /schedules/create", s.auth(s.createSchedule))
+	mux.HandleFunc("POST /backups/targets", s.auth(s.createBackupTarget))
+	mux.HandleFunc("POST /backups/targets/{id}/delete", s.auth(s.deleteBackupTarget))
+	mux.HandleFunc("POST /backups/targets/{id}/test", s.auth(s.testBackupTarget))
 	mux.HandleFunc("POST /backups/{id}/restore", s.auth(s.restoreBackup))
 	mux.HandleFunc("POST /backups/{id}/delete", s.auth(s.deleteBackup))
 	mux.HandleFunc("POST /schedules/{id}/delete", s.auth(s.deleteSchedule))
@@ -207,6 +219,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/bonds/{name}/delete", s.auth(s.deleteBond))
 	mux.HandleFunc("POST /networks/vswitches", s.auth(s.createVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/delete", s.auth(s.deleteVSwitch))
+	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))
 	mux.HandleFunc("POST /sessions/{id}/forwards", s.auth(s.vmManage(s.addPortForward)))
 	mux.HandleFunc("POST /sessions/{id}/forwards/{pfid}/delete", s.auth(s.vmManage(s.deletePortForward)))
 
@@ -228,6 +241,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// M7: cluster
 	mux.HandleFunc("GET /cluster", s.auth(s.cluster))
 	mux.HandleFunc("POST /cluster/nodes", s.auth(s.addNode))
+	mux.HandleFunc("POST /cluster/nodes/join", s.auth(s.joinNode))
+	mux.HandleFunc("GET /api/node-join", s.auth(s.apiNodeJoin))
+	mux.HandleFunc("POST /import/vmware/connect", s.auth(s.vmwareConnect))
+	mux.HandleFunc("POST /import/vmware/start", s.auth(s.vmwareImport))
+	mux.HandleFunc("GET /api/vmware-import", s.auth(s.apiVmwareImport))
 	mux.HandleFunc("POST /cluster/nodes/{id}/probe", s.auth(s.probeNode))
 	mux.HandleFunc("POST /cluster/nodes/{id}/delete", s.auth(s.deleteNode))
 	mux.HandleFunc("POST /cluster/vms/{node}/{id}/{action}", s.auth(s.clusterVMAction))
@@ -240,6 +258,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /settings/auth/test", s.auth(s.testAuthSettings))
 
 	// VDI broker: desktop pool administration (admin creates pools + grants).
+	mux.HandleFunc("GET /vdi", s.auth(s.adminVDI))
+	mux.HandleFunc("POST /vdi/assign", s.auth(s.assignVDI))
+	mux.HandleFunc("POST /vdi/{id}/unassign", s.auth(s.unassignVDI))
 	mux.HandleFunc("GET /pools", s.auth(s.adminPools))
 	mux.HandleFunc("POST /pools", s.auth(s.createPool))
 	mux.HandleFunc("POST /pools/{id}/delete", s.auth(s.deletePool))
@@ -280,8 +301,107 @@ func (s *Server) auth(h func(http.ResponseWriter, *http.Request, *service.Princi
 			return
 		}
 		p.Unified = s.requestOnVIP(r)
+		// For a browser form POST, surface an http.Error-style failure as a toast on
+		// the page the user came from instead of a bare error page (see flashErrors).
+		if convertibleForm(r) {
+			fr := &flashRecorder{rw: w, convert: true}
+			h(fr, r, p)
+			if fr.capturing { // the handler wrote a text/plain 4xx/5xx — turn it into a flash
+				msg := strings.TrimSpace(string(fr.buf))
+				if msg == "" {
+					msg = http.StatusText(fr.status)
+				}
+				setFlash(w, msg)
+				dest := r.Referer()
+				if dest == "" {
+					dest = "/"
+				}
+				http.Redirect(w, r, dest, http.StatusSeeOther)
+			}
+			return
+		}
 		h(w, r, p)
 	}
+}
+
+// convertibleForm reports whether a request is a normal browser form POST whose
+// error response should become a flash toast. It excludes JSON/AJAX callers,
+// the machine APIs (/api, /cluster/v1), and multipart uploads (which stream and
+// run their own progress UI).
+func convertibleForm(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/cluster/v1/") {
+		return false
+	}
+	if strings.Contains(r.Header.Get("Accept"), "application/json") ||
+		r.Header.Get("X-Requested-With") == "XMLHttpRequest" {
+		return false
+	}
+	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "multipart/") {
+		return false
+	}
+	return true
+}
+
+// setFlash drops a short-lived, non-HttpOnly cookie carrying a one-off error
+// message. foot.html reads it on the next page load, shows it as a toast, and
+// clears it. Non-HttpOnly so the toast script can read it; the value is rendered
+// with textContent (never as HTML), so it cannot inject markup.
+func setFlash(w http.ResponseWriter, msg string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "vdx_flash",
+		Value:    url.QueryEscape(msg),
+		Path:     "/",
+		MaxAge:   30,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// setFlashOK stashes a one-off SUCCESS message (shown as a green toast, not an
+// error). The "ok:" prefix is recognized by the flash renderer in foot.html.
+func setFlashOK(w http.ResponseWriter, msg string) { setFlash(w, "ok:"+msg) }
+
+// flashRecorder defers an http.Error-style (text/plain 4xx/5xx) response on a
+// convertible form POST so auth() can convert it into a flash + redirect. Any
+// other response (success, redirect, JSON, HTML) passes straight through.
+type flashRecorder struct {
+	rw        http.ResponseWriter
+	convert   bool
+	capturing bool
+	wrote     bool
+	status    int
+	buf       []byte
+}
+
+func (f *flashRecorder) Header() http.Header { return f.rw.Header() }
+
+func (f *flashRecorder) WriteHeader(code int) {
+	if f.wrote || f.capturing {
+		return
+	}
+	// Only intercept plain-text errors — exactly what http.Error produces. Leaves
+	// HTML pages and JSON bodies (even error ones) untouched.
+	if f.convert && code >= 400 && strings.HasPrefix(f.rw.Header().Get("Content-Type"), "text/plain") {
+		f.capturing = true
+		f.status = code
+		return
+	}
+	f.wrote = true
+	f.rw.WriteHeader(code)
+}
+
+func (f *flashRecorder) Write(b []byte) (int, error) {
+	if f.capturing {
+		f.buf = append(f.buf, b...)
+		return len(b), nil
+	}
+	if !f.wrote {
+		f.wrote = true
+		f.rw.WriteHeader(http.StatusOK)
+	}
+	return f.rw.Write(b)
 }
 
 // ---- CSRF ----------------------------------------------------------------

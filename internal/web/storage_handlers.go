@@ -249,7 +249,19 @@ func (s *Server) backups(w http.ResponseWriter, r *http.Request, p *service.Prin
 		return
 	}
 	scheds, _ := s.svc.ListSchedules(p)
-	s.render(w, p, "backups.html", "backups", map[string]any{"Backups": list, "Schedules": scheds})
+	targets, _ := s.svc.ListBackupTargets(p)
+	sessions, _ := s.svc.ListSessions(p)
+	names := map[string]string{}
+	for _, sess := range sessions {
+		names[sess.ID] = sess.Name
+	}
+	s.render(w, p, "backups.html", "backups", map[string]any{
+		"Backups":   list,
+		"Schedules": scheds,
+		"Targets":   targets,
+		"Sessions":  sessions,
+		"Names":     names,
+	})
 }
 
 func (s *Server) createBackup(w http.ResponseWriter, r *http.Request, p *service.Principal) {
@@ -257,12 +269,18 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request, p *service
 		s.badCSRF(w)
 		return
 	}
+	// Session comes from the path on the instance page, or the form on the
+	// backups page. target_id is optional (0 = local default).
 	id := r.PathValue("id")
+	if id == "" {
+		id = r.FormValue("session_id")
+	}
 	name := r.FormValue("name")
 	if name == "" {
 		name = "manual"
 	}
-	if _, err := s.svc.CreateBackup(p, id, name, clientIP(r)); err != nil {
+	target := int64(atoi(r.FormValue("target_id")))
+	if _, err := s.svc.CreateBackup(p, id, name, target, clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
@@ -299,9 +317,13 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, p *servi
 		return
 	}
 	id := r.PathValue("id")
+	if id == "" {
+		id = r.FormValue("session_id")
+	}
 	interval, _ := strconv.Atoi(r.FormValue("interval_hours"))
 	keep, _ := strconv.Atoi(r.FormValue("keep"))
-	if err := s.svc.CreateSchedule(p, id, interval, keep, clientIP(r)); err != nil {
+	target := int64(atoi(r.FormValue("target_id")))
+	if err := s.svc.CreateSchedule(p, id, interval, keep, target, clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
@@ -316,6 +338,60 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, p *servi
 	if err := s.svc.DeleteSchedule(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
+	}
+	http.Redirect(w, r, "/backups", http.StatusSeeOther)
+}
+
+// ---- backup targets (first-class, pool-independent) ----------------------
+
+func (s *Server) createBackupTarget(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	in := service.BackupTargetInput{
+		Name:     r.FormValue("name"),
+		Kind:     r.FormValue("kind"),
+		Path:     r.FormValue("path"),
+		Server:   r.FormValue("server"),
+		Share:    r.FormValue("share"),
+		Username: r.FormValue("username"),
+		Password: r.FormValue("password"),
+		Domain:   r.FormValue("domain"),
+		Vers:     r.FormValue("vers"),
+		Options:  r.FormValue("options"),
+	}
+	if _, err := s.svc.CreateBackupTarget(p, in, clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+		http.Redirect(w, r, "/backups", http.StatusSeeOther)
+		return
+	}
+	setFlashOK(w, "Backup target created")
+	http.Redirect(w, r, "/backups", http.StatusSeeOther)
+}
+
+func (s *Server) deleteBackupTarget(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteBackupTarget(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Backup target deleted")
+	}
+	http.Redirect(w, r, "/backups", http.StatusSeeOther)
+}
+
+func (s *Server) testBackupTarget(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.TestBackupTarget(p, atoi(r.PathValue("id"))); err != nil {
+		setFlash(w, "Target test failed: "+err.Error())
+	} else {
+		setFlashOK(w, "Target is reachable and writable")
 	}
 	http.Redirect(w, r, "/backups", http.StatusSeeOther)
 }

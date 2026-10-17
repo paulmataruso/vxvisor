@@ -114,6 +114,26 @@ func (q *QMP) Status() (string, error) {
 	return s.Status, nil
 }
 
+// VCPUThread maps a guest vCPU index to its host OS thread id (for pinning).
+type VCPUThread struct {
+	CPUIndex int `json:"cpu-index"`
+	ThreadID int `json:"thread-id"`
+}
+
+// QueryCPUsFast returns the per-vCPU host thread ids so the caller can pin each
+// vCPU thread to a host CPU (query-cpus-fast has no side effects on the guest).
+func (q *QMP) QueryCPUsFast() ([]VCPUThread, error) {
+	res, err := q.Execute("query-cpus-fast", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []VCPUThread
+	if err := json.Unmarshal(res, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // quick one-shot helpers --------------------------------------------------
 
 // QMPPowerdown opens, sends a graceful shutdown, and closes.

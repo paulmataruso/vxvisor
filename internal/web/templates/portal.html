@@ -49,45 +49,19 @@
 </header>
 <main>
   <h1>My Desktops</h1>
-  <p class="sub">Pick a desktop to open it in this browser tab — full keyboard, mouse, clipboard and audio, no client to install.</p>
+  <p class="sub">Pick a desktop to open it in this browser tab — full keyboard, mouse and clipboard over VNC, no client to install.{{if gt (len .Desktops) 1}} You have more than one — choose which to connect to.{{end}}</p>
   {{if .Desktops}}
   <div class="grid">
     {{range .Desktops}}
     <div class="card">
-      <div class="name">{{.PoolName}}</div>
-      <span class="pill {{if eq .State "running"}}running{{end}}">{{.AssignMode}}{{if .State}} · {{.State}}{{end}}</span>
-      {{if and .SessionID (eq .State "running")}}
-        <!-- Go through /connect so a fresh connection token is minted (the direct
-             link would hit the cookie path, which checks org membership a granted
-             portal user may not have). /connect is idempotent — reuses this VM. -->
-        <form method="post" action="/connect"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="pool_id" value="{{.PoolID}}"><button class="btn primary" style="width:100%">Open desktop</button></form>
-        <form method="post" action="/desktops/{{.SessionID}}/disconnect"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn">Disconnect</button></form>
-      {{else}}
-        <form method="post" action="/connect"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="pool_id" value="{{.PoolID}}"><button class="btn primary" style="width:100%">Connect</button></form>
-      {{end}}
+      <div class="name">{{.Name}}</div>
+      <span class="pill {{if eq .State "running"}}running{{end}}">{{if eq .OSType "windows"}}Windows{{else}}Linux{{end}}{{if .State}} · {{.State}}{{end}}</span>
+      <form method="post" action="/connect"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="session_id" value="{{.SessionID}}"><button class="btn primary" style="width:100%">{{if eq .State "running"}}Open desktop{{else}}Connect{{end}}</button></form>
     </div>
     {{end}}
   </div>
   {{else}}
-  <div class="empty">No desktops are assigned to you yet. Ask an administrator to grant you a desktop pool.</div>
-  {{end}}
-
-  {{if .Apps}}
-  <h1 style="margin-top:34px">My Apps</h1>
-  <p class="sub">Launch a single published app — it opens in this tab, nothing else to install.</p>
-  <div class="grid">
-    {{range .Apps}}
-    <div class="card">
-      <div class="name">{{if .Icon}}{{.Icon}} {{end}}{{.Name}}</div>
-      <span class="pill">{{.Kind}}</span>
-      {{if eq .Kind "web"}}
-        <a class="btn primary" style="width:100%" href="{{.Target}}" target="_blank" rel="noopener noreferrer">Open</a>
-      {{else}}
-        <form method="post" action="/apps/launch"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="app_id" value="{{.ID}}"><button class="btn primary" style="width:100%">Launch</button></form>
-      {{end}}
-    </div>
-    {{end}}
-  </div>
+  <div class="empty">No desktops are assigned to you yet. Ask an administrator to assign you a desktop.</div>
   {{end}}
 </main>
 </body></html>{{end}}

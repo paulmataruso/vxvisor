@@ -6,6 +6,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"vdxclone/internal/db"
@@ -200,12 +201,36 @@ type AuditEntry struct {
 	OrgID      int64
 	ActorID    int64
 	ActorKind  string
+	ActorName  string // resolved username (user actors); "" otherwise
 	Action     string
 	TargetType string
 	TargetID   string
 	Detail     string
 	IP         string
 	CreatedAt  string
+}
+
+// Actor is the human label for who performed the action — never blank, so the
+// audit log always answers "who". A deleted user falls back to its id; automated
+// background actions read as "system".
+func (e AuditEntry) Actor() string {
+	switch e.ActorKind {
+	case "system":
+		return "system (automated)"
+	case "apikey":
+		if e.ActorName != "" {
+			return "API key: " + e.ActorName
+		}
+		return "API key"
+	default:
+		if e.ActorName != "" {
+			return e.ActorName
+		}
+		if e.ActorID == 0 {
+			return "system"
+		}
+		return fmt.Sprintf("%s#%d", e.ActorKind, e.ActorID)
+	}
 }
 
 func (s *Store) Audit(e AuditEntry) {
@@ -215,8 +240,20 @@ func (s *Store) Audit(e AuditEntry) {
 	if e.Detail == "" {
 		e.Detail = "{}"
 	}
-	_, _ = s.db.Exec(`INSERT INTO audit_log(org_id,actor_id,actor_kind,action,target_type,target_id,detail_json,ip)
-		VALUES(?,?,?,?,?,?,?,?)`, e.OrgID, e.ActorID, e.ActorKind, e.Action, e.TargetType, e.TargetID, e.Detail, e.IP)
+	_, _ = s.db.Exec(`INSERT INTO audit_log(org_id,actor_id,actor_kind,actor_name,action,target_type,target_id,detail_json,ip)
+		VALUES(?,?,?,?,?,?,?,?,?)`, e.OrgID, e.ActorID, e.ActorKind, e.ActorName, e.Action, e.TargetType, e.TargetID, e.Detail, e.IP)
+}
+
+// auditSelectCols is the shared SELECT list for audit reads. actor_name prefers
+// the snapshot taken at write time, falling back to the live users table for
+// rows written before that column existed (never blank — Actor() handles "").
+const auditSelectCols = `al.id,COALESCE(al.org_id,0),COALESCE(al.actor_id,0),al.actor_kind,
+	COALESCE(NULLIF(al.actor_name,''), (SELECT username FROM users WHERE users.id=al.actor_id), ''),
+	al.action,al.target_type,al.target_id,al.detail_json,al.ip,al.created_at`
+
+func scanAudit(rows interface{ Scan(...any) error }, e *AuditEntry) error {
+	return rows.Scan(&e.ID, &e.OrgID, &e.ActorID, &e.ActorKind, &e.ActorName,
+		&e.Action, &e.TargetType, &e.TargetID, &e.Detail, &e.IP, &e.CreatedAt)
 }
 
 func (s *Store) ListAudit(orgID int64, limit int) ([]AuditEntry, error) {
@@ -229,14 +266,13 @@ func (s *Store) ListAuditFiltered(orgID int64, actionPrefix string, limit int) (
 	if limit <= 0 {
 		limit = 200
 	}
-	q := `SELECT id,COALESCE(org_id,0),COALESCE(actor_id,0),actor_kind,action,target_type,target_id,detail_json,ip,created_at
-		FROM audit_log WHERE org_id=?`
+	q := `SELECT ` + auditSelectCols + ` FROM audit_log al WHERE al.org_id=?`
 	args := []any{orgID}
 	if actionPrefix != "" {
-		q += ` AND action LIKE ?`
+		q += ` AND al.action LIKE ?`
 		args = append(args, actionPrefix+"%")
 	}
-	q += ` ORDER BY id DESC LIMIT ?`
+	q += ` ORDER BY al.id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -246,7 +282,7 @@ func (s *Store) ListAuditFiltered(orgID int64, actionPrefix string, limit int) (
 	var out []AuditEntry
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.ActorID, &e.ActorKind, &e.Action, &e.TargetType, &e.TargetID, &e.Detail, &e.IP, &e.CreatedAt); err != nil {
+		if err := scanAudit(rows, &e); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -259,8 +295,8 @@ func (s *Store) ListAuditForTarget(orgID int64, targetType, targetID string, lim
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT id,COALESCE(org_id,0),COALESCE(actor_id,0),actor_kind,action,target_type,target_id,detail_json,ip,created_at
-		FROM audit_log WHERE org_id=? AND target_type=? AND target_id=? ORDER BY id DESC LIMIT ?`,
+	rows, err := s.db.Query(`SELECT `+auditSelectCols+` FROM audit_log al
+		WHERE al.org_id=? AND al.target_type=? AND al.target_id=? ORDER BY al.id DESC LIMIT ?`,
 		orgID, targetType, targetID, limit)
 	if err != nil {
 		return nil, err
@@ -269,7 +305,7 @@ func (s *Store) ListAuditForTarget(orgID int64, targetType, targetID string, lim
 	var out []AuditEntry
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.ActorID, &e.ActorKind, &e.Action, &e.TargetType, &e.TargetID, &e.Detail, &e.IP, &e.CreatedAt); err != nil {
+		if err := scanAudit(rows, &e); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

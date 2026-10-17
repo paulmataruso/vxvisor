@@ -21,6 +21,12 @@
 <div id="bar">
   <a href="/instances">←</a><b>{{.Session.Name}}</b>
   <span class="sep"></span>
+  <select class="cbtn" id="k-tech" title="Switch console technology">
+    <option value="/console/{{.Session.ID}}" selected>VNC (noVNC)</option>
+    <option value="/desktop/{{.Session.ID}}">Desktop (RDP / VNC)</option>
+    <option value="/console/{{.Session.ID}}/serial">Serial (text)</option>
+  </select>
+  <span class="sep"></span>
   <button class="cbtn" id="k-cad" title="Ctrl+Alt+Del">Ctrl+Alt+Del</button>
   <select class="cbtn" id="k-combo" title="Send a key combo">
     <option value="">Send key…</option>
@@ -55,6 +61,12 @@
       <option value="1280x720">1280 × 720</option>
       <option value="1024x768">1024 × 768</option>
     </optgroup>
+  </select>
+  <select class="cbtn" id="k-qual" title="Console quality / responsiveness">
+    <option value="auto" selected>Quality: Auto</option>
+    <option value="snappy">Quality: Snappy (LAN)</option>
+    <option value="balanced">Quality: Balanced</option>
+    <option value="bandwidth">Quality: Bandwidth-saver</option>
   </select>
   <button class="cbtn" id="k-full" title="Fullscreen">⛶ Full</button>
   <span id="status">connecting…</span>
@@ -104,23 +116,113 @@
    try { window.dispatchEvent(new Event("resize")); } catch(e){}
    grab();
  }
- try {
-   rfb = new RFB(screen, url,
-     { credentials: { password: "{{.Session.VNCPassword}}" } });
-   rfb.resizeSession = true;   // default: dynamic resize to the window
-   rfb.scaleViewport = false;
-   rfb.clipViewport = false;
-   rfb.focusOnClick = true;
-   rfb.addEventListener("connect", () => { status.textContent = "connected — click the screen to type"; grab(); });
-   rfb.addEventListener("disconnect", e =>
-     status.textContent = e.detail.clean ? "disconnected" : "connection failed — is the VM running?");
-   rfb.addEventListener("clipboard", e => { /* guest copied; available if needed */ });
- } catch (err) { status.textContent = "noVNC failed to load: " + err; }
+ // The chosen display mode persists across reloads and tab switches.
+ const DISP_KEY = "vdx_console_disp";
+ function savedMode(){ try { return localStorage.getItem(DISP_KEY) || "auto"; } catch(e){ return "auto"; } }
+ function saveMode(v){ try { localStorage.setItem(DISP_KEY, v); } catch(e){} }
+ // Console quality / responsiveness. Presets force a fixed quality/compression
+ // trade-off; "Auto" measures the browser↔host round-trip and adapts (crisp +
+ // near-zero CPU on a LAN, more compression as latency rises). Persisted per viewer.
+ const QKEY = "vdx_console_qual";
+ function savedQual(){ try { return localStorage.getItem(QKEY) || "auto"; } catch(e){ return "auto"; } }
+ function saveQual(v){ try { localStorage.setItem(QKEY, v); } catch(e){} }
+ function setQ(q,c){ if(rfb){ try { rfb.qualityLevel = q; rfb.compressionLevel = c; } catch(e){} } }
+ function measureRTT(){
+   // Three HEADs to a small static asset; take the minimum (least noisy sample).
+   const probe = () => { const t = performance.now();
+     return fetch('/static/novnc/core/rfb.js?_=' + Date.now() + Math.random(), {method:'HEAD', cache:'no-store'})
+       .then(() => performance.now() - t).catch(() => 999); };
+   return Promise.all([probe(), probe(), probe()]).then(a => Math.min.apply(null, a));
+ }
+ function applyQuality(mode){
+   if(mode === 'snappy'){ setQ(9, 1); return; }
+   if(mode === 'balanced'){ setQ(7, 5); return; }
+   if(mode === 'bandwidth'){ setQ(5, 9); return; }
+   // auto: adapt to measured round-trip latency.
+   measureRTT().then(function(rtt){
+     var q, c;
+     if(rtt < 5){ q = 9; c = 2; }       // LAN / loopback — crisp, almost no CPU
+     else if(rtt < 25){ q = 8; c = 4; }
+     else if(rtt < 75){ q = 6; c = 6; }
+     else { q = 5; c = 9; }             // high latency — spend CPU to save bytes
+     setQ(q, c);
+     try { var s = document.getElementById('k-qual'); if(s) s.options[0].text = 'Quality: Auto (' + Math.round(rtt) + 'ms)'; } catch(e){}
+   });
+ }
+ let connected = false;
+ let connecting = false;       // a connect() is in flight — don't stack another
+ let userClosed = false;       // true only when WE intentionally tear down
+ let reconnectTimer = null;
+ let backoff = 1000;           // grows per failed attempt, reset on success
+ // Reflect the saved mode in the dropdown immediately (before the first frame),
+ // so the control always shows the remembered choice even mid-connect.
+ (function(){ const sel=document.getElementById("k-disp"); if(sel) sel.value=savedMode(); })();
+ function scheduleReconnect(){
+   if(userClosed || reconnectTimer || connecting || connected) return;
+   status.textContent = "reconnecting…";
+   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, backoff);
+   backoff = Math.min(Math.round(backoff * 1.6), 8000);
+ }
+ function connect(){
+   // Never run two connects at once — stacking RFB instances is what made the
+   // screen flash (each teardown fired a disconnect that scheduled another).
+   if(connecting || connected) return;
+   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+   connecting = true;
+   let myRfb;
+   try {
+     myRfb = new RFB(screen, url,
+       { credentials: { password: "{{.Session.VNCPassword}}" } });
+     rfb = myRfb;                // the current instance
+     rfb.resizeSession = true;   // default: dynamic resize to the window
+     rfb.scaleViewport = false;
+     rfb.clipViewport = false;
+     rfb.focusOnClick = true;
+     // Apply the chosen console quality (Auto measures round-trip latency and
+     // adapts; the presets force a fixed trade-off). Set now so the initial
+     // SetEncodings carries it.
+     applyQuality(savedQual());
+     myRfb.addEventListener("connect", () => {
+       if(myRfb !== rfb) return; // a superseded instance — ignore its events
+       connecting = false; connected = true;
+       backoff = 1000;           // healthy again — reset the backoff
+       status.textContent = "connected — click the screen to type";
+       // Restore the user's saved display mode (e.g. "Fit") instead of resetting.
+       const v = savedMode();
+       const sel = document.getElementById("k-disp"); if(sel) sel.value = v;
+       applyDisplay(v);
+       grab();
+     });
+     myRfb.addEventListener("disconnect", e => {
+       if(myRfb !== rfb) return; // not the current instance — don't reconnect
+       connecting = false; connected = false;
+       if(userClosed){ status.textContent = "disconnected"; return; }
+       // Unexpected drop (idle teardown, half-open socket, VM blip): auto-reconnect
+       // so the console doesn't just go black until a manual refresh.
+       scheduleReconnect();
+     });
+     myRfb.addEventListener("clipboard", e => { /* guest copied; available if needed */ });
+   } catch (err) { connecting = false; status.textContent = "noVNC failed to load: " + err; scheduleReconnect(); }
+ }
+ connect();
+ // Returning to the tab: the canvas often comes back blank and the scaling resets.
+ // Re-apply the saved mode (forces a repaint + rescale); if the socket dropped
+ // while the tab was hidden, reconnect NOW instead of waiting out the backoff.
+ function onVisible(){
+   if(document.visibilityState === "hidden") return;
+   if(!connected && !connecting){ backoff = 1000; connect(); return; }
+   if(connected){ applyDisplay(savedMode()); grab(); }
+ }
+ document.addEventListener("visibilitychange", onVisible);
+ window.addEventListener("pageshow", onVisible);
+ window.addEventListener("beforeunload", () => { userClosed = true; try { rfb && rfb.disconnect(); } catch(e){} });
  // Click anywhere on the screen → focus the canvas so keystrokes reach the guest.
  screen.addEventListener("mousedown", grab);
  screen.addEventListener("touchstart", grab, {passive:true});
  window.addEventListener("focus", grab);
 
+ // Switch console technology (navigate this tab to the chosen view).
+ (function(){ var t=document.getElementById("k-tech"); if(t) t.onchange=(e)=>{ if(e.target.value) location.href=e.target.value; }; })();
  document.getElementById("k-cad").onclick = () => rfb && rfb.sendCtrlAltDel();
  document.getElementById("k-combo").onchange = (e) => {
    const v = e.target.value; e.target.value = "";
@@ -143,7 +245,9 @@
    const inp = document.getElementById("k-paste");
    if(rfb && inp.value){ rfb.clipboardPasteFrom(inp.value); status.textContent = "sent to guest clipboard — paste in the guest"; }
  };
- document.getElementById("k-disp").onchange = (e) => applyDisplay(e.target.value);
+ document.getElementById("k-disp").onchange = (e) => { saveMode(e.target.value); applyDisplay(e.target.value); };
+ (function(){ var q=document.getElementById("k-qual"); if(!q) return; q.value=savedQual();
+   q.onchange = (e) => { saveQual(e.target.value); applyQuality(e.target.value); }; })();
  document.getElementById("k-full").onclick = () => {
    const el = document.documentElement;
    if(!document.fullscreenElement){ el.requestFullscreen && el.requestFullscreen(); }

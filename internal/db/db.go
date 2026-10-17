@@ -639,6 +639,91 @@ CREATE TABLE IF NOT EXISTS published_apps (
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 `},
+	{27, "guest-os", `
+-- Detected guest OS (from qemu-guest-agent) for VMs installed from an ISO, so
+-- the UI can show the real OS instead of the "(install from ISO)" placeholder.
+ALTER TABLE sessions ADD COLUMN guest_os TEXT;
+`},
+	{28, "perf-knobs", `
+-- Per-VM performance toggles: pin vCPU threads 1:1 to host CPUs, and back guest
+-- RAM with hugepages (when the host has a reserved pool). Both default off.
+ALTER TABLE sessions ADD COLUMN perf_pin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN perf_hugepages INTEGER NOT NULL DEFAULT 0;
+`},
+	{29, "eject-virtio", `
+-- When set, don't auto-attach the virtio-win driver CD to this (Windows) VM —
+-- i.e. the user ejected it after installing the drivers. Applies on next start.
+ALTER TABLE sessions ADD COLUMN eject_virtio INTEGER NOT NULL DEFAULT 0;
+`},
+	{30, "backup-targets", `
+-- Where a backup's file lands: 0 = the local default backup dir, else the id of
+-- a registered storage_pools row whose Path is a writable directory (local dir,
+-- NFS/CIFS/CephFS mount, or a ZFS filesystem). Block pools (lvm-thin/zvol) are
+-- not valid targets. Schedules carry the same so every run writes to one place.
+ALTER TABLE backups ADD COLUMN target_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE backup_schedules ADD COLUMN target_id INTEGER NOT NULL DEFAULT 0;
+`},
+	{31, "backup-targets-table", `
+-- First-class backup targets, managed on the Backups page and INDEPENDENT of
+-- storage pools. kind: local (a directory) | nfs | cifs | cephfs. Network kinds
+-- are mounted at 'mountpoint' (/var/lib/vdxclone/backup-mounts/<id>) on boot and
+-- before each run. 'secret' holds an AES-GCM sealed (enc:) CIFS password / Ceph
+-- key. target_id 0 (in backups/backup_schedules) still means the built-in local
+-- default backup dir, so existing rows keep working.
+CREATE TABLE IF NOT EXISTS backup_targets (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id     INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,                  -- local|nfs|cifs|cephfs
+    mountpoint TEXT NOT NULL DEFAULT '',        -- local: the dir; network: mount dir
+    server     TEXT NOT NULL DEFAULT '',        -- nfs/cifs host; cephfs mon list
+    share      TEXT NOT NULL DEFAULT '',        -- nfs export / cifs share / ceph path
+    username   TEXT NOT NULL DEFAULT '',        -- cifs user / ceph client name
+    secret     TEXT NOT NULL DEFAULT '',        -- sealed (enc:) cifs pass / ceph key
+    domain     TEXT NOT NULL DEFAULT '',        -- cifs domain/workgroup
+    vers       TEXT NOT NULL DEFAULT '',        -- nfs/cifs protocol version
+    options    TEXT NOT NULL DEFAULT '',        -- extra mount options
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_bktargets_org ON backup_targets(org_id);
+`},
+	{32, "audit-actor-name", `
+-- Snapshot the actor's display name AT WRITE TIME so the audit trail is immutable
+-- about WHO did something even if that user is later renamed or deleted. Old rows
+-- (empty actor_name) fall back to a live users JOIN at read time.
+ALTER TABLE audit_log ADD COLUMN actor_name TEXT NOT NULL DEFAULT '';
+`},
+	{33, "desktop-creds", `
+-- Optional per-VM guest credentials for the browser desktop (guac RDP). Needed
+-- because RDP with NLA (Windows default) blanks without valid credentials, and a
+-- Windows VM has no cloud-init user. secret is AES-GCM sealed (enc:). When absent
+-- for an RDP-capable VM, the desktop falls back to VNC (the guest's login screen).
+CREATE TABLE IF NOT EXISTS desktop_creds (
+    session_id TEXT PRIMARY KEY,
+    username   TEXT NOT NULL DEFAULT '',
+    secret     TEXT NOT NULL DEFAULT '',
+    domain     TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`},
+	{34, "pool-os-type", `
+-- Desktop pools deliver full Linux or Windows desktops; record which so the VDI
+-- VMs are created with the right guest OS profile (RTC, drivers) and the UI can
+-- label the pool.
+ALTER TABLE desktop_pools ADD COLUMN os_type TEXT NOT NULL DEFAULT 'linux'; -- linux|windows
+`},
+	{35, "vdi-desktops", `
+-- A VDI desktop is simply an existing VM tagged to a specific user: that user
+-- sees it on the portal and connects over VNC. One assignee per VM; a user may
+-- hold several. VMs listed here are hidden from the regular instances page.
+CREATE TABLE IF NOT EXISTS vdi_desktops (
+    session_id TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    org_id     INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vdi_user ON vdi_desktops(user_id);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

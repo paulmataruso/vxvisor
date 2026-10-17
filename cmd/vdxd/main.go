@@ -215,6 +215,9 @@ func cmdServe(cfgPath string) {
 		log.Printf("license enforcement ON: licensee=%q seats=%d servers=%d", lic.Licensee, lic.Seats, lic.Servers)
 	}
 	svc := service.New(cfg, d, st, stg, net, mgr, enf)
+	// Clear any transient disk-export files left by an import that was interrupted
+	// by a restart/crash (no import survives a restart, so these are always dead).
+	svc.SweepImportTemps()
 	svc.SetMetrics(mc)
 	svc.SetCluster(cl)
 	if clusterMode && role != nil {

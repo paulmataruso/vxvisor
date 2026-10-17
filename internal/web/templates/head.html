@@ -38,6 +38,12 @@
  .brand .dot{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--primary),var(--accent));display:grid;place-items:center;color:#fff;flex:none}
  .brand .dot .ic{width:16px;height:16px;stroke:#fff}
  .brand .logomark{width:30px;height:30px;flex:none}
+ /* Themed scrollbars — the default OS grey doesn't match the dark UI. */
+ *{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+ ::-webkit-scrollbar{width:10px;height:10px}
+ ::-webkit-scrollbar-track{background:transparent}
+ ::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;border:2px solid transparent;background-clip:content-box}
+ ::-webkit-scrollbar-thumb:hover{background:var(--muted)}
  .nav{display:flex;flex-direction:column;gap:1px;padding:6px 12px;overflow-y:auto}
  .nav a{display:flex;align-items:center;gap:11px;padding:8px 12px;border-radius:9px;color:var(--muted);font-weight:500;transition:background var(--t),color var(--t)}
  .nav a:hover{background:var(--panel2);color:var(--fg)}
@@ -211,7 +217,7 @@
     <a href="/containers" class="{{if eq .Active "containers"}}on{{end}}"><svg class="ic"><use href="#i-grid"/></svg><span>Containers</span></a>
     <a href="/templates" class="{{if eq .Active "templates"}}on{{end}}"><svg class="ic"><use href="#i-layers"/></svg><span>Templates</span></a>
     <a href="/observability" class="{{if eq .Active "observability"}}on{{end}}"><svg class="ic"><use href="#i-activity"/></svg><span>Monitoring</span></a>
-    <a href="/pools" class="{{if eq .Active "pools"}}on{{end}}"><svg class="ic"><use href="#i-monitor"/></svg><span>Desktop Pools</span></a>
+    <a href="/vdi" class="{{if eq .Active "vdi"}}on{{end}}"><svg class="ic"><use href="#i-monitor"/></svg><span>VDI Desktops</span></a>
     {{if .PortalURL}}<a href="{{.PortalURL}}" target="_blank" rel="noopener"><svg class="ic"><use href="#i-monitor"/></svg><span>VDI Portal ↗</span></a>{{end}}
     <a href="/trash" class="{{if eq .Active "trash"}}on{{end}}"><svg class="ic"><use href="#i-trash"/></svg><span>Trash</span></a>
     <div class="grp">Storage</div>

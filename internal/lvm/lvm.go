@@ -129,6 +129,37 @@ func CreateThinVolume(vg, pool, name string, sizeBytes int64) error {
 	return err
 }
 
+// RemoveLV removes a single thin volume by its device path (e.g.
+// /dev/VMSTORE/vdx-ab12cd34). Used to clean up a VM's disk on create-failure or
+// purge. A missing LV is not an error (idempotent teardown).
+func RemoveLV(devPath string) error {
+	if strings.TrimSpace(devPath) == "" {
+		return nil
+	}
+	_, err := run(30*time.Second, "lvremove", "-f", devPath)
+	return err
+}
+
+// ExtendLV grows a thin volume to sizeBytes (the guest expands its filesystem on
+// next boot). Thin LVs over-provision, so this only raises the virtual size.
+func ExtendLV(devPath string, sizeBytes int64) error {
+	if sizeBytes <= 0 {
+		return errors.New("volume size must be positive")
+	}
+	_, err := run(30*time.Second, "lvextend", "-L", strconv.FormatInt(sizeBytes, 10)+"b", devPath)
+	if err != nil {
+		// lvextend exits non-zero when the requested size equals the current size
+		// (extent rounding can make a "grow" a no-op). That is not a failure.
+		// run() folds command output into the error, so inspect err.
+		msg := err.Error()
+		if strings.Contains(msg, "matches existing size") || strings.Contains(msg, "No size change") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 // RemoveVG removes a volume group and clears its PVs, freeing the underlying
 // disks (used to repurpose e.g. "vmstore" for ZFS). Destructive; caller confirms.
 func RemoveVG(vg string) error {

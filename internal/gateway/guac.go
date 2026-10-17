@@ -104,6 +104,13 @@ type Params struct {
 	RemoteApp     string
 	RemoteAppDir  string
 	RemoteAppArgs string
+	// DisableGFX turns off the RDP Graphics Pipeline Extension (GFX/RemoteFX),
+	// forcing the stable bitmap/NSCodec path. A conservative default for a
+	// control-plane console — reliability over the marginal bandwidth win.
+	// (Note: this is NOT the fix for the FreeRDP 3.31+ gdi_init_ex brush-cache
+	// crash; that is fixed by linking guacd against FreeRDP < 3.31. See
+	// deploy/guacd-from-source.sh and FreeRDP issue #13342.)
+	DisableGFX bool
 }
 
 // Handshake connects to guacd and negotiates a session, leaving conn positioned
@@ -154,6 +161,10 @@ func Handshake(guacdAddr string, p Params) (net.Conn, string, error) {
 	w.Write(EncodeInstruction("size", strconv.Itoa(width), strconv.Itoa(height), strconv.Itoa(dpi)))
 	w.Write(EncodeInstruction("audio", "audio/L16", "audio/L8"))
 	w.Write(EncodeInstruction("video"))
+	// Advertise WebP in addition to PNG/JPEG: guacd prefers WebP for screen tiles,
+	// which is far smoother/higher-quality than the PNG/JPEG fallback (that looked
+	// "chopped"). All modern browsers decode WebP via <img>. (The earlier black
+	// desktop was a CSS stacking bug in desktop.html, not WebP.)
 	w.Write(EncodeInstruction("image", "image/png", "image/jpeg", "image/webp"))
 	w.Write(EncodeInstruction("timezone", "UTC"))
 
@@ -238,6 +249,8 @@ func (p Params) value(name string, w, h, dpi int) string {
 		return onoff(!p.EnableClipboard)
 	case "resize-method":
 		return "display-update"
+	case "disable-gfx":
+		return onoff(p.DisableGFX)
 	case "domain":
 		return p.Domain
 	case "remote-app":

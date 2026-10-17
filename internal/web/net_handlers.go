@@ -17,9 +17,10 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	bonds, _ := s.svc.ListBonds(p)
 	vswitches, _ := s.svc.ListVSwitches(p)
 	s.render(w, p, "networks.html", "networks", map[string]any{
-		"Networks":  list,
-		"Bonds":     bonds,
-		"VSwitches": vswitches,
+		"Networks":   list,
+		"Bonds":      bonds,
+		"VSwitches":  vswitches,
+		"MgmtBridge": s.svc.MgmtInterface(),
 	})
 }
 

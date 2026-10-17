@@ -57,6 +57,7 @@ func (s *Server) desktopProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RDP is disabled: desktops always use the loopback VNC target resolved above.
 	guacdAddr := s.cfg.Gateway.GuacdAddr
 	if guacdAddr == "" {
 		guacdAddr = "127.0.0.1:4822"
@@ -67,6 +68,7 @@ func (s *Server) desktopProxy(w http.ResponseWriter, r *http.Request) {
 		Port:            di.Port,
 		Username:        di.Username,
 		Password:        di.Password,
+		Domain:          di.Domain,
 		Width:           1280,
 		Height:          720,
 		DPI:             96,
@@ -75,6 +77,11 @@ func (s *Server) desktopProxy(w http.ResponseWriter, r *http.Request) {
 		EnableMic:       true,
 		RemoteApp:       di.RemoteApp,
 		RemoteAppArgs:   di.RemoteAppArgs,
+		// Keep the RDP Graphics Pipeline (GFX) ENABLED: modern Windows paints the
+		// desktop only over GFX, so disabling it yields a black screen with just a
+		// live cursor. (FreeRDP <3.31 renders GFX fine; the >=3.31 gdi_init_ex
+		// crash is handled by pinning the library, not by turning GFX off.)
+		DisableGFX: false,
 	}
 	guac, _, err := gateway.Handshake(guacdAddr, params)
 	if err != nil {

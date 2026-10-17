@@ -76,6 +76,17 @@ func (s *Supervisor) Run(ctx context.Context) {
 	// if it verifies; otherwise keep the untouched source). Runs before any
 	// reconcile could act on a half-moved VM.
 	s.mgr.RecoverMigrations()
+	// When the management interface is a default vSwitch, ensure its attachable
+	// "VM Network" port group exists (ESXi-style). One-shot at boot so an admin's
+	// deletion stays deleted; a fresh install / mgmt-NIC conversion gets it here.
+	if s.svc != nil {
+		if err := s.svc.EnsureDefaultPortGroup(); err != nil {
+			log.Printf("ensure default port group: %v", err)
+		}
+		// Remount any configured network backup targets (NFS/CIFS/CephFS) so
+		// scheduled + manual backups to shares work after a reboot.
+		s.svc.EnsureBackupMounts()
+	}
 	go s.loop(ctx, "reconciler", 5*time.Second, s.reconcile)
 	go s.loop(ctx, "session-gc", 1*time.Hour, s.gcWebSessions)
 	go s.loop(ctx, "retention", 10*time.Minute, s.retention)
@@ -88,6 +99,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 	go s.loop(ctx, "node-health", 30*time.Second, s.nodeHealth)
 	go s.loop(ctx, "desktop-reclaim", 2*time.Minute, s.reclaimDesktops)
 	go s.loop(ctx, "account-sync", 10*time.Second, s.syncAccounts)
+	go s.loop(ctx, "guest-os", 60*time.Second, s.detectGuestOS)
 	<-ctx.Done()
 }
 
@@ -115,6 +127,11 @@ func (s *Supervisor) loop(ctx context.Context, name string, every time.Duration,
 
 // reconcile marks sessions whose QEMU process has died as stopped.
 func (s *Supervisor) reconcile() { s.mgr.Reconcile() }
+
+// detectGuestOS fills in the guest OS for running ISO-install VMs that don't have
+// one yet, so the Image column shows the installed OS instead of the placeholder.
+// Self-limiting: a VM drops out of the query as soon as its OS is recorded.
+func (s *Supervisor) detectGuestOS() { s.mgr.DetectGuestOS() }
 
 // gcWebSessions deletes expired browser session rows.
 func (s *Supervisor) gcWebSessions() {
@@ -147,12 +164,20 @@ func (s *Supervisor) retention() {
 		// SAFETY: auto-retention must never stop a VM that is actually running.
 		// A running VM past its cutoff is skipped and logged for an operator —
 		// the user's rule is that control-plane state never disrupts live VMs.
-		if sess, err := s.mgr.Get(id); err == nil && s.mgr.Running(sess) {
+		sess, gerr := s.mgr.Get(id)
+		if gerr == nil && s.mgr.Running(sess) {
 			log.Printf("retention: %s is past cutoff but RUNNING — skipping auto-deprovision (needs manual action)", id)
 			continue
 		}
 		if err := s.mgr.Delete(id); err == nil {
 			log.Printf("retention: auto-deprovisioned %s", id)
+			if s.svc != nil {
+				var org int64
+				if gerr == nil {
+					org = sess.OrgID
+				}
+				s.svc.SysAudit(org, "session.retention_delete", "session", id, map[string]any{"reason": "retention cutoff reached"})
+			}
 		}
 	}
 }
@@ -178,12 +203,26 @@ func (s *Supervisor) runDueBackups() {
 			_ = s.stg.MarkScheduleRun(sc.ID, sc.IntervalHours)
 			continue
 		}
-		id, err := s.stg.CreateBackupRow(sc.OrgID, sc.SessionID, "scheduled")
+		destDir, terr := s.svc.ResolveBackupTargetDir(sc.TargetID)
+		if terr != nil {
+			log.Printf("scheduled backup %s: target unavailable: %v", sc.SessionID, terr)
+			_ = s.stg.MarkScheduleRun(sc.ID, sc.IntervalHours)
+			continue
+		}
+		id, err := s.stg.CreateBackupRow(sc.OrgID, sc.SessionID, "scheduled", sc.TargetID)
 		if err == nil {
-			if err := s.stg.RunBackup(id, sess.DiskPath); err != nil {
-				log.Printf("scheduled backup %s failed: %v", sc.SessionID, err)
+			rerr := s.stg.RunBackup(id, sess.DiskPath, destDir)
+			if rerr != nil {
+				log.Printf("scheduled backup %s failed: %v", sc.SessionID, rerr)
 			}
 			s.stg.PruneBackups(sc.SessionID, sc.Keep)
+			if s.svc != nil {
+				detail := map[string]any{"backup_id": id, "target_id": sc.TargetID, "schedule_id": sc.ID}
+				if rerr != nil {
+					detail["error"] = rerr.Error()
+				}
+				s.svc.SysAudit(sc.OrgID, "backup.scheduled", "session", sc.SessionID, detail)
+			}
 		}
 		_ = s.stg.MarkScheduleRun(sc.ID, sc.IntervalHours)
 	}

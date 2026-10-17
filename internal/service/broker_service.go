@@ -176,6 +176,13 @@ func (s *Service) acquireDesktop(p *Principal, pool *broker.Pool) (string, error
 	if pool.MaxSize > 0 && n >= pool.MaxSize {
 		return "", errors.New("desktop pool is at capacity — try again shortly")
 	}
+	// A Linux pool installs a lightweight XFCE+Firefox desktop on first boot so the
+	// VDI VM shows a usable graphical desktop over VNC; a Windows pool brings its
+	// own desktop. Guest agent on so the broker can read the VM's IP/health.
+	desktop := ""
+	if pool.OSType != "windows" {
+		desktop = "xfce"
+	}
 	sess, err := s.mgr.Create(session.CreateOpts{
 		OrgID:     pool.OrgID,
 		OwnerID:   p.User.ID,
@@ -183,6 +190,9 @@ func (s *Service) acquireDesktop(p *Principal, pool *broker.Pool) (string, error
 		ImageName: pool.ImageName,
 		Kind:      "desktop",
 		Firmware:  "uefi",
+		OSType:    pool.OSType,
+		Desktop:    desktop,
+		GuestAgent: true,
 		CPUs:      pool.CPUs,
 		MemoryMB:  pool.MemoryMB,
 		DiskGB:    pool.DiskGB,

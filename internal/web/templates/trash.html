@@ -8,7 +8,7 @@
     {{range .Sessions}}
     <tr>
       <td><strong>{{.Name}}</strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
-      <td>{{.ImageName}}</td>
+      <td>{{.DisplayImage}}</td>
       <td class="muted">{{.Kind}} · {{.CPUs}} vCPU · {{.MemoryMB}} MB</td>
       <td style="text-align:right;white-space:nowrap">
         <form method="post" action="/trash/{{.ID}}/restore" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restore</button></form>

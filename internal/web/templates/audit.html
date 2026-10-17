@@ -15,6 +15,12 @@
         <option value="member." {{if eq .Filter "member."}}selected{{end}}>member.</option>
         <option value="apikey." {{if eq .Filter "apikey."}}selected{{end}}>apikey.</option>
         <option value="alertrule." {{if eq .Filter "alertrule."}}selected{{end}}>alertrule.</option>
+        <option value="auth." {{if eq .Filter "auth."}}selected{{end}}>auth.</option>
+        <option value="node." {{if eq .Filter "node."}}selected{{end}}>node.</option>
+        <option value="backuptarget." {{if eq .Filter "backuptarget."}}selected{{end}}>backuptarget.</option>
+        <option value="schedule." {{if eq .Filter "schedule."}}selected{{end}}>schedule.</option>
+        <option value="pool." {{if eq .Filter "pool."}}selected{{end}}>pool.</option>
+        <option value="vswitch." {{if eq .Filter "vswitch."}}selected{{end}}>vswitch.</option>
       </select>
     </label>
     <noscript><button class="btn sm">Apply</button></noscript>
@@ -25,7 +31,7 @@
     {{range .Entries}}
     <tr>
       <td class="muted mono" style="font-size:12px;white-space:nowrap">{{.CreatedAt}}</td>
-      <td>{{.ActorKind}}#{{.ActorID}}</td>
+      <td>{{.Actor}}{{if .IP}} <span class="muted mono" style="font-size:11px">{{.IP}}</span>{{end}}</td>
       <td><span class="pill">{{.Action}}</span></td>
       <td class="muted">{{.TargetType}} {{if .TargetID}}<span class="mono">{{.TargetID}}</span>{{end}}</td>
       <td class="muted mono" style="font-size:12px">{{.Detail}}</td>
