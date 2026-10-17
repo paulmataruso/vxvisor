@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
@@ -77,7 +78,11 @@ type CreateContainerInput struct {
 	CPUs          int
 	MemoryMB      int
 	StoragePoolID int64
+	Copies        int // >1 creates that many independent containers with generated names
 }
+
+// maxContainerCopies caps a single multi-create request.
+const maxContainerCopies = 50
 
 func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip string) error {
 	if !p.atLeast("member") {
@@ -95,6 +100,13 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 	if in.MemoryMB <= 0 {
 		in.MemoryMB = 512
 	}
+	copies := in.Copies
+	if copies <= 0 {
+		copies = 1
+	}
+	if copies > maxContainerCopies {
+		return fmt.Errorf("at most %d copies at a time", maxContainerCopies)
+	}
 	// rootfs location: a chosen storage pool's path (under /lxc), else default.
 	lxcpath := ""
 	if in.StoragePoolID > 0 {
@@ -104,24 +116,96 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 		}
 	}
 	bridge := in.Bridge
-	mac := netdrv.GenMAC()
-	res, err := s.db.Exec(`INSERT INTO containers(name,org_id,owner_id,dist,release,arch,lxcpath,bridge,cpus,memory_mb,status)
-		VALUES(?,?,?,?,?,?,?,?,?,?,'creating')`,
-		in.Name, p.OrgID, p.User.ID, in.Dist, in.Release, "amd64", lxcpath, bridge, in.CPUs, in.MemoryMB)
-	if err != nil {
-		return fmt.Errorf("a container named %q already exists", in.Name)
-	}
-	id, _ := res.LastInsertId()
-	s.audit(p, p.OrgID, "container.create", "container", in.Name, ip, map[string]any{"dist": in.Dist, "release": in.Release})
-	// Download + build asynchronously; flip status when done.
-	go func() {
-		if err := lxc.Create(in.Name, lxcpath, in.Dist, in.Release, "amd64", bridge, mac, in.CPUs, in.MemoryMB); err != nil {
-			_, _ = s.db.Exec(`UPDATE containers SET status='error' WHERE id=?`, id)
-			return
+
+	// Generate the independent names up front and refuse the whole batch if any
+	// would collide with an existing container (so we never create a partial set
+	// under surprising names).
+	names := expandContainerNames(in.Name, copies)
+	for _, n := range names {
+		var exists int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM containers WHERE name=?`, n).Scan(&exists)
+		if exists > 0 {
+			return fmt.Errorf("a container named %q already exists", n)
 		}
-		_, _ = s.db.Exec(`UPDATE containers SET status='stopped' WHERE id=?`, id)
+	}
+
+	// Insert every row as 'creating' so the UI shows the whole batch immediately.
+	type pending struct {
+		id   int64
+		name string
+		mac  string
+	}
+	var batch []pending
+	for _, n := range names {
+		mac := netdrv.GenMAC()
+		res, err := s.db.Exec(`INSERT INTO containers(name,org_id,owner_id,dist,release,arch,lxcpath,bridge,cpus,memory_mb,status)
+			VALUES(?,?,?,?,?,?,?,?,?,?,'creating')`,
+			n, p.OrgID, p.User.ID, in.Dist, in.Release, "amd64", lxcpath, bridge, in.CPUs, in.MemoryMB)
+		if err != nil {
+			// Roll back the rows we already inserted for this batch.
+			for _, b := range batch {
+				_, _ = s.db.Exec(`DELETE FROM containers WHERE id=?`, b.id)
+			}
+			return fmt.Errorf("a container named %q already exists", n)
+		}
+		id, _ := res.LastInsertId()
+		batch = append(batch, pending{id: id, name: n, mac: mac})
+	}
+	s.audit(p, p.OrgID, "container.create", "container", in.Name, ip,
+		map[string]any{"dist": in.Dist, "release": in.Release, "copies": copies})
+
+	// Build them sequentially in one goroutine: the first lxc-create downloads
+	// the rootfs template, the rest reuse the cache — serial avoids concurrent
+	// download races and resource spikes.
+	go func() {
+		for _, b := range batch {
+			if err := lxc.Create(b.name, lxcpath, in.Dist, in.Release, "amd64", bridge, b.mac, in.CPUs, in.MemoryMB); err != nil {
+				_, _ = s.db.Exec(`UPDATE containers SET status='error' WHERE id=?`, b.id)
+				continue
+			}
+			_, _ = s.db.Exec(`UPDATE containers SET status='stopped' WHERE id=?`, b.id)
+		}
 	}()
 	return nil
+}
+
+// expandContainerNames turns a base name + count into n distinct names. If the
+// base ends in digits, those are incremented preserving zero-pad width
+// (web01, n=3 → web01, web02, web03). Otherwise a zero-padded suffix is appended
+// (web, n=3 → web-1, web-2, web-3). A single copy keeps the exact name typed.
+func expandContainerNames(base string, n int) []string {
+	if n <= 1 {
+		return []string{base}
+	}
+	// Split a trailing digit run off the base.
+	i := len(base)
+	for i > 0 && base[i-1] >= '0' && base[i-1] <= '9' {
+		i--
+	}
+	out := make([]string, 0, n)
+	if i < len(base) {
+		prefix, numStr := base[:i], base[i:]
+		width := len(numStr)
+		start, _ := strconv.Atoi(numStr)
+		for k := 0; k < n; k++ {
+			num := strconv.Itoa(start + k)
+			for len(num) < width {
+				num = "0" + num
+			}
+			out = append(out, prefix+num)
+		}
+		return out
+	}
+	// No trailing number: width scales with the count (n=10 → -01..-10).
+	width := len(strconv.Itoa(n))
+	for k := 1; k <= n; k++ {
+		num := strconv.Itoa(k)
+		for len(num) < width {
+			num = "0" + num
+		}
+		out = append(out, base+"-"+num)
+	}
+	return out
 }
 
 // containerByID loads an org-scoped container row.

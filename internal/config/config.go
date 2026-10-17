@@ -47,6 +47,15 @@ type ClusterConfig struct {
 	// table (e.g. 10.77.0.0/16). Gateway is this subnet's router address.
 	Subnet  string `toml:"subnet"`
 	Gateway string `toml:"gateway"`
+	// Nameservers are the DNS resolvers written into a bridge/overlay guest's
+	// cloud-init network-config. A static guest has no DHCP-provided resolver, so
+	// without these its apt/package install (desktop, guest agent) can't resolve.
+	// Empty falls back to public resolvers (1.1.1.1, 8.8.8.8), reachable via NAT.
+	Nameservers []string `toml:"nameservers"`
+	// DHCP, when true, makes bridge-mode guests lease their address from the
+	// bridged LAN's own DHCP server instead of the platform's static 10.77.0.0/16
+	// IPAM. Set this when the VM bridge (Bridge) is enslaved to a real LAN uplink.
+	DHCP bool `toml:"dhcp"`
 	// MigratePort is the TCP port the destination QEMU listens on (-incoming) and
 	// the source streams RAM to during a live migration.
 	MigratePort int `toml:"migrate_port"`

@@ -1,37 +1,116 @@
 {{define "overview.html"}}{{template "head" .}}
 <style>
-  .ov-tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-bottom:20px}
-  .tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden;min-width:0}
-  .tile .ic{width:18px;height:18px;color:var(--muted)}
-  .tile .lbl{font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.02em;text-transform:uppercase;display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .tile .big{font-size:28px;font-weight:700;line-height:1.1;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .tile .sub{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .tile.accent-l{border-left:3px solid var(--primary)}
-  .tile.accent-a{border-left:3px solid var(--accent)}
-  .tile.accent-o{border-left:3px solid var(--ok)}
-  .ov-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
-  .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+  /* ---- overview: modern, consolidated landing page ---- */
+  .ovh{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+  .ovh h1{margin:0 0 3px;font-size:23px;letter-spacing:-.01em}
+  .ovh p{margin:0;color:var(--muted);font-size:13px}
+  .ovh .acts{display:flex;gap:8px;flex-wrap:wrap}
+
+  /* hero */
+  .hero{display:grid;grid-template-columns:minmax(230px,1fr) 2fr;background:var(--panel);
+    border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+  .hero-l{padding:24px;border-right:1px solid var(--line);background:
+    radial-gradient(120% 120% at 0% 0%,var(--panel2),transparent 70%)}
+  .hero-run{display:flex;align-items:baseline;gap:8px}
+  .hero-run b{font-size:46px;font-weight:800;line-height:1;letter-spacing:-.02em}
+  .hero-run span{color:var(--muted);font-size:15px}
+  .hero-cap{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700;margin-bottom:10px}
+  .segbar{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--panel2);margin:16px 0 10px;gap:2px}
+  .segbar .seg{min-width:3px;border-radius:999px}
+  .seg.ok{background:var(--ok)}
+  .seg.idle{background:var(--muted);opacity:.5}
+  .hero-leg{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+  .hero-leg i{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+  .hero-r{padding:22px 24px;display:flex;align-items:center;justify-content:space-around;gap:20px;flex-wrap:wrap}
+  .gauge{display:flex;align-items:center;gap:15px;min-width:0}
+  .gauge .ring{width:108px;height:108px}
+  .gauge .ring .hole{width:82px;height:82px}
+  .gauge .ring .hole b{font-size:24px;font-weight:800}
+  .gl{min-width:0}
+  .gl-t{font-size:14px;font-weight:700}
+  .gl-s{font-size:12px;color:var(--muted);margin-top:3px;white-space:nowrap}
+
+  /* live performance strip */
+  .live{display:grid;grid-template-columns:repeat(3,1fr);gap:0;background:var(--panel);
+    border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+  .live-c{padding:16px 18px;position:relative;min-width:0}
+  .live-c+.live-c{border-left:1px solid var(--line)}
+  .live-c .lh{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:700;display:flex;align-items:center;gap:7px}
+  .live-c .lh .ic{width:15px;height:15px}
+  .live-c .lv{font-size:17px;font-weight:700;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live-c canvas{width:100%;height:34px;margin-top:6px;display:block}
+  /* vertical split inside each live card: current reading | trailing averages */
+  .live-split{display:flex;gap:12px;align-items:stretch}
+  .live-main{flex:1 1 60%;min-width:0}
+  .live-avg{flex:0 0 38%;border-left:1px solid var(--line);padding-left:12px;
+    display:flex;flex-direction:column;justify-content:center;gap:5px}
+  .avg-row{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .avg-row .at{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700}
+  .avg-row .av{font-size:12px;font-weight:600;white-space:nowrap}
+
+  /* grouped panels — FLEX so the last row stretches to fill (no blank cells) */
+  .ovg{display:flex;flex-wrap:wrap;gap:16px}
+  .ovg>.pan{flex:1 1 300px}
+  .pan{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;min-width:0}
+  .pan-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px}
+  .pan-h h2{margin:0;font-size:15px;display:flex;align-items:center;gap:9px}
+  .pan-h h2 .ic{width:17px;height:17px;color:var(--muted)}
+  .pan-h a{font-size:12px;color:var(--primary);text-decoration:none}
+  .pan-h a:hover{text-decoration:underline}
+  .kv{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
   .kv:last-child{border-bottom:0}
   .kv .k{color:var(--muted)}
   .kv .v{font-weight:600}
-  .bar{height:8px;background:var(--panel2);border-radius:999px;overflow:hidden;margin:8px 0 4px}
-  .bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--primary),var(--accent));border-radius:999px}
-  .act{display:flex;gap:10px;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+
+  /* storage capacity ring */
+  .ring-wrap{display:flex;align-items:center;gap:18px}
+  .ring{width:96px;height:96px;border-radius:50%;flex:none;display:grid;place-items:center;
+    background:conic-gradient(var(--rc,var(--primary)) calc(var(--pct)*1%), var(--panel2) 0);transition:background .4s}
+  .ring .hole{width:72px;height:72px;border-radius:50%;background:var(--panel);display:grid;place-items:center;text-align:center}
+  .ring .hole b{font-size:20px;font-weight:800;line-height:1}
+  .ring .hole small{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .ring-meta{min-width:0}
+  .ring-meta .rm-big{font-size:15px;font-weight:600}
+  .ring-meta .rm-sub{font-size:12px;color:var(--muted);margin-top:2px}
+
+  /* running-now list */
+  .run{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);text-decoration:none;color:var(--fg)}
+  .run:last-child{border-bottom:0}
+  .run:hover .rn{color:var(--primary)}
+  .run .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+  .run .rn{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .run .rk{margin-left:auto;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .run .rnode{font-size:11px;color:var(--faint)}
+  /* split-card: a horizontal divider section for "top consumers" */
+  .split-sec{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+  .split-cap{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;font-weight:700;margin-bottom:4px}
+  .run.topc{justify-content:space-between}
+  .run.topc .topc-m{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap;text-transform:none;letter-spacing:0}
+  .run.topc .rank{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;
+    box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%,transparent)}
+
+  /* recent activity */
+  .act{display:grid;grid-template-columns:140px 1fr;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
   .act:last-child{border-bottom:0}
-  .act .when{color:var(--faint);font-size:11px;white-space:nowrap;min-width:120px}
-  .act .what{font-weight:600}
-  .chiprow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-  .chip{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:5px 11px;border:1px solid var(--line);border-radius:999px;color:var(--fg);text-decoration:none}
-  .chip:hover{border-color:var(--primary)}
-  .chip .d{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+  .act .when{color:var(--faint);font-size:11px;white-space:nowrap}
+  .act .what b{font-weight:600}
+  .act .what .muted{color:var(--muted)}
+
+  @media(max-width:720px){
+    .hero{grid-template-columns:1fr}
+    .hero-l{border-right:0;border-bottom:1px solid var(--line)}
+    .hero-r{grid-template-columns:repeat(2,1fr)}
+    .live{grid-template-columns:1fr}
+    .live-c+.live-c{border-left:0;border-top:1px solid var(--line)}
+  }
 </style>
 
-<div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+<div class="ovh">
   <div>
-    <h2 style="margin:0 0 3px">Overview</h2>
-    <p class="muted" style="margin:0">Welcome back, {{.P.User.Username}}. Here's what's running across your environment.</p>
+    <h1>Overview</h1>
+    <p>Welcome back, {{.P.User.Username}} — here's what's running across your environment.</p>
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap">
+  <div class="acts">
     <a href="/instances" class="btn primary"><svg class="ic"><use href="#i-server"/></svg>New instance</a>
     <a href="/networks" class="btn"><svg class="ic"><use href="#i-network"/></svg>Networks</a>
     <a href="/storage" class="btn"><svg class="ic"><use href="#i-database"/></svg>Storage</a>
@@ -39,157 +118,263 @@
 </div>
 
 {{with .O}}
-<div class="ov-tiles">
-  <div class="tile accent-l">
-    <span class="lbl"><svg class="ic"><use href="#i-server"/></svg>Instances</span>
-    <span class="big">{{.VMs.Running}}<span style="font-size:16px;color:var(--muted)"> / {{.VMs.Total}}</span></span>
-    <span class="sub">{{.VMs.Running}} running · {{.VMs.Stopped}} stopped</span>
+<!-- ============ hero: headline instance + resource summary ============ -->
+<div class="hero">
+  <div class="hero-l">
+    <div class="hero-cap">Instances</div>
+    <div class="hero-run"><b>{{.VMs.Running}}</b><span>/ {{.VMs.Total}} running</span></div>
+    {{if .VMs.Total}}
+    <div class="segbar">
+      {{if .VMs.Running}}<span class="seg ok" style="flex:{{.VMs.Running}}" title="{{.VMs.Running}} running"></span>{{end}}
+      {{if .VMs.Stopped}}<span class="seg idle" style="flex:{{.VMs.Stopped}}" title="{{.VMs.Stopped}} stopped"></span>{{end}}
+    </div>
+    <div class="hero-leg">
+      <span><i style="background:var(--ok)"></i>{{.VMs.Running}} running</span>
+      <span><i style="background:var(--muted)"></i>{{.VMs.Stopped}} stopped</span>
+      <span>{{.VMs.Servers}} servers · {{.VMs.Desktop}} desktops</span>
+    </div>
+    {{else}}
+    <div class="hero-leg" style="margin-top:14px"><span>No instances yet — <a href="/instances">create one</a>.</span></div>
+    {{end}}
   </div>
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-monitor"/></svg>Shape</span>
-    <span class="big">{{.VMs.Desktop}}<span style="font-size:16px;color:var(--muted)"> / {{.VMs.Servers}}</span></span>
-    <span class="sub">desktops / servers</span>
+  <div class="hero-r">
+    <div class="gauge">
+      <div class="ring" id="g-cpu-ring" style="--pct:0"><div class="hole"><b id="g-cpu">—</b></div></div>
+      <div class="gl"><div class="gl-t">Host CPU</div><div class="gl-s">{{.VCPUs}} vCPU allocated</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-mem-ring" style="--pct:0"><div class="hole"><b id="g-mem">—</b></div></div>
+      <div class="gl"><div class="gl-t">Host memory</div><div class="gl-s" id="g-mem-sub">{{printf "%.1f" .MemoryGB}} GB allocated</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-disk-ring" style="--pct:0"><div class="hole"><b id="g-disk">—</b></div></div>
+      <div class="gl"><div class="gl-t">Host disk</div><div class="gl-s" id="g-disk-sub">{{.Containers}} containers</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-cpupsi-ring" style="--pct:0"><div class="hole"><b id="g-cpupsi">—</b></div></div>
+      <div class="gl"><div class="gl-t">CPU pressure</div><div class="gl-s">PSI avg10 stall</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-mempsi-ring" style="--pct:0"><div class="hole"><b id="g-mempsi">—</b></div></div>
+      <div class="gl"><div class="gl-t">Memory pressure</div><div class="gl-s">PSI avg10 stall</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-iopsi-ring" style="--pct:0"><div class="hole"><b id="g-iopsi">—</b></div></div>
+      <div class="gl"><div class="gl-t">I/O pressure</div><div class="gl-s">PSI avg10 stall</div></div>
+    </div>
+    <div class="gauge">
+      <div class="ring" id="g-iowait-ring" style="--pct:0"><div class="hole"><b id="g-iowait">—</b></div></div>
+      <div class="gl"><div class="gl-t">CPU iowait</div><div class="gl-s">time waiting on I/O</div></div>
+    </div>
   </div>
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-activity"/></svg>Allocated</span>
-    <span class="big">{{.VCPUs}}<span style="font-size:16px;color:var(--muted)"> vCPU</span></span>
-    <span class="sub">{{printf "%.1f" .MemoryGB}} GB RAM · {{printf "%.1f" .DiskTB}} TB disk</span>
-  </div>
-  <div class="tile accent-a">
-    <span class="lbl"><svg class="ic"><use href="#i-network"/></svg>Networking</span>
-    <span class="big">{{.PortGroups}}</span>
-    <span class="sub">port groups · {{.VSwitches}} vSwitch · {{.Bonds}} LAG</span>
-  </div>
-  <div class="tile accent-o">
-    <span class="lbl"><svg class="ic"><use href="#i-database"/></svg>Storage pools</span>
-    <span class="big">{{.Pools}}</span>
-    <span class="sub">{{printf "%.0f" .PoolUsedGB}} / {{printf "%.0f" .PoolTotGB}} GB used</span>
-  </div>
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-disc"/></svg>Library</span>
-    <span class="big">{{.Images}}<span style="font-size:16px;color:var(--muted)"> img</span></span>
-    <span class="sub">{{.ISOs}} ISOs · {{.Templates}} templates</span>
-  </div>
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-archive"/></svg>Backups</span>
-    <span class="big">{{.Backups}}</span>
-    <span class="sub">{{printf "%.1f" .BackupSizeGB}} GB stored</span>
-  </div>
-  <div class="tile accent-l">
-    <span class="lbl"><svg class="ic"><use href="#i-database"/></svg>Disk I/O</span>
-    <span class="big" id="ov-disk" style="font-size:15px">—</span>
-    <span class="sub" id="ov-disk-sub">read / write</span>
-    <canvas id="ov-disk-spark" height="30" style="width:100%;height:30px;margin-top:4px"></canvas>
-  </div>
-  <div class="tile accent-a">
-    <span class="lbl"><svg class="ic"><use href="#i-network"/></svg>Network</span>
-    <span class="big" id="ov-net" style="font-size:15px">—</span>
-    <span class="sub" id="ov-net-sub">rx / tx</span>
-    <canvas id="ov-net-spark" height="30" style="width:100%;height:30px;margin-top:4px"></canvas>
-  </div>
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-activity"/></svg>Pressure / IOWAIT</span>
-    <span class="big" id="ov-pres" style="font-size:14px">—</span>
-    <span class="sub" id="ov-pres-sub">CPU / MEM / IO PSI · iowait</span>
-  </div>
-  {{if $.P.IsAdmin}}
-  <div class="tile">
-    <span class="lbl"><svg class="ic"><use href="#i-grid"/></svg>Cluster</span>
-    <span class="big">{{.Nodes}}</span>
-    <span class="sub">nodes · {{.Members}} members</span>
-  </div>
-  {{end}}
 </div>
 
-<div class="ov-cols">
-  <!-- Running instances -->
-  <div class="card">
-    <h2>Compute</h2>
-    <div class="kv"><span class="k">Total instances</span><span class="v">{{.VMs.Total}}</span></div>
-    <div class="kv"><span class="k">Servers</span><span class="v">{{.VMs.Servers}}</span></div>
-    <div class="kv"><span class="k">Desktops</span><span class="v">{{.VMs.Desktop}}</span></div>
-    <div class="kv"><span class="k">LXC containers</span><span class="v">{{.Containers}}</span></div>
-    <div class="kv"><span class="k">Desktop pools</span><span class="v">{{.DesktopPools}}</span></div>
+<!-- ============ live performance strip ============ -->
+<div class="live">
+  <div class="live-c">
+    <div class="live-split">
+      <div class="live-main">
+        <div class="lh"><svg class="ic"><use href="#i-database"/></svg>Disk I/O</div>
+        <div class="lv" id="ov-disk">—</div>
+        <canvas id="ov-disk-spark"></canvas>
+      </div>
+      <div class="live-avg">
+        <div class="avg-row"><span class="at">5m</span><span class="av">{{humanBytes .DiskTrend.M5}}/s</span></div>
+        <div class="avg-row"><span class="at">1h</span><span class="av">{{humanBytes .DiskTrend.H1}}/s</span></div>
+        <div class="avg-row"><span class="at">25h</span><span class="av">{{humanBytes .DiskTrend.H25}}/s</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="live-c">
+    <div class="live-split">
+      <div class="live-main">
+        <div class="lh"><svg class="ic"><use href="#i-network"/></svg>Network RX</div>
+        <div class="lv" id="ov-rx">—</div>
+        <canvas id="ov-rx-spark"></canvas>
+      </div>
+      <div class="live-avg">
+        <div class="avg-row"><span class="at">5m</span><span class="av">{{humanBytes .RxTrend.M5}}/s</span></div>
+        <div class="avg-row"><span class="at">1h</span><span class="av">{{humanBytes .RxTrend.H1}}/s</span></div>
+        <div class="avg-row"><span class="at">25h</span><span class="av">{{humanBytes .RxTrend.H25}}/s</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="live-c">
+    <div class="live-split">
+      <div class="live-main">
+        <div class="lh"><svg class="ic"><use href="#i-network"/></svg>Network TX</div>
+        <div class="lv" id="ov-tx">—</div>
+        <canvas id="ov-tx-spark"></canvas>
+      </div>
+      <div class="live-avg">
+        <div class="avg-row"><span class="at">5m</span><span class="av">{{humanBytes .TxTrend.M5}}/s</span></div>
+        <div class="avg-row"><span class="at">1h</span><span class="av">{{humanBytes .TxTrend.H1}}/s</span></div>
+        <div class="avg-row"><span class="at">25h</span><span class="av">{{humanBytes .TxTrend.H25}}/s</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ grouped panels ============ -->
+<div class="ovg">
+
+  <!-- running now (quick access) — split: list on top, top load on the bottom -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-server"/></svg>Running now</h2><a href="/instances">All instances →</a></div>
+    {{if .Runners}}
+      {{range .Runners}}
+      <a class="run" href="/instances/{{.ID}}">
+        <span class="dot"></span>
+        <span class="rn">{{.Name}}</span>
+        {{if .Node}}<span class="rnode">{{.Node}}</span>{{end}}
+        <span class="rk">{{.Kind}}</span>
+      </a>
+      {{end}}
+    {{else}}<div class="empty">Nothing running right now.</div>{{end}}
+    <div class="split-sec">
+      <div class="split-cap">Top load · most CPU + memory</div>
+      {{if .TopVMs}}
+        {{range .TopVMs}}
+        <a class="run topc" href="/instances/{{.ID}}">
+          <span class="rank"></span>
+          <span class="rn">{{.Name}}</span>
+          <span class="topc-m">{{printf "%.0f" .CPUPct}}% cpu · {{printf "%.0f" .MemPct}}% mem</span>
+        </a>
+        {{end}}
+      {{else}}<div class="empty">No live load yet.</div>{{end}}
+    </div>
   </div>
 
-  <!-- Storage -->
-  <div class="card">
-    <h2>Storage</h2>
-    <div class="bar"><i style="width:{{.PoolPct}}%"></i></div>
-    <div class="kv"><span class="k">Capacity used</span><span class="v">{{.PoolPct}}% · {{printf "%.0f" .PoolUsedGB}} / {{printf "%.0f" .PoolTotGB}} GB</span></div>
-    <div class="kv"><span class="k">Registered pools</span><span class="v">{{.Pools}}</span></div>
-    {{if $.P.IsAdmin}}
-    <div class="kv"><span class="k">ZFS pools</span><span class="v">{{.ZFSPools}}</span></div>
-    <div class="kv"><span class="k">LVM-thin pools</span><span class="v">{{.LVMPools}}</span></div>
-    {{end}}
-    <div style="margin-top:10px"><a href="/storage" class="btn sm">Manage storage</a></div>
+  <!-- storage with capacity ring -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-database"/></svg>Storage</h2><a href="/storage">Manage →</a></div>
+    <div class="ring-wrap">
+      <div class="ring" style="--pct:{{.PoolPct}}"><div class="hole"><b>{{.PoolPct}}%</b><small>used</small></div></div>
+      <div class="ring-meta">
+        <div class="rm-big">{{printf "%.0f" .PoolUsedGB}} / {{printf "%.0f" .PoolTotGB}} GB</div>
+        <div class="rm-sub">{{.Pools}} pool{{if ne .Pools 1}}s{{end}}{{if $.P.IsAdmin}} · {{.ZFSPools}} ZFS · {{.LVMPools}} LVM-thin{{end}}</div>
+        <div class="rm-sub">{{.Backups}} backup{{if ne .Backups 1}}s{{end}} · {{printf "%.1f" .BackupSizeGB}} GB</div>
+      </div>
+    </div>
+    <div class="split-sec">
+      <div class="split-cap">Largest instance · most disk</div>
+      {{if .TopStorage}}
+        <a class="run topc" href="/instances/{{.TopStorage.ID}}">
+          <span class="rank"></span>
+          <span class="rn">{{.TopStorage.Name}}</span>
+          <span class="topc-m">{{.TopStorage.DiskGB}} GB disk</span>
+        </a>
+      {{else}}<div class="empty">No instances with disks.</div>{{end}}
+    </div>
   </div>
 
-  <!-- Networking -->
-  <div class="card">
-    <h2>Networking</h2>
+  <!-- networking -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-network"/></svg>Networking</h2><a href="/networks">Topology →</a></div>
     <div class="kv"><span class="k">Port groups</span><span class="v">{{.PortGroups}}</span></div>
     <div class="kv"><span class="k">vSwitches</span><span class="v">{{.VSwitches}}</span></div>
-    <div class="kv"><span class="k">Uplinks (LAG)</span><span class="v">{{.Bonds}}</span></div>
+    <div class="kv"><span class="k">Uplinks / LAG</span><span class="v">{{.Bonds}}</span></div>
     {{if $.P.IsAdmin}}<div class="kv"><span class="k">L3 routing</span><span class="v">{{if eq .Routing "configured"}}<span class="pill running">on</span>{{else}}<span class="pill">off</span>{{end}}</span></div>{{end}}
-    <div style="margin-top:10px"><a href="/networks" class="btn sm">View topology</a></div>
   </div>
 
-  <!-- Usage & quota -->
-  <div class="card">
-    <h2>Usage &amp; Quota <span class="muted" style="font-size:12px;font-weight:400">· last 30 days</span></h2>
+  <!-- library -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-disc"/></svg>Library</h2><a href="/storage">Images & ISOs →</a></div>
+    <div class="kv"><span class="k">Base images</span><span class="v">{{.Images}}</span></div>
+    <div class="kv"><span class="k">ISOs</span><span class="v">{{.ISOs}}</span></div>
+    <div class="kv"><span class="k">Templates</span><span class="v">{{.Templates}}</span></div>
+    {{if .DesktopPools}}<div class="kv"><span class="k">Desktop pools</span><span class="v">{{.DesktopPools}}</span></div>{{end}}
+  </div>
+
+  <!-- usage & quota -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-activity"/></svg>Usage <span class="muted" style="font-weight:400;font-size:12px">· 30 days</span></h2><a href="/billing">Report →</a></div>
     <div class="kv"><span class="k">Instance-hours</span><span class="v">{{printf "%.1f" .Usage.InstanceHours}}</span></div>
     {{if .Usage.CostCredits}}<div class="kv"><span class="k">Cost</span><span class="v">{{printf "%.2f" .Usage.CostCredits}} credits</span></div>{{end}}
     <div class="kv"><span class="k">Running</span><span class="v">{{.VMs.Running}}{{if .Quota.MaxRunning}} / {{.Quota.MaxRunning}}{{end}}</span></div>
-    <div class="kv"><span class="k">Servers</span><span class="v">{{.VMs.Servers}}{{if .Quota.MaxServers}} / {{.Quota.MaxServers}}{{end}}</span></div>
-    <div class="kv"><span class="k">vCPUs allocated</span><span class="v">{{.VCPUs}}{{if .Quota.MaxVCPUs}} / {{.Quota.MaxVCPUs}}{{end}}</span></div>
-    <div style="margin-top:10px"><a href="/billing" class="btn sm">Usage report</a></div>
+    <div class="kv"><span class="k">vCPUs</span><span class="v">{{.VCPUs}}{{if .Quota.MaxVCPUs}} / {{.Quota.MaxVCPUs}}{{end}}</span></div>
   </div>
-</div>
 
-<!-- Recent activity -->
-<div class="card">
-  <h2>Recent activity</h2>
-  {{if .Recent}}
-  {{range .Recent}}
-  <div class="act">
-    <span class="when">{{.CreatedAt}}</span>
-    <span class="what">{{.Action}}</span>
-    <span class="muted">{{.TargetType}}{{if .TargetID}} {{.TargetID}}{{end}}</span>
+  {{if $.P.IsAdmin}}
+  <!-- cluster -->
+  <div class="pan">
+    <div class="pan-h"><h2><svg class="ic"><use href="#i-grid"/></svg>Cluster</h2><a href="/cluster">Nodes →</a></div>
+    <div class="kv"><span class="k">Nodes</span><span class="v">{{.Nodes}}</span></div>
+    <div class="kv"><span class="k">Members</span><span class="v">{{.Members}}</span></div>
+    <div class="kv"><span class="k">LXC containers</span><span class="v">{{.Containers}}</span></div>
   </div>
   {{end}}
-  <div style="margin-top:10px"><a href="/audit" class="btn sm">Full audit log</a></div>
+
+</div>
+
+<!-- ============ recent activity ============ -->
+<div class="pan" style="margin-top:16px">
+  <div class="pan-h"><h2><svg class="ic"><use href="#i-file"/></svg>Recent activity</h2><a href="/audit">Full log →</a></div>
+  {{if .Recent}}
+    {{range .Recent}}
+    <div class="act">
+      <span class="when">{{.CreatedAt}}</span>
+      <span class="what"><b>{{.Action}}</b> <span class="muted">{{.TargetType}}{{if .TargetID}} {{.TargetID}}{{end}}</span> <span class="muted">· {{.Actor}}</span></span>
+    </div>
+    {{end}}
   {{else}}<div class="empty">No activity yet.</div>{{end}}
 </div>
 {{end}}
+
 <script>
- // Live disk + network throughput via the metrics WebSocket.
+ // Live disk + network throughput + pressure via the metrics WebSocket.
  (function(){
    function fmtBps(n){ n=n||0; var u=['B','KB','MB','GB'],i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (n>=10||i===0?Math.round(n):n.toFixed(1))+' '+u[i]+'/s'; }
-   var diskHist=[], netHist=[];
+   var diskHist=[], rxHist=[], txHist=[];
    function spark(id,data,color){
      var c=document.getElementById(id); if(!c) return; var g=c.getContext('2d');
-     var w=c.width=c.clientWidth||300, h=c.height;
+     var w=c.width=c.clientWidth||300, h=c.height=c.clientHeight||34;
      g.clearRect(0,0,w,h); if(data.length<2) return;
      var max=Math.max.apply(null,data)||1, step=w/(data.length-1);
+     // soft fill under the line
+     g.beginPath(); data.forEach(function(v,i){ var y=h-(v/max)*(h-4)-2; i?g.lineTo(i*step,y):g.moveTo(0,y); });
+     g.lineTo(w,h); g.lineTo(0,h); g.closePath(); g.fillStyle=color+'22'; g.fill();
      g.strokeStyle=color; g.lineWidth=2; g.beginPath();
-     data.forEach(function(v,i){ var y=h-(v/max)*(h-3)-1; i?g.lineTo(i*step,y):g.moveTo(0,y); });
+     data.forEach(function(v,i){ var y=h-(v/max)*(h-4)-2; i?g.lineTo(i*step,y):g.moveTo(0,y); });
      g.stroke();
    }
    var cs=getComputedStyle(document.documentElement);
    var cPrim=(cs.getPropertyValue('--primary').trim()||'#3b82f6'), cAcc=(cs.getPropertyValue('--accent').trim()||'#f59e0b');
+   var cOk=(cs.getPropertyValue('--ok').trim()||'#22c55e'), cBad=(cs.getPropertyValue('--danger').trim()||'#ef4444');
+   function gbytes(n){ return (n/1073741824); }
+   function utilColor(p){ return p>=85?cBad:(p>=60?cAcc:cOk); }
+   function setGauge(ring,val,pct){
+     var r=document.getElementById(ring+'-ring'), v=document.getElementById(ring);
+     pct=Math.max(0,Math.min(100,pct||0));
+     if(v) v.textContent=val;
+     if(r){ r.style.setProperty('--pct',pct.toFixed(0)); r.style.setProperty('--rc',utilColor(pct)); }
+   }
+   // Full-size PSI gauge (hero row): low-is-good severity coloring, matches the
+   // CPU/MEM/DISK rings in size.
+   function setGaugePSI(ring,v){ v=v||0; var r=document.getElementById(ring+'-ring'), b=document.getElementById(ring);
+     var pct=Math.max(0,Math.min(100,v)); if(b) b.textContent=v.toFixed(0)+'%';
+     if(r){ r.style.setProperty('--pct',pct.toFixed(0)); r.style.setProperty('--rc', v>=15?cBad:(v>=5?cAcc:cOk)); } }
    function onSample(h){
      if(!h) return;
-     var d=document.getElementById('ov-disk'), ds=document.getElementById('ov-disk-sub');
-     if(d){ d.textContent='↓ '+fmtBps(h.disk_read)+'  ↑ '+fmtBps(h.disk_write); ds.textContent='read / write'; }
-     var n=document.getElementById('ov-net'), ns=document.getElementById('ov-net-sub');
-     if(n){ n.textContent='↓ '+fmtBps(h.net_rx)+'  ↑ '+fmtBps(h.net_tx); ns.textContent='rx / tx'; }
-     var pr=document.getElementById('ov-pres');
-     if(pr){ pr.textContent='CPU '+(h.cpu_pres||0).toFixed(1)+' · MEM '+(h.mem_pres||0).toFixed(1)+' · IO '+(h.io_pres||0).toFixed(1);
-             document.getElementById('ov-pres-sub').textContent='PSI avg10 · iowait '+(h.iowait||0).toFixed(1)+'%'; }
+     // Host utilization gauges (CPU / memory / disk).
+     setGauge('g-cpu', (h.cpu_pct||0).toFixed(0)+'%', h.cpu_pct||0);
+     if(h.mem_total){ var mp=100*h.mem_used/h.mem_total; setGauge('g-mem', mp.toFixed(0)+'%', mp);
+       var ms=document.getElementById('g-mem-sub'); if(ms) ms.textContent=gbytes(h.mem_used).toFixed(1)+' / '+gbytes(h.mem_total).toFixed(1)+' GB used'; }
+     if(h.disk_total){ var dp=100*h.disk_used/h.disk_total; setGauge('g-disk', dp.toFixed(0)+'%', dp);
+       var dgs=document.getElementById('g-disk-sub'); if(dgs) dgs.textContent=gbytes(h.disk_used).toFixed(0)+' / '+gbytes(h.disk_total).toFixed(0)+' GB used'; }
+     var d=document.getElementById('ov-disk'); if(d) d.textContent='↓ '+fmtBps(h.disk_read)+'   ↑ '+fmtBps(h.disk_write);
+     var rx=document.getElementById('ov-rx'); if(rx) rx.textContent='↓ '+fmtBps(h.net_rx);
+     var tx=document.getElementById('ov-tx'); if(tx) tx.textContent='↑ '+fmtBps(h.net_tx);
+     // Hero-row full-size PSI gauges (moved up from the old Pressure card):
+     // per-resource avg10 stall + CPU iowait. Low-is-good severity coloring.
+     setGaugePSI('g-cpupsi', h.cpu_pres||0);
+     setGaugePSI('g-mempsi', h.mem_pres||0);
+     setGaugePSI('g-iopsi', h.io_pres||0);
+     setGaugePSI('g-iowait', h.iowait||0);
      diskHist.push((h.disk_read||0)+(h.disk_write||0)); if(diskHist.length>60)diskHist.shift();
-     netHist.push((h.net_rx||0)+(h.net_tx||0)); if(netHist.length>60)netHist.shift();
-     spark('ov-disk-spark',diskHist,cPrim); spark('ov-net-spark',netHist,cAcc);
+     rxHist.push(h.net_rx||0); if(rxHist.length>60)rxHist.shift();
+     txHist.push(h.net_tx||0); if(txHist.length>60)txHist.shift();
+     spark('ov-disk-spark',diskHist,cPrim); spark('ov-rx-spark',rxHist,cOk); spark('ov-tx-spark',txHist,cAcc);
    }
    try{
      var proto=location.protocol==='https:'?'wss':'ws';

@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"vdxclone/internal/lvm"
 	"vdxclone/internal/storage"
 )
 
@@ -183,13 +184,23 @@ func (s *Service) ListBackups(p *Principal) ([]storage.Backup, error) {
 	if p.OrgID == 0 {
 		return nil, nil
 	}
-	return s.stg.ListBackups(p.OrgID)
+	list, err := s.stg.ListBackups(p.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	names := s.targetNames()
+	for i := range list {
+		list[i].Target = names[list[i].TargetID]
+	}
+	return list, nil
 }
+
+// Backup targets (first-class, pool-independent) live in backup_targets_service.go.
 
 // CreateBackup runs a backup of a stopped instance synchronously (the caller is
 // typically a short HTTP request; disks here are small). It records the row then
 // streams the compressed copy.
-func (s *Service) CreateBackup(p *Principal, sessionID, name, ip string) (int64, error) {
+func (s *Service) CreateBackup(p *Principal, sessionID, name string, targetID int64, ip string) (int64, error) {
 	if !p.atLeast("member") {
 		return 0, ErrUnauthorized
 	}
@@ -200,14 +211,21 @@ func (s *Service) CreateBackup(p *Principal, sessionID, name, ip string) (int64,
 	if s.mgr.Running(sess) {
 		return 0, errors.New("stop the instance before backing it up")
 	}
-	id, err := s.stg.CreateBackupRow(p.OrgID, sessionID, name)
+	// Resolve + validate the target BEFORE recording a row, so a bad target
+	// (unmounted share, block pool) fails fast with a clear message and never
+	// leaves a stuck 'pending' backup behind.
+	destDir, err := s.ResolveBackupTargetDir(targetID)
 	if err != nil {
 		return 0, err
 	}
-	if err := s.stg.RunBackup(id, sess.DiskPath); err != nil {
+	id, err := s.stg.CreateBackupRow(p.OrgID, sessionID, name, targetID)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.stg.RunBackup(id, sess.DiskPath, destDir); err != nil {
 		return id, err
 	}
-	s.audit(p, p.OrgID, "backup.create", "session", sessionID, ip, map[string]any{"name": name, "backup_id": id})
+	s.audit(p, p.OrgID, "backup.create", "session", sessionID, ip, map[string]any{"name": name, "backup_id": id, "target_id": targetID})
 	return id, nil
 }
 
@@ -248,10 +266,18 @@ func (s *Service) ListSchedules(p *Principal) ([]storage.Schedule, error) {
 	if p.OrgID == 0 {
 		return nil, nil
 	}
-	return s.stg.ListSchedules(p.OrgID)
+	list, err := s.stg.ListSchedules(p.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	names := s.targetNames()
+	for i := range list {
+		list[i].Target = names[list[i].TargetID]
+	}
+	return list, nil
 }
 
-func (s *Service) CreateSchedule(p *Principal, sessionID string, intervalHours, keep int, ip string) error {
+func (s *Service) CreateSchedule(p *Principal, sessionID string, intervalHours, keep int, targetID int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
@@ -264,10 +290,15 @@ func (s *Service) CreateSchedule(p *Principal, sessionID string, intervalHours, 
 	if keep < 1 {
 		keep = 7
 	}
-	if _, err := s.stg.CreateSchedule(p.OrgID, sessionID, intervalHours, keep); err != nil {
+	// Validate the target now so a schedule can never be created pointing at an
+	// unwritable destination (it would silently fail on every background run).
+	if _, err := s.ResolveBackupTargetDir(targetID); err != nil {
 		return err
 	}
-	s.audit(p, p.OrgID, "schedule.create", "session", sessionID, ip, map[string]any{"interval_hours": intervalHours, "keep": keep})
+	if _, err := s.stg.CreateSchedule(p.OrgID, sessionID, intervalHours, keep, targetID); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "schedule.create", "session", sessionID, ip, map[string]any{"interval_hours": intervalHours, "keep": keep, "target_id": targetID})
 	return nil
 }
 
@@ -288,7 +319,33 @@ func (s *Service) ListPools(p *Principal) ([]storage.Pool, error) {
 	if !p.atLeast("member") {
 		return nil, ErrUnauthorized
 	}
-	return s.stg.ListPools()
+	pools, err := s.stg.ListPools()
+	if err != nil {
+		return nil, err
+	}
+	// An LVM-thin pool is not a filesystem, so the storage layer's statfs on its
+	// device path (/dev/<vg>) reports a bogus size (e.g. devtmpfs). Overlay the
+	// REAL thin-pool size + allocation from LVM so this matches the LVM Thin Pools
+	// view (name is "<vg>/<pool>").
+	var thin []lvm.ThinPool
+	loaded := false
+	for i := range pools {
+		if pools[i].Kind != "lvm" {
+			continue
+		}
+		if !loaded {
+			thin, _ = lvm.ListThinPools()
+			loaded = true
+		}
+		for _, tp := range thin {
+			if tp.VG+"/"+tp.Name == pools[i].Name {
+				pools[i].TotalBytes = tp.SizeBytes
+				pools[i].UsedBytes = int64(float64(tp.SizeBytes) * tp.DataPct / 100)
+				break
+			}
+		}
+	}
+	return pools, nil
 }
 
 func (s *Service) UpsertPool(p *Principal, name, kind, path, ip string) error {

@@ -9,8 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"vdxclone/internal/auth"
 	"vdxclone/internal/broker"
@@ -43,6 +49,8 @@ type Service struct {
 	role   *cluster.Role
 	peerc  *peer.Client
 	migtr  *migTracker
+	joins  *joinTracker
+	vmwimp *vmwImportTracker
 	// adReload, when registered by the web layer, pushes a freshly-saved or
 	// freshly-replicated AD config to the live auth provider (no restart). Lets a
 	// follower apply the leader's AD settings the moment a snapshot lands.
@@ -50,7 +58,7 @@ type Service struct {
 }
 
 func New(cfg *config.Config, d *db.DB, st *store.Store, stg *storage.Store, net *netdrv.Store, mgr *session.Manager, enf policy.Enforcer) *Service {
-	return &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker()}
+	return &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker(), joins: newJoinTracker(), vmwimp: newVmwImportTracker()}
 }
 
 // SetADReloadHook registers the callback that applies AD config to the live
@@ -249,9 +257,50 @@ func (s *Service) audit(p *Principal, orgID int64, action, targetType, targetID,
 	if kind == "" {
 		kind = "user"
 	}
+	name := ""
+	if p.User != nil && kind == "user" {
+		name = p.User.Username
+	}
 	s.store.Audit(store.AuditEntry{
-		OrgID: orgID, ActorID: p.User.ID, ActorKind: kind,
+		OrgID: orgID, ActorID: p.User.ID, ActorKind: kind, ActorName: name,
 		Action: action, TargetType: targetType, TargetID: targetID, Detail: d, IP: ip,
+	})
+}
+
+// AuditAuth records an authentication event (login / logout / failed login /
+// password change). It takes the actor identity explicitly because these happen
+// at the edges of a session, where a Principal may not exist yet (failed login)
+// or is being torn down (logout). Never pass a password in detail.
+func (s *Service) AuditAuth(actorID int64, actorName, action, ip string, detail any) {
+	kind := "user"
+	if actorID == 0 {
+		kind = "system" // unauthenticated attempt — no real identity
+	}
+	d := "{}"
+	if detail != nil {
+		if b, err := json.Marshal(detail); err == nil {
+			d = string(b)
+		}
+	}
+	s.store.Audit(store.AuditEntry{
+		ActorID: actorID, ActorKind: kind, ActorName: actorName,
+		Action: action, TargetType: "auth", Detail: d, IP: ip,
+	})
+}
+
+// SysAudit records an action taken by the control plane itself (scheduled backup,
+// retention deprovision, crash recovery) with no human actor — tied to "system"
+// so the trail still answers who/what/when with zero ambiguity.
+func (s *Service) SysAudit(orgID int64, action, targetType, targetID string, detail any) {
+	d := "{}"
+	if detail != nil {
+		if b, err := json.Marshal(detail); err == nil {
+			d = string(b)
+		}
+	}
+	s.store.Audit(store.AuditEntry{
+		OrgID: orgID, ActorID: 0, ActorKind: "system", ActorName: "system",
+		Action: action, TargetType: targetType, TargetID: targetID, Detail: d, IP: "",
 	})
 }
 
@@ -261,7 +310,23 @@ func (s *Service) ListSessions(p *Principal) ([]*session.Session, error) {
 	if p.OrgID == 0 {
 		return nil, nil
 	}
-	return s.mgr.List(p.OrgID)
+	all, err := s.mgr.List(p.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	// VDI-tagged VMs live on the VDI page only — keep them out of the regular
+	// instances list.
+	vdi := s.vdiSessionIDs(p.OrgID)
+	if len(vdi) == 0 {
+		return all, nil
+	}
+	out := all[:0]
+	for _, sess := range all {
+		if !vdi[sess.ID] {
+			out = append(out, sess)
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) counts(orgID int64) policy.Counts {
@@ -289,7 +354,7 @@ type CreateInput struct {
 	NetworkID     int64  // port group to attach the NIC to; 0 = default/NAT
 	StoragePoolID int64  // storage pool for the disk; 0 = default disk dir
 	Display       string // vnc | spice
-	DiskBackend   string // qcow2 | zvol
+	DiskBackend   string // qcow2 | zvol | lvm
 	ZvolPool      string // ZFS pool name for the zvol (zvol backend)
 	Desktop       string // "" | xfce
 	// Hardware profile knobs (empty => safe defaults; see normalizeHardware).
@@ -301,6 +366,8 @@ type CreateInput struct {
 	TPM         bool   // swtpm TPM 2.0
 	SecureBoot  bool   // UEFI Secure Boot
 	OSType      string // linux | windows
+	PinCPUs     bool   // pin vCPU threads 1:1 to host CPUs
+	HugePages   bool   // back guest RAM with hugepages (host pool permitting)
 }
 
 func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*session.Session, error) {
@@ -336,6 +403,7 @@ func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*sessi
 		DiskBackend: in.DiskBackend, ZvolPool: in.ZvolPool, Desktop: in.Desktop,
 		MachineType: in.MachineType, DiskBus: in.DiskBus, NICModel: in.NICModel, VGA: in.VGA,
 		GuestAgent: in.GuestAgent, TPM: in.TPM, SecureBoot: in.SecureBoot, OSType: in.OSType,
+		PinCPUs: in.PinCPUs, HugePages: in.HugePages,
 	})
 	if err != nil {
 		return nil, err
@@ -361,6 +429,45 @@ func (s *Service) EjectISO(p *Principal, id, ip string) error {
 		return err
 	}
 	s.audit(p, p.OrgID, "session.eject_iso", "session", id, ip, nil)
+	return nil
+}
+
+// VirtioISOAvailable reports whether the virtio-win driver ISO is present on the
+// host (so the UI can show an "eject virtio drivers" control only when relevant).
+func (s *Service) VirtioISOAvailable() bool {
+	return qemu.VirtioWinISO(s.cfg.Paths.ISODir) != ""
+}
+
+// EjectVirtioISO stops auto-attaching the virtio-win driver CD to a (Windows)
+// instance — for after the drivers are installed. Takes effect on the next start.
+func (s *Service) EjectVirtioISO(p *Principal, id, ip string) error {
+	if !p.atLeast("member") {
+		return ErrUnauthorized
+	}
+	if _, err := s.sessionInOrg(p, id); err != nil {
+		return err
+	}
+	if err := s.mgr.SetEjectVirtio(id, true); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "session.eject_virtio", "session", id, ip, nil)
+	return nil
+}
+
+// MountVirtioISO (re)enables auto-attaching the virtio-win driver CD to a
+// (Windows) instance — e.g. to install/repair drivers or the guest agent. Takes
+// effect on the next start.
+func (s *Service) MountVirtioISO(p *Principal, id, ip string) error {
+	if !p.atLeast("member") {
+		return ErrUnauthorized
+	}
+	if _, err := s.sessionInOrg(p, id); err != nil {
+		return err
+	}
+	if err := s.mgr.SetEjectVirtio(id, false); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "session.mount_virtio", "session", id, ip, nil)
 	return nil
 }
 
@@ -390,6 +497,51 @@ func (s *Service) ResizeSession(p *Principal, id string, cpus, mem, diskGB int, 
 	}
 	s.audit(p, p.OrgID, "session.resize", "session", id, ip, map[string]any{"cpus": cpus, "memory_mb": mem, "disk_gb": diskGB})
 	return nil
+}
+
+// UpdateSessionSpec changes a stopped instance's hardware profile (firmware,
+// machine type, disk bus, NIC model, graphics, OS type, and the agent/TPM/
+// Secure Boot toggles). Applied on next start; never touches the data disk.
+func (s *Service) UpdateSessionSpec(p *Principal, id string, hw session.HardwareSpec, ip string) error {
+	if !p.atLeast("member") {
+		return ErrUnauthorized
+	}
+	if _, err := s.sessionInOrg(p, id); err != nil {
+		return err
+	}
+	if err := s.mgr.UpdateHardware(id, hw); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "session.spec", "session", id, ip, map[string]any{
+		"firmware": hw.Firmware, "os_type": hw.OSType, "machine_type": hw.MachineType,
+		"disk_bus": hw.DiskBus, "nic_model": hw.NICModel, "vga": hw.VGA,
+		"guest_agent": hw.GuestAgent, "tpm": hw.TPM, "secure_boot": hw.SecureBoot,
+	})
+	return nil
+}
+
+// SetSessionNetwork rebinds an instance's NIC to a different port group (network).
+// 0 = default/NAT. The change is persisted now and applied when the tap attaches
+// on the next start (same model as a resize), so it never disrupts a running NIC.
+func (s *Service) SetSessionNetwork(p *Principal, id string, networkID int64, ip string) (live bool, err error) {
+	if !p.atLeast("member") {
+		return false, ErrUnauthorized
+	}
+	sess, err := s.sessionInOrg(p, id)
+	if err != nil {
+		return false, err
+	}
+	if networkID > 0 {
+		if _, err := s.net.GetNetwork(sess.OrgID, networkID); err != nil {
+			return false, fmt.Errorf("unknown port group")
+		}
+	}
+	live, err = s.mgr.SetNetwork(id, networkID)
+	if err != nil {
+		return false, err
+	}
+	s.audit(p, p.OrgID, "session.network", "session", id, ip, map[string]any{"network_id": networkID, "live": live})
+	return live, nil
 }
 
 // sessionInOrg loads a session and verifies the principal may act on it.
@@ -494,6 +646,8 @@ type DesktopInfo struct {
 	Port      string
 	Username  string
 	Password  string
+	Domain    string
+	NeedCreds bool // RDP-capable but no stored creds → the page prompts for them
 	// RemoteApp (RDP only), when set, launches a single seamless published app
 	// instead of a full desktop — carried from the published-app token.
 	RemoteApp     string
@@ -548,40 +702,151 @@ func (s *Service) DesktopTargetByToken(token, id string) (*DesktopInfo, error) {
 	return di, nil
 }
 
-// desktopInfoFor resolves how guacd should reach a guest. With a routable
-// overlay/bridge lease it uses the configured protocol (RDP by default, which
-// carries clipboard/audio/mic/webcam) against the guest's own IP and cloud-init
-// credentials; otherwise it falls back to VNC against the loopback QEMU display.
+// desktopInfoFor resolves how guacd should reach a guest. RDP is intentionally
+// disabled: browser desktops always use VNC against QEMU's always-on loopback
+// display, which renders for any guest OS regardless of networking or in-guest
+// RDP configuration. (guacd speaks vnc/rdp/ssh only — never SPICE.)
 func (s *Service) desktopInfoFor(sess *session.Session) *DesktopInfo {
-	di := &DesktopInfo{SessionID: sess.ID, Name: sess.Name}
-	leaseIP := ""
-	if s.net != nil {
-		leaseIP = s.net.LeaseFor(sess.ID)
+	return &DesktopInfo{
+		SessionID: sess.ID,
+		Name:      sess.Name,
+		Protocol:  "vnc",
+		Hostname:  "127.0.0.1",
+		Port:      strconv.Itoa(sess.VNCPort),
+		Password:  sess.VNCPassword,
 	}
-	proto := s.cfg.Gateway.Protocol
-	if proto == "" {
-		proto = "rdp"
+}
+
+// DesktopVNCInfo returns the loopback-VNC desktop target for a session, used when
+// the user explicitly chooses "VNC" at the credential prompt. The caller must
+// have already authorized desktop access to this session (resolveDesktop did).
+func (s *Service) DesktopVNCInfo(sessionID string) (*DesktopInfo, error) {
+	sess, err := s.mgr.Get(sessionID)
+	if err != nil {
+		return nil, ErrNotFound
 	}
-	// SPICE VMs: the guac gateway speaks SPICE straight to the loopback port.
-	if sess.Display == "spice" && sess.SPICEPort > 0 {
-		di.Protocol = "spice"
-		di.Hostname = "127.0.0.1"
-		di.Port = strconv.Itoa(sess.SPICEPort)
-		return di
+	return &DesktopInfo{
+		SessionID: sess.ID, Name: sess.Name, Protocol: "vnc",
+		Hostname: "127.0.0.1", Port: strconv.Itoa(sess.VNCPort), Password: sess.VNCPassword,
+	}, nil
+}
+
+// desktopCreds returns the stored (decrypted) RDP credentials for a VM, or empty
+// strings when none are set.
+func (s *Service) desktopCreds(sessionID string) (user, pass, domain string) {
+	var u, sec, dom string
+	if err := s.db.QueryRow(`SELECT username,secret,domain FROM desktop_creds WHERE session_id=?`, sessionID).Scan(&u, &sec, &dom); err != nil {
+		return "", "", ""
 	}
-	if leaseIP != "" && proto == "rdp" {
-		di.Protocol = "rdp"
-		di.Hostname = leaseIP
-		di.Port = "3389"
-		di.Username = sess.CIUsername
-		di.Password = sess.CIPassword
-		return di
+	if u == "" {
+		return "", "", ""
 	}
-	di.Protocol = "vnc"
-	di.Hostname = "127.0.0.1"
-	di.Port = strconv.Itoa(sess.VNCPort)
-	di.Password = sess.VNCPassword
-	return di
+	pw, err := s.encOpen(sec)
+	if err != nil {
+		return "", "", ""
+	}
+	return u, pw, dom
+}
+
+// SetDesktopCredentials stores (or clears) per-VM guest RDP credentials for the
+// browser desktop. The password is sealed at rest. An empty username clears them.
+func (s *Service) SetDesktopCredentials(p *Principal, sessionID, user, pass, domain, ip string) error {
+	if !p.atLeast("member") {
+		return ErrUnauthorized
+	}
+	if _, err := s.sessionInOrg(p, sessionID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(user) == "" {
+		_, err := s.db.Exec(`DELETE FROM desktop_creds WHERE session_id=?`, sessionID)
+		if err == nil {
+			s.audit(p, p.OrgID, "desktop.creds_clear", "session", sessionID, ip, nil)
+		}
+		return err
+	}
+	sealed, err := s.encSeal(pass)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO desktop_creds(session_id,username,secret,domain,updated_at)
+		VALUES(?,?,?,?,datetime('now'))
+		ON CONFLICT(session_id) DO UPDATE SET username=excluded.username, secret=excluded.secret, domain=excluded.domain, updated_at=datetime('now')`,
+		sessionID, user, sealed, domain)
+	if err != nil {
+		return err
+	}
+	// Never log the password.
+	s.audit(p, p.OrgID, "desktop.creds_set", "session", sessionID, ip, map[string]any{"username": user, "domain": domain})
+	return nil
+}
+
+// DesktopCredsUser returns just the stored RDP username (for the UI to show
+// whether creds are configured, without exposing the password).
+func (s *Service) DesktopCredsUser(p *Principal, sessionID string) string {
+	if !p.atLeast("member") {
+		return ""
+	}
+	u, _, _ := s.desktopCreds(sessionID)
+	return u
+}
+
+// guestPrimaryIP finds a running guest's primary IPv4 — first from the guest
+// agent's reported interfaces, else from the host's neighbor table by the VM's
+// MAC. Empty when it can't be determined (e.g. no agent and no ARP entry yet).
+func (s *Service) guestPrimaryIP(sess *session.Session) string {
+	gi := s.mgr.GuestAgentInfo(sess.ID)
+	if gi.Responsive {
+		for _, nic := range gi.Interfaces {
+			for _, ip := range nic.IPs {
+				v := net.ParseIP(strings.SplitN(ip, "/", 2)[0])
+				if v != nil && v.To4() != nil && !v.IsLoopback() && !v.IsLinkLocalUnicast() {
+					return v.String()
+				}
+			}
+		}
+	}
+	if sess.MAC != "" {
+		if out, err := exec.Command("ip", "neigh").Output(); err == nil {
+			mac := strings.ToLower(sess.MAC)
+			for _, ln := range strings.Split(string(out), "\n") {
+				if strings.Contains(strings.ToLower(ln), mac) {
+					if f := strings.Fields(ln); len(f) > 0 {
+						if v := net.ParseIP(f[0]); v != nil && v.To4() != nil {
+							return v.String()
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// guacHasRDP reports whether guacd actually has the RDP client plugin installed
+// (it's a separate FreeRDP-dependent library). Without it, selecting RDP yields a
+// blank screen ("Support for protocol rdp is not installed"), so we must fall
+// back to VNC.
+func guacHasRDP() bool {
+	for _, d := range []string{"/usr/local/lib", "/usr/local/lib/guacamole", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/guacamole"} {
+		if m, _ := filepath.Glob(filepath.Join(d, "libguac-client-rdp.so*")); len(m) > 0 {
+			return true
+		}
+		if _, err := os.Stat(filepath.Join(d, "libguac-client-rdp.so")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// rdpReachable reports whether an RDP server is listening on the guest's 3389,
+// so we only route the browser desktop to RDP when it will actually paint.
+func rdpReachable(ip string) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(ip, "3389"), 600*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // ---- orgs & members ------------------------------------------------------

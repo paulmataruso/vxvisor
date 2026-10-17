@@ -17,6 +17,12 @@ QEMU commits ([virtio-blk num-queues=vCPUs](https://qemu.googlesource.com/qemu/+
 | Area | What we set | Why |
 |---|---|---|
 | Accel | `-enable-kvm -cpu host -machine q35` | Hardware virt + full host CPU features |
+| CPU topology | `-smp N,sockets=1,cores=N,threads=1` | 1 socket × N cores — Windows editions cap *sockets*, and a flat `-smp N` hands guests a bogus cache topology |
+| Timers | `-machine …,hpet=off` + `-global kvm-pit.lost_tick_policy=discard` | Kill HPET exits (guests use kvm-clock / HV TSC); discard replayed PIT ticks under contention |
+| Windows HV | `hv_tlbflush,hv_ipi,hv_stimer_direct,hv_runtime,hv_reenlightenment` (+ base set) | PV TLB-shootdown + PV IPIs are big wins on contended hosts; direct stimer, run-time, migration-safe TSC |
+| Disk rings | `virtio-blk/scsi … packed=on` | virtio-1.1 packed virtqueues (fewer cache-line bounces); negotiated → safe fallback |
+| Net rings | `virtio-net … rx_queue_size=1024,tx_queue_size=1024,packed=on` | Deeper rings cut drops/retransmits under load; packed negotiated |
+| Memory | `virtio-balloon-pci,free-page-reporting=on` | Host reclaims guest-freed pages without a balloon inflate |
 | Disk AIO | dedicated `-object iothread` + `aio=io_uring` (qcow2) / `aio=native,cache=none` (zvol) | Biggest single disk win; io_uring is correct for ZFS/file-backed, native+O_DIRECT for raw block |
 | Disk queues | `virtio-blk-pci,num-queues=<vCPUs>` | 1:1 virtqueue↔vCPU → completion IRQ on submitting vCPU (~78k→104k IOPS in QEMU's benchmark) |
 | Disk hygiene | `discard=unmap,detect-zeroes=unmap` | Keeps thin qcow2/zvol small |
@@ -33,12 +39,18 @@ QEMU commits ([virtio-blk num-queues=vCPUs](https://qemu.googlesource.com/qemu/+
 
 ---
 
-## B. Host-level — do once on the new host (manual)
+## B. Host-level
 
-### 1. tuned profile (easiest big win)
+> **Now automatic:** `deploy/install.sh` applies the safe host tuning below on a fresh install
+> (tuned `virtual-host`, THP=always, `vhost_net`, `vm.swappiness=10` + larger net backlog via
+> `/etc/sysctl.d/99-vdxclone.conf`). Pass `--no-tune` to skip. The items that still require a
+> decision/reboot (1 GiB hugepages, CPU pinning, ZFS ARC cap) remain manual — see below.
+
+### 1. tuned profile (auto; easiest big win)
 ```bash
+# install.sh does this for you; to do it by hand or switch profiles:
 apt-get install -y tuned
-tuned-adm profile virtual-host      # general KVM host
+tuned-adm profile virtual-host      # general KVM host (installed by default)
 # latency-sensitive / dedicated-core VMs:
 # tuned-adm profile cpu-partitioning
 ```

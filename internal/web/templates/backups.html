@@ -1,43 +1,179 @@
 {{define "backups.html"}}{{template "head" .}}
 <div class="card">
-  <h2>Backups</h2>
+  <div class="card-head">
+    <h2>Backups</h2>
+    <button class="btn primary" data-modal="m-bk">+ Create backup</button>
+  </div>
   {{if .Backups}}
   <table>
-    <tr><th>Name</th><th>Instance</th><th>Size</th><th>Compressor</th><th>Status</th><th>Created</th><th></th></tr>
+    <tr><th>Name</th><th>Instance</th><th>Target</th><th>Size</th><th>Compressor</th><th>Status</th><th>Created</th><th></th></tr>
     {{range .Backups}}
     <tr>
       <td><strong>{{.Name}}</strong></td>
-      <td class="muted mono" style="font-size:12px">{{slice .SessionID 0 8}}…</td>
-      <td class="muted">{{if .SizeBytes}}{{.SizeBytes}} B{{else}}—{{end}}</td>
+      <td>{{with index $.Names .SessionID}}{{.}}{{else}}<span class="muted mono" style="font-size:12px">{{slice $.SessionID 0 8}}…</span>{{end}}</td>
+      <td>{{if .Target}}{{.Target}}{{else}}Local{{end}}</td>
+      <td class="muted">{{if .SizeBytes}}{{humanBytes .SizeBytes}}{{else}}—{{end}}</td>
       <td>{{.Compressor}}</td>
       <td><span class="pill {{if eq .Status "ready"}}running{{else if eq .Status "error"}}error{{end}}">{{.Status}}</span>{{if .Error}}<br><span class="muted" style="font-size:11px">{{.Error}}</span>{{end}}</td>
       <td class="muted">{{.CreatedAt}}</td>
       <td style="text-align:right;white-space:nowrap">
         {{if eq .Status "ready"}}<form method="post" action="/backups/{{.ID}}/restore" style="display:inline" onsubmit="return confirm('Restore as a new base image?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restore</button></form>{{end}}
-        <form method="post" action="/backups/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+        <form method="post" action="/backups/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this backup and its file?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
       </td>
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No backups. Create one from an instance's detail page.</div>{{end}}
+  {{else}}<div class="empty">No backups yet. Click <strong>+ Create backup</strong> to back up a stopped instance to any storage target.</div>{{end}}
   <p class="muted" style="margin:12px 0 0">Restore creates a new base image named <span class="mono">restore-…</span>; launch an instance from it on the dashboard.</p>
 </div>
+
 <div class="card">
-  <h2>Backup schedules</h2>
+  <div class="card-head">
+    <h2>Backup schedules</h2>
+    <button class="btn primary" data-modal="m-sched">+ Add schedule</button>
+  </div>
   {{if .Schedules}}
   <table>
-    <tr><th>Instance</th><th>Every</th><th>Keep</th><th>Last run</th><th>Next run</th><th></th></tr>
+    <tr><th>Instance</th><th>Target</th><th>Every</th><th>Keep</th><th>Last run</th><th>Next run</th><th></th></tr>
     {{range .Schedules}}
     <tr>
-      <td class="muted mono" style="font-size:12px">{{slice .SessionID 0 8}}…</td>
+      <td>{{with index $.Names .SessionID}}{{.}}{{else}}<span class="muted mono" style="font-size:12px">{{slice $.SessionID 0 8}}…</span>{{end}}</td>
+      <td>{{if .Target}}{{.Target}}{{else}}Local{{end}}</td>
       <td>{{.IntervalHours}}h</td>
       <td>{{.Keep}}</td>
       <td class="muted">{{if .LastRunAt}}{{.LastRunAt}}{{else}}—{{end}}</td>
       <td class="muted">{{.NextRunAt}}</td>
-      <td style="text-align:right"><form method="post" action="/schedules/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+      <td style="text-align:right"><form method="post" action="/schedules/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this schedule?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No schedules. Add one from an instance's detail page.</div>{{end}}
+  {{else}}<div class="empty">No schedules. Click <strong>+ Add schedule</strong> to back up an instance automatically on an interval.</div>{{end}}
 </div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Backup targets</h2>
+    {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-tgt">+ Add target</button>{{end}}
+  </div>
+  <table>
+    <tr><th>Name</th><th>Kind</th><th>Location</th><th>Status</th><th></th></tr>
+    {{range .Targets}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td>{{.Kind}}</td>
+      <td class="muted mono" style="font-size:12px">{{.Detail}}</td>
+      <td>{{if eq .ID 0}}<span class="pill running">built-in</span>{{else if .Mounted}}<span class="pill running">ready</span>{{else}}<span class="pill error">not mounted</span>{{end}}</td>
+      <td style="text-align:right;white-space:nowrap">
+        {{if ne .ID 0}}
+        <form method="post" action="/backups/targets/{{.ID}}/test" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Test</button></form>
+        {{if $.P.IsAdmin}}<form method="post" action="/backups/targets/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this backup target? (refused if backups still use it)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:12px 0 0">A target is where backups are written — independent of storage pools. Add a local directory or an NFS / CIFS / CephFS share; network shares are mounted automatically and remounted on boot. Credentials are encrypted at rest.</p>
+</div>
+
+<!-- Add backup target modal -->
+<div class="modal" id="m-tgt"><div class="modal-card">
+  <div class="modal-head"><h3>Add backup target</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/backups/targets">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="offsite-nas" required></label>
+    <label class="fld">Kind
+      <select name="kind" id="tgt-kind">
+        <option value="local">local (a directory on this host)</option>
+        <option value="nfs">nfs (NFS export)</option>
+        <option value="cifs">cifs / SMB (Windows share)</option>
+        <option value="cephfs">cephfs (Ceph filesystem)</option>
+      </select>
+    </label>
+    <div class="tf tf-local">
+      <label class="fld">Directory<input type="text" name="path" placeholder="/mnt/backups"></label>
+    </div>
+    <div class="tf tf-nfs tf-cifs tf-cephfs" style="display:none">
+      <label class="fld"><span class="l-server">Server</span><input type="text" name="server" placeholder="10.0.0.5"></label>
+      <label class="fld"><span class="l-share">Export / share</span><input type="text" name="share" placeholder="/export/backups"></label>
+    </div>
+    <div class="tf tf-cifs tf-cephfs" style="display:none">
+      <label class="fld"><span class="l-user">Username</span><input type="text" name="username" autocomplete="off"></label>
+      <label class="fld"><span class="l-pass">Password / key</span><input type="password" name="password" autocomplete="new-password"></label>
+    </div>
+    <div class="tf tf-cifs" style="display:none">
+      <label class="fld">Domain (optional)<input type="text" name="domain" autocomplete="off"></label>
+    </div>
+    <div class="tf tf-nfs tf-cifs" style="display:none">
+      <label class="fld">Version (optional)<input type="text" name="vers" placeholder="nfs: 4.2 · cifs: 3.0"></label>
+    </div>
+    <div class="tf tf-nfs tf-cifs tf-cephfs" style="display:none">
+      <label class="fld">Extra mount options (optional)<input type="text" name="options" placeholder="rw,soft"></label>
+    </div>
+    <p class="muted" style="margin:0;font-size:12px">Network shares are test-mounted on save; a bad target is rejected rather than stored. For CephFS, <em>Server</em> is the mon list and <em>Username</em>/<em>Password</em> are the client name + key.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add target</button></div>
+  </form>
+</div></div>
+<script>
+(function(){
+  var sel=document.getElementById('tgt-kind'); if(!sel) return;
+  function sync(){
+    var k=sel.value;
+    document.querySelectorAll('#m-tgt .tf').forEach(function(d){
+      d.style.display=d.classList.contains('tf-'+k)?'':'none';
+    });
+    // relabel for cephfs
+    var isCeph=k==='cephfs';
+    var srv=document.querySelector('#m-tgt .l-server'); if(srv) srv.textContent=isCeph?'Monitors':'Server';
+    var shr=document.querySelector('#m-tgt .l-share'); if(shr) shr.textContent=isCeph?'Ceph path':(k==='cifs'?'Share':'Export');
+    var usr=document.querySelector('#m-tgt .l-user'); if(usr) usr.textContent=isCeph?'Client name':'Username';
+    var pw=document.querySelector('#m-tgt .l-pass'); if(pw) pw.textContent=isCeph?'Secret key':'Password';
+  }
+  sel.addEventListener('change',sync); sync();
+})();
+</script>
+
+<!-- Create backup modal -->
+<div class="modal" id="m-bk"><div class="modal-card">
+  <div class="modal-head"><h3>Create backup</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/backups/create">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Instance
+      <select name="session_id" required>
+        <option value="">— select an instance —</option>
+        {{range .Sessions}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <label class="fld">Backup name<input type="text" name="name" placeholder="manual" autocomplete="off"></label>
+    <label class="fld">Target storage
+      <select name="target_id">
+        {{range .Targets}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+      </select>
+    </label>
+    <p class="muted" style="margin:0;font-size:12px">The instance must be <strong>stopped</strong> — its disk is quiesced before copying. Targets include local storage and any registered NFS/CIFS/CephFS/ZFS pool.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Back up now</button></div>
+  </form>
+</div></div>
+
+<!-- Add schedule modal -->
+<div class="modal" id="m-sched"><div class="modal-card">
+  <div class="modal-head"><h3>Add backup schedule</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/schedules/create">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Instance
+      <select name="session_id" required>
+        <option value="">— select an instance —</option>
+        {{range .Sessions}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    <label class="fld">Target storage
+      <select name="target_id">
+        {{range .Targets}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+      </select>
+    </label>
+    <label class="fld">Every (hours)<input type="number" name="interval_hours" min="1" value="24" required></label>
+    <label class="fld">Keep (copies)<input type="number" name="keep" min="1" value="7" required></label>
+    <p class="muted" style="margin:0;font-size:12px">Scheduled runs back up only while the instance is <strong>stopped</strong>; older copies beyond the keep count are pruned automatically.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create schedule</button></div>
+  </form>
+</div></div>
 {{template "foot" .}}{{end}}

@@ -1,0 +1,44 @@
+{{define "vdi.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>VDI desktops</h2>
+    {{if .PortalURL}}<a class="btn primary" href="{{.PortalURL}}" target="_blank" rel="noopener"><svg class="ic"><use href="#i-monitor"/></svg>Open VDI Portal ↗</a>{{end}}
+  </div>
+  <p class="muted" style="margin:4px 0 0">A VDI desktop is a VM tagged to a specific user. Create the Windows/Linux VM on the <a href="/instances">Instances</a> page, then tag it to a user here — they'll see it on the VDI portal and open it in a browser over VNC. Tagged VMs are hidden from the Instances page. A user can hold several and pick which to connect to.</p>
+  {{if .PortalURL}}<p class="muted" style="margin:8px 0 0;font-size:12px">Public portal: <a href="{{.PortalURL}}" target="_blank" rel="noopener" class="mono">{{.PortalURL}}</a> — share this with your users.</p>
+  {{else}}<p style="margin:8px 0 0;font-size:12px;color:var(--warn)">The public VDI portal is disabled — enable <span class="mono">[public]</span> in the config to serve it.</p>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Assigned desktops</h2></div>
+  {{if .Desktops}}
+  <table>
+    <tr><th>VM</th><th>OS</th><th>Assigned user</th><th>State</th><th></th></tr>
+    {{range .Desktops}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="pill">{{if eq .OSType "windows"}}Windows{{else}}Linux{{end}}</span></td>
+      <td>{{.Username}}</td>
+      <td><span class="pill {{if eq .State "running"}}running{{end}}">{{.State}}</span></td>
+      <td style="text-align:right;white-space:nowrap">
+        <a class="btn sm" href="/console/{{.SessionID}}" target="_blank" rel="noopener">Open</a>
+        <form method="post" action="/vdi/{{.SessionID}}/unassign" style="display:inline" onsubmit="return confirm('Remove the VDI tag from {{.Name}}? It returns to the Instances page (the VM is not deleted).')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Unassign</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No VDI desktops yet. Tag a VM to a user below.</div>{{end}}
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Tag a VM to a user</h2></div>
+  {{if .VMs}}
+  <form class="mform row2" method="post" action="/vdi/assign">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">VM<select name="session_id" required>{{range .VMs}}<option value="{{.ID}}">{{.Name}} ({{if eq .OSType "windows"}}Windows{{else}}Linux{{end}})</option>{{end}}</select></label>
+    <label class="fld">User<input name="username" placeholder="username" required></label>
+    <div class="modal-actions full"><button class="btn primary">Assign as VDI desktop</button></div>
+  </form>
+  {{else}}<div class="empty">No untagged VMs to assign. <a href="/instances">Create a VM</a> first.</div>{{end}}
+</div>
+{{template "foot" .}}{{end}}

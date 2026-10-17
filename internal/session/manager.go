@@ -12,8 +12,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +28,7 @@ import (
 	"vdxclone/internal/cloudinit"
 	"vdxclone/internal/config"
 	"vdxclone/internal/db"
+	"vdxclone/internal/lvm"
 	"vdxclone/internal/netdrv"
 	"vdxclone/internal/qemu"
 	"vdxclone/internal/zfs"
@@ -40,6 +44,10 @@ type Session struct {
 	OrgID        int64
 	OwnerID      int64
 	ImageName    string
+	GuestOS      string // detected guest OS (qemu-guest-agent) for ISO installs
+	PinCPUs      bool   // pin vCPU threads 1:1 to host CPUs on start
+	HugePages    bool   // back guest RAM with hugepages (when host pool allows)
+	EjectVirtio  bool   // don't auto-attach the virtio-win driver CD (Windows)
 	DiskPath     string
 	Kind         string
 	Firmware     string // "uefi" | "bios"
@@ -65,7 +73,7 @@ type Session struct {
 	NetworkID    int64 // 0 = default/NAT; else the port group (networks.id) the NIC attaches to
 	Display      string // vnc | spice
 	SPICEPort    int    // loopback SPICE port when display=spice (0 otherwise)
-	DiskBackend  string // qcow2 | zvol
+	DiskBackend  string // qcow2 | zvol | lvm
 	MachineType  string // q35 | pc
 	DiskBus      string // virtio-blk | virtio-scsi | sata
 	NICModel     string // virtio | e1000e | rtl8139
@@ -81,16 +89,16 @@ type Session struct {
 const sessionCols = `id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,
 	COALESCE(boot_iso_id,0),mac,cpus,memory_mb,disk_gb,state,pid,vnc_port,ws_port,vnc_password,qmp_socket,
 	cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,COALESCE(pool_id,0),COALESCE(network_id,0),COALESCE(display,'vnc'),COALESCE(spice_port,0),COALESCE(disk_backend,'qcow2'),
-	COALESCE(machine_type,'q35'),COALESCE(disk_bus,'virtio-blk'),COALESCE(nic_model,'virtio'),COALESCE(vga,'qxl'),COALESCE(guest_agent,0),COALESCE(tpm,0),COALESCE(secureboot,0),COALESCE(os_type,'linux'),created_at`
+	COALESCE(machine_type,'q35'),COALESCE(disk_bus,'virtio-blk'),COALESCE(nic_model,'virtio'),COALESCE(vga,'qxl'),COALESCE(guest_agent,0),COALESCE(tpm,0),COALESCE(secureboot,0),COALESCE(os_type,'linux'),COALESCE(guest_os,''),COALESCE(perf_pin,0),COALESCE(perf_hugepages,0),COALESCE(eject_virtio,0),created_at`
 
 func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	var s Session
-	var ci, ga, tpmI, sbI int
+	var ci, ga, tpmI, sbI, pin, hp, ejv int
 	err := sc.Scan(&s.ID, &s.Name, &s.OrgID, &s.OwnerID, &s.ImageName, &s.DiskPath, &s.Kind,
 		&s.Firmware, &s.OVMFVarsPath, &s.BootISOID, &s.MAC, &s.CPUs, &s.MemoryMB, &s.DiskGB, &s.State, &s.PID,
 		&s.VNCPort, &s.WSPort, &s.VNCPassword, &s.QMPSocket,
 		&ci, &s.CIUsername, &s.CIPassword, &s.CISSHKey, &s.SeedPath, &s.Passthrough, &s.PoolID, &s.NetworkID, &s.Display, &s.SPICEPort, &s.DiskBackend,
-		&s.MachineType, &s.DiskBus, &s.NICModel, &s.VGA, &ga, &tpmI, &sbI, &s.OSType, &s.CreatedAt)
+		&s.MachineType, &s.DiskBus, &s.NICModel, &s.VGA, &ga, &tpmI, &sbI, &s.OSType, &s.GuestOS, &pin, &hp, &ejv, &s.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +106,9 @@ func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	s.GuestAgent = ga != 0
 	s.TPM = tpmI != 0
 	s.SecureBoot = sbI != 0
+	s.PinCPUs = pin != 0
+	s.HugePages = hp != 0
+	s.EjectVirtio = ejv != 0
 	return &s, nil
 }
 
@@ -121,11 +132,17 @@ type Manager struct {
 	blockMu     sync.Mutex
 	blockExport map[string]blockExportRec
 	blockTarget map[string]string
+	// pinMu guards pinned: vm id -> host CPUs its vCPU threads are pinned to, so
+	// the allocator bin-packs new VMs onto the least-loaded cores and releases on
+	// stop. In-memory (best-effort); lost on daemon restart, re-applied on next start.
+	pinMu  sync.Mutex
+	pinned map[string][]int
 }
 
 func NewManager(cfg *config.Config, d *db.DB) *Manager {
 	return &Manager{cfg: cfg, db: d, incoming: map[string]*os.Process{},
-		coldStaged: map[string][]string{}, blockExport: map[string]blockExportRec{}, blockTarget: map[string]string{}}
+		coldStaged: map[string][]string{}, blockExport: map[string]blockExportRec{}, blockTarget: map[string]string{},
+		pinned: map[string][]int{}}
 }
 
 // CreateOpts describes a new instance. It is a struct rather than a long
@@ -147,7 +164,7 @@ type CreateOpts struct {
 	NetworkID      int64  // port group (networks.id) to attach the NIC to; 0 = default/NAT
 	StoragePoolID  int64  // storage pool (storage_pools.id) for the disk; 0 = default disk dir
 	Display        string // vnc | spice
-	DiskBackend    string // qcow2 | zvol
+	DiskBackend    string // qcow2 | zvol | lvm
 	ZvolPool       string // ZFS pool/dataset name to create the zvol under (zvol backend)
 	Desktop        string // "" | xfce (cloud-init installs a lightweight desktop)
 	MachineType    string // q35|pc (default q35)
@@ -158,6 +175,8 @@ type CreateOpts struct {
 	TPM            bool   // attach a swtpm TPM 2.0 device
 	SecureBoot     bool   // UEFI Secure Boot (MS-keyed OVMF pair)
 	OSType         string // linux|windows (drives sensible hardware defaults)
+	PinCPUs        bool   // pin vCPU threads 1:1 to host CPUs
+	HugePages      bool   // back guest RAM with hugepages (host pool permitting)
 }
 
 // Create provisions a new session (overlay disk, firmware NVRAM, cloud-init seed
@@ -203,7 +222,20 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	// Where the VM's disk lives: a chosen storage pool's path, or the default
 	// disk directory. Only the disk moves; per-VM NVRAM/seed/QMP stay in DiskDir.
 	diskDir := m.cfg.Paths.DiskDir
-	if o.StoragePoolID > 0 {
+	// For the LVM-thin backend the disk is a raw thin LV, not a file in a
+	// directory, so resolve the pool to its VG/thin-pool names instead of a path.
+	var lvmVG, lvmPool string
+	if o.DiskBackend == "lvm" {
+		var pname string
+		if err := m.db.QueryRow(`SELECT COALESCE(name,'') FROM storage_pools WHERE id=? AND kind='lvm'`, o.StoragePoolID).Scan(&pname); err != nil || pname == "" {
+			return nil, fmt.Errorf("the lvm backend needs an LVM thin pool (choose one)")
+		}
+		parts := strings.SplitN(pname, "/", 2) // "<vg>/<thinpool>"
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("malformed lvm pool name %q", pname)
+		}
+		lvmVG, lvmPool = parts[0], parts[1]
+	} else if o.StoragePoolID > 0 {
 		var ppath string
 		if err := m.db.QueryRow(`SELECT COALESCE(path,'') FROM storage_pools WHERE id=?`, o.StoragePoolID).Scan(&ppath); err == nil && ppath != "" {
 			diskDir = ppath
@@ -219,12 +251,16 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	id := uuid.NewString()
 	var created []string
 	zvolName := "" // set when the disk backend is a raw ZFS zvol
+	lvPath := ""   // set when the disk backend is a raw LVM thin volume
 	fail := func(e error) (*Session, error) {
 		for _, f := range created {
 			_ = os.Remove(f)
 		}
 		if zvolName != "" {
 			_ = zfs.DestroyDataset(zvolName)
+		}
+		if lvPath != "" {
+			_ = lvm.RemoveLV(lvPath)
 		}
 		return nil, e
 	}
@@ -257,6 +293,34 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 		}
 		disk = "/dev/zvol/" + zvolName
 		if !blankInstall { // write the base cloud image onto the zvol as raw
+			if err := qemu.ConvertToRaw(imgPath, disk); err != nil {
+				return fail(err)
+			}
+		}
+	} else if o.DiskBackend == "lvm" {
+		// Raw LVM thin volume: one thin LV per VM at /dev/<vg>/<lv>, driven as a
+		// raw block device. Thin-provisioned, so the LV's virtual size can exceed
+		// the pool's free extents; data blocks are allocated on write.
+		diskBackend = "lvm"
+		if !lvm.Available() {
+			return fail(fmt.Errorf("the lvm backend requires LVM2 on the host"))
+		}
+		sizeGB := o.DiskGB
+		if sizeGB <= 0 {
+			sizeGB = 20
+		}
+		if !blankInstall { // the LV must be at least the base image's virtual size
+			if vb, err := qemu.VirtualSizeBytes(imgPath); err == nil && vb > int64(sizeGB)<<30 {
+				sizeGB = int(vb>>30) + 1
+			}
+		}
+		lvName := "vdx-" + id[:8]
+		if err := lvm.CreateThinVolume(lvmVG, lvmPool, lvName, int64(sizeGB)<<30); err != nil {
+			return fail(err)
+		}
+		disk = "/dev/" + lvmVG + "/" + lvName
+		lvPath = disk // arm cleanup
+		if !blankInstall { // write the base cloud image onto the LV as raw
 			if err := qemu.ConvertToRaw(imgPath, disk); err != nil {
 				return fail(err)
 			}
@@ -308,9 +372,14 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 
 	// Bridge/overlay networking: allocate a stable guest IP from the cluster
 	// subnet so the VM comes up routable (for RDP and for migration identity).
+	// When Cluster.DHCP is set the VM bridge is on a real LAN, so the guest leases
+	// its address from that network instead of the platform's static IPAM.
 	var staticIP, gw string
+	dhcp := false
 	if m.cfg.Network.Mode == "bridge" || m.cfg.Network.Mode == "overlay" {
-		if netID, cidr, gateway, err := m.ensureDefaultNetwork(o.OrgID); err == nil {
+		if m.cfg.Cluster.DHCP {
+			dhcp = true
+		} else if netID, cidr, gateway, err := m.ensureDefaultNetwork(o.OrgID); err == nil {
 			if leased, err := netdrv.New(m.db).AllocLease(netID, id, mac, cidr, gateway); err == nil {
 				staticIP, gw = leased, gateway
 			}
@@ -331,10 +400,21 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 		// and the gateway is configured for RDP, so "Open desktop" gives a full
 		// RDP session with device redirection rather than only the VNC console.
 		installRDP := staticIP != "" && m.cfg.Gateway.Protocol == "rdp"
+		// A static (bridge/overlay) guest has no DHCP-provided resolver, so give it
+		// DNS or its first-boot package install (desktop, guest agent) can't resolve.
+		// A DHCP guest gets its resolver from the LAN, so no override is needed.
+		var ns []string
+		if staticIP != "" {
+			ns = m.cfg.Cluster.Nameservers
+			if len(ns) == 0 {
+				ns = []string{"1.1.1.1", "8.8.8.8"}
+			}
+		}
 		cfg := cloudinit.Config{
 			InstanceID: id, Hostname: sanitizeHostname(o.Name),
 			Username: o.CIUsername, Password: o.CIPassword, SSHKey: o.CISSHKey,
-			MAC: mac, StaticIP: staticIP, Gateway: gw, InstallRDP: installRDP, Desktop: o.Desktop,
+			MAC: mac, StaticIP: staticIP, Gateway: gw, Nameservers: ns, DHCP: dhcp,
+			InstallRDP: installRDP, Desktop: o.Desktop,
 			InstallGuestAgent: o.GuestAgent,
 		}
 		if err := cloudinit.BuildSeedISO(m.cfg.Paths.DiskDir, seedPath, cfg); err != nil {
@@ -368,15 +448,129 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	_, err := m.db.Exec(`INSERT INTO sessions
 		(id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,boot_iso_id,mac,
 		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,network_id,storage_pool_id,display,disk_backend,
-		 machine_type,disk_bus,nic_model,vga,guest_agent,tpm,secureboot,os_type)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'stopped',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 machine_type,disk_bus,nic_model,vga,guest_agent,tpm,secureboot,os_type,perf_pin,perf_hugepages)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'stopped',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, o.Name, o.OrgID, o.OwnerID, o.ImageName, disk, o.Kind, o.Firmware, varsPath, bootISO, mac,
 		o.CPUs, o.MemoryMB, o.DiskGB, ci, o.CIUsername, o.CIPassword, o.CISSHKey, seedPath, o.Passthrough, netID, poolID, display, diskBackend,
-		hw.MachineType, hw.DiskBus, hw.NICModel, hw.VGA, ga, tpmI, sbI, hw.OSType)
+		hw.MachineType, hw.DiskBus, hw.NICModel, hw.VGA, ga, tpmI, sbI, hw.OSType, b2i(o.PinCPUs), b2i(o.HugePages))
 	if err != nil {
 		return fail(err)
 	}
 	return m.Get(id)
+}
+
+// hugepagesAvailable reports whether the host's free hugepage pool can back a
+// guest of memMB (reads /proc/meminfo: HugePages_Free × Hugepagesize). Returns
+// false when no pool is reserved, so the toggle degrades to normal RAM.
+func hugepagesAvailable(memMB int) bool {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return false
+	}
+	var freePages, sizeKB int64
+	for _, ln := range strings.Split(string(b), "\n") {
+		f := strings.Fields(ln)
+		if len(f) >= 2 {
+			switch f[0] {
+			case "HugePages_Free:":
+				freePages, _ = strconv.ParseInt(f[1], 10, 64)
+			case "Hugepagesize:":
+				sizeKB, _ = strconv.ParseInt(f[1], 10, 64)
+			}
+		}
+	}
+	if freePages <= 0 || sizeKB <= 0 {
+		return false
+	}
+	return freePages*sizeKB/1024 >= int64(memMB)
+}
+
+// pinVCPUs pins each guest vCPU thread 1:1 to a host CPU and parks QEMU's
+// emulator/iothreads on CPU 0. The host CPUs are bin-packed across running pinned
+// VMs (least-loaded first, CPU 0 reserved for the host) so VMs avoid sharing
+// cores while capacity lasts. Best effort: any failure is logged, never fatal.
+func (m *Manager) pinVCPUs(id, qmpSock string, pid, nCPU int) {
+	if nCPU < 1 {
+		nCPU = 1
+	}
+	host := runtime.NumCPU()
+	if host <= 1 {
+		return // nothing to pin to
+	}
+	q, err := qemu.DialQMP(qmpSock)
+	if err != nil {
+		log.Printf("pin %s: QMP dial: %v", id, err)
+		return
+	}
+	defer q.Close()
+	vcpus, err := q.QueryCPUsFast()
+	if err != nil || len(vcpus) == 0 {
+		log.Printf("pin %s: query-cpus-fast: %v", id, err)
+		return
+	}
+	cpus := m.allocPinCPUs(id, len(vcpus), host)
+	for i, c := range vcpus {
+		if i >= len(cpus) {
+			break
+		}
+		if err := exec.Command("taskset", "-pc", strconv.Itoa(cpus[i]), strconv.Itoa(c.ThreadID)).Run(); err != nil {
+			log.Printf("pin %s: vcpu%d->cpu%d: %v", id, c.CPUIndex, cpus[i], err)
+		}
+	}
+	// Emulator + iothreads: park on CPU 0 (off the vCPU cores).
+	_ = exec.Command("taskset", "-pc", "0", strconv.Itoa(pid)).Run()
+	log.Printf("pin %s: %d vCPUs -> host CPUs %v (emulator on cpu0)", id, len(vcpus), cpus)
+}
+
+// allocPinCPUs picks n host CPUs (from 1..host-1, reserving CPU 0) that are the
+// least used by other pinned VMs, and records the assignment.
+func (m *Manager) allocPinCPUs(id string, n, host int) []int {
+	m.pinMu.Lock()
+	defer m.pinMu.Unlock()
+	load := make([]int, host) // load[c] = how many pinned VMs use host CPU c
+	for vm, cs := range m.pinned {
+		if vm == id {
+			continue
+		}
+		for _, c := range cs {
+			if c >= 0 && c < host {
+				load[c]++
+			}
+		}
+	}
+	// Candidate CPUs: 1..host-1 (keep CPU 0 for the host/emulator); if the box has
+	// only 1 extra core, fall back to allowing CPU 0 too.
+	start := 1
+	if host <= n {
+		start = 0
+	}
+	cand := make([]int, 0, host)
+	for c := start; c < host; c++ {
+		cand = append(cand, c)
+	}
+	if len(cand) == 0 {
+		cand = append(cand, 0)
+	}
+	// Stable sort by (load asc, index asc) and take the first n (round-robin wrap).
+	sort.SliceStable(cand, func(i, j int) bool {
+		if load[cand[i]] != load[cand[j]] {
+			return load[cand[i]] < load[cand[j]]
+		}
+		return cand[i] < cand[j]
+	})
+	out := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, cand[i%len(cand)])
+	}
+	m.pinned[id] = out
+	return out
+}
+
+// releasePins frees a VM's pinned CPUs so the allocator can reuse them.
+func (m *Manager) releasePins(id string) {
+	m.pinMu.Lock()
+	delete(m.pinned, id)
+	m.pinMu.Unlock()
 }
 
 func b2i(b bool) int {
@@ -405,17 +599,21 @@ func normalizeHardware(o CreateOpts) hwSpec {
 		h.OSType = "windows"
 	}
 	h.MachineType = pick(o.MachineType, map[string]bool{"q35": true, "pc": true}, "q35")
+	// virtio everywhere is fastest. Windows has no in-box virtio driver, but
+	// VXVisor auto-mounts the virtio-win ISO (fetched at install) so viostor/
+	// NetKVM/qxl are available during Setup (Load driver → viostor at the disk
+	// step). qxl shows a basic display pre-driver, then accelerates after QXL-WDDM.
 	defBus, defNIC, defVGA := "virtio-blk", "virtio", "qxl"
 	if win {
-		defBus, defNIC, defVGA = "sata", "e1000e", "std"
 		h.TPM = true // Win10/11 expect a TPM; harmless for older guests
 	}
 	h.DiskBus = pick(o.DiskBus, map[string]bool{"virtio-blk": true, "virtio-scsi": true, "sata": true}, defBus)
 	h.NICModel = pick(o.NICModel, map[string]bool{"virtio": true, "e1000e": true, "rtl8139": true}, defNIC)
 	h.VGA = pick(o.VGA, map[string]bool{"qxl": true, "virtio": true, "std": true}, defVGA)
-	// A raw zvol can only be driven by a block device, not the AHCI/SATA path we
-	// use for cdrom-style attach; keep virtio-blk for zvol regardless.
-	if o.DiskBackend == "zvol" && h.DiskBus == "sata" {
+	// A raw block device (zvol or lvm thin LV) can only be driven by a block
+	// device, not the AHCI/SATA path we use for cdrom-style attach; keep
+	// virtio-blk for raw backends regardless.
+	if (o.DiskBackend == "zvol" || o.DiskBackend == "lvm") && h.DiskBus == "sata" {
 		h.DiskBus = "virtio-blk"
 	}
 	return h
@@ -427,6 +625,13 @@ func pick(want string, allowed map[string]bool, def string) string {
 		return want
 	}
 	return def
+}
+
+// SetEjectVirtio records whether the virtio-win driver CD should be withheld
+// from this VM (applies on next start).
+func (m *Manager) SetEjectVirtio(id string, eject bool) error {
+	_, err := m.db.Exec(`UPDATE sessions SET eject_virtio=? WHERE id=?`, b2i(eject), id)
+	return err
 }
 
 // SetBootISO sets (or clears, with isoID<=0) the instance's attached boot ISO.
@@ -459,6 +664,16 @@ func (m *Manager) Resize(id string, cpus, memMB, diskGB int) error {
 			if err := zfs.SetVolsize(strings.TrimPrefix(s.DiskPath, "/dev/zvol/"), int64(diskGB)<<30); err != nil {
 				return err
 			}
+		} else if s.DiskBackend == "lvm" {
+			// Grow the thin LV only when the disk actually gets bigger — lvextend
+			// errors ("No size change") if asked to resize to the current size,
+			// which would spuriously fail a CPU/RAM-only resize. The guest expands
+			// its filesystem on next boot.
+			if diskGB > s.DiskGB {
+				if err := lvm.ExtendLV(s.DiskPath, int64(diskGB)<<30); err != nil {
+					return err
+				}
+			}
 		} else {
 			cur, _ := qemu.VirtualSizeBytes(s.DiskPath)
 			if int64(diskGB)<<30 > cur {
@@ -482,6 +697,79 @@ func (m *Manager) Resize(id string, cpus, memMB, diskGB int) error {
 		dg = diskGB
 	}
 	_, err = m.db.Exec(`UPDATE sessions SET cpus=?, memory_mb=?, disk_gb=? WHERE id=?`, cpus, memMB, dg, id)
+	return err
+}
+
+// HardwareSpec is the editable hardware profile of a stopped instance.
+type HardwareSpec struct {
+	Firmware    string
+	OSType      string
+	MachineType string
+	DiskBus     string
+	NICModel    string
+	VGA         string
+	GuestAgent  bool
+	TPM         bool
+	SecureBoot  bool
+	PinCPUs     bool
+	HugePages   bool
+}
+
+// UpdateHardware changes a stopped instance's hardware profile. These are all
+// launch-time QEMU choices, so the instance must be stopped. Values are
+// normalized against the same known-good option sets as Create, and a raw
+// (zvol/lvm) disk is kept on virtio-blk. Firmware / Secure Boot transitions
+// (re)provision the per-VM OVMF NVRAM so the change is self-consistent — and
+// never touch the data disk, so the instance stays bootable.
+func (m *Manager) UpdateHardware(id string, hw HardwareSpec) error {
+	s, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	if m.Running(s) {
+		return errors.New("stop the instance before changing its specification")
+	}
+	fw := pick(hw.Firmware, map[string]bool{"uefi": true, "bios": true}, "uefi")
+	osType := pick(hw.OSType, map[string]bool{"linux": true, "windows": true}, "linux")
+	mach := pick(hw.MachineType, map[string]bool{"q35": true, "pc": true}, "q35")
+	bus := pick(hw.DiskBus, map[string]bool{"virtio-blk": true, "virtio-scsi": true, "sata": true}, "virtio-blk")
+	nic := pick(hw.NICModel, map[string]bool{"virtio": true, "e1000e": true, "rtl8139": true}, "virtio")
+	vga := pick(hw.VGA, map[string]bool{"qxl": true, "virtio": true, "std": true}, "qxl")
+	secure := hw.SecureBoot && fw == "uefi" // Secure Boot requires UEFI
+
+	// A raw block device (zvol/lvm thin LV) can't use the SATA path — keep it on
+	// virtio-blk regardless, same rule as Create.
+	if (s.DiskBackend == "zvol" || s.DiskBackend == "lvm") && bus == "sata" {
+		bus = "virtio-blk"
+	}
+
+	// (Re)provision the per-VM UEFI NVRAM when switching to UEFI, toggling Secure
+	// Boot, or when the vars file is missing. For BIOS we simply stop using it.
+	varsPath := s.OVMFVarsPath
+	if fw == "uefi" {
+		need := varsPath == "" || fw != s.Firmware || secure != s.SecureBoot
+		if _, statErr := os.Stat(varsPath); varsPath != "" && statErr != nil {
+			need = true
+		}
+		if need {
+			_, varsTmpl, _ := qemu.OVMF()
+			if secure {
+				if _, msTmpl, ok := qemu.OVMFSecure(); ok {
+					varsTmpl = msTmpl
+				}
+			}
+			varsPath = filepath.Join(m.cfg.Paths.DiskDir, id+".ovmf_vars.fd")
+			if err := qemu.PrepareUEFIVars(varsTmpl, varsPath); err != nil {
+				return fmt.Errorf("provision UEFI NVRAM: %w", err)
+			}
+		}
+	} else {
+		varsPath = "" // BIOS: no NVRAM
+	}
+
+	_, err = m.db.Exec(`UPDATE sessions SET firmware=?, ovmf_vars_path=?, machine_type=?, disk_bus=?,
+		nic_model=?, vga=?, guest_agent=?, tpm=?, secureboot=?, os_type=?, perf_pin=?, perf_hugepages=? WHERE id=?`,
+		fw, varsPath, mach, bus, nic, vga, b2i(hw.GuestAgent), b2i(hw.TPM), b2i(secure), osType, b2i(hw.PinCPUs), b2i(hw.HugePages), id)
 	return err
 }
 
@@ -525,12 +813,19 @@ func (m *Manager) Start(id string) (*Session, error) {
 		return nil, err
 	}
 
+	// Hugepage backing only when requested AND the host pool can satisfy it —
+	// otherwise QEMU would refuse to start, so we fall back to normal RAM and say so.
+	hugeOK := s.HugePages && hugepagesAvailable(s.MemoryMB)
+	if s.HugePages && !hugeOK {
+		log.Printf("session %s: hugepages requested but host pool too small for %d MB — using normal memory (reserve pages per docs/TUNING.md §B.2)", id, s.MemoryMB)
+	}
 	spec := qemu.Spec{
 		ID:        id,
 		BaseImage: base,
 		DiskPath:  s.DiskPath,
 		CPUs:      s.CPUs,
 		MemoryMB:  s.MemoryMB,
+		HugePages: hugeOK,
 		VNCPort:   vncPort,
 		WSPort:    wsPort,
 		QMPSocket: qmpSock,
@@ -539,7 +834,7 @@ func (m *Manager) Start(id string) (*Session, error) {
 		VNCPwFile: pwFile,
 		Firmware:  s.Firmware,
 		SeedISO:   s.SeedPath,
-		DiskRaw:   s.DiskBackend == "zvol",
+		DiskRaw:   s.DiskBackend == "zvol" || s.DiskBackend == "lvm",
 		SerialSock: serialSock,
 		MachineType: s.MachineType,
 		DiskBus:     s.DiskBus,
@@ -554,9 +849,9 @@ func (m *Manager) Start(id string) (*Session, error) {
 		spec.QGASocket = filepath.Join(m.cfg.Paths.DiskDir, id+".qga")
 		_ = os.Remove(spec.QGASocket)
 	}
-	// Windows: attach the virtio-win driver ISO (if present) so virtio devices
-	// and the guest agent can be installed inside the guest.
-	if s.OSType == "windows" {
+	// Windows: attach the virtio-win driver ISO (if present, and not ejected) so
+	// virtio devices and the guest agent can be installed inside the guest.
+	if s.OSType == "windows" && !s.EjectVirtio {
 		spec.ExtraISO = qemu.VirtioWinISO(m.cfg.Paths.ISODir)
 	}
 	// TPM 2.0: start a per-VM swtpm and attach it. Must be up BEFORE QEMU, which
@@ -659,6 +954,10 @@ func (m *Manager) Start(id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Pin vCPU threads 1:1 to host CPUs (best effort; never fails the start).
+	if s.PinCPUs {
+		m.pinVCPUs(id, qmpSock, proc.Pid, s.CPUs)
+	}
 	return m.Get(id)
 }
 
@@ -681,6 +980,7 @@ func (m *Manager) Stop(id string) error {
 	// Best effort: a missing tap is fine. The IP lease is kept so a restart
 	// reuses it.
 	netdrv.TeardownTap(netdrv.TapName(id))
+	m.releasePins(id) // free this VM's pinned host CPUs for the allocator
 	_, err = m.db.Exec(`UPDATE sessions SET state='stopped', pid=0, pid_start_time='' WHERE id=?`, id)
 	return err
 }
@@ -749,7 +1049,87 @@ func (m *Manager) GuestAgentInfo(id string) qemu.GuestInfo {
 	if err != nil || !s.GuestAgent || !m.Running(s) {
 		return qemu.GuestInfo{}
 	}
-	return qemu.QueryGuestAgent(filepath.Join(m.cfg.Paths.DiskDir, id+".qga"))
+	gi := qemu.QueryGuestAgent(filepath.Join(m.cfg.Paths.DiskDir, id+".qga"))
+	// For a VM installed from an ISO (no base image), persist the OS the agent
+	// reports so the UI can show it instead of "(install from ISO)". Only updates
+	// when it actually changed, so this is cheap on the repeated UI poll.
+	if gi.Responsive && gi.OS != "" && s.ImageName == isoInstallImage && s.GuestOS != gi.OS {
+		_, _ = m.db.Exec(`UPDATE sessions SET guest_os=? WHERE id=?`, gi.OS, id)
+	}
+	return gi
+}
+
+// SetNetwork rebinds a session's NIC to a port group (0 = default/NAT). The new
+// binding is persisted immediately. When the VM is running and both the target
+// is a live vSwitch and the VM already has a bridged tap, the tap is MOVED live
+// to the new vSwitch (no restart, guest NIC stays up). Returns live=true when it
+// was applied live; live=false means it will take effect on the next start (e.g.
+// switching to/from user-mode NAT, which is a QEMU netdev type that can't hot-swap,
+// or when the target vSwitch isn't present). The guest keeps its IP/MAC either way.
+func (m *Manager) SetNetwork(id string, networkID int64) (live bool, err error) {
+	if _, err := m.db.Exec(`UPDATE sessions SET network_id=? WHERE id=?`, nullIf0(networkID), id); err != nil {
+		return false, err
+	}
+	s, err := m.Get(id)
+	if err != nil {
+		return false, err
+	}
+	if !m.Running(s) {
+		return false, nil // stopped: picked up by resolveTapTarget on next start
+	}
+	// Resolve the new target exactly as Start would (port group bridge/vlan, with
+	// the global cluster bridge as the bridge/overlay-mode fallback).
+	bridge, vlan, attach := m.resolveTapTarget(s)
+	if !attach && (m.cfg.Network.Mode == "bridge" || m.cfg.Network.Mode == "overlay") {
+		bridge, vlan, attach = m.cfg.Cluster.Bridge, 0, true
+	}
+	tap := netdrv.TapName(id)
+	// Live move is only possible when the VM currently has a bridged tap AND the
+	// target is a present vSwitch. Otherwise leave it pending for next start.
+	if !attach || bridge == "" || !netdrv.IfaceExists(tap) || !netdrv.IfaceExists(bridge) {
+		return false, nil
+	}
+	if err := netdrv.RebindTap(tap, bridge, vlan); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// DetectGuestOS probes the guest agent of every running ISO-install VM that has
+// no recorded OS yet and persists what it finds (via GuestAgentInfo's side
+// effect). A VM leaves the candidate set as soon as its OS is recorded, so this
+// does no work once every ISO VM is identified.
+func (m *Manager) DetectGuestOS() {
+	rows, err := m.db.Query(`SELECT id FROM sessions
+		WHERE image_name=? AND state='running' AND COALESCE(guest_os,'')='' AND deleted_at IS NULL`,
+		isoInstallImage)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		_ = m.GuestAgentInfo(id) // persists guest_os as a side effect when detected
+	}
+}
+
+// DisplayImage is what the UI should show in a VM's "Image" column: the base
+// image it was cloned from, or — for an ISO install — the detected guest OS once
+// the agent has reported it, falling back to the "(install from ISO)" label.
+func (s *Session) DisplayImage() string {
+	if s.ImageName != isoInstallImage && s.ImageName != "" {
+		return s.ImageName
+	}
+	if s.GuestOS != "" {
+		return s.GuestOS
+	}
+	return isoInstallImage
 }
 
 func (m *Manager) Delete(id string) error {
@@ -855,6 +1235,11 @@ func (m *Manager) Purge(id string) error {
 	// A zvol-backed disk is a ZFS volume, not a file — destroy it via zfs.
 	if backend == "zvol" && strings.HasPrefix(disk, "/dev/zvol/") {
 		_ = zfs.DestroyDataset(strings.TrimPrefix(disk, "/dev/zvol/"))
+		disk = "" // don't os.Remove a device node
+	}
+	// An lvm-backed disk is a raw thin LV — remove it via lvremove, not os.Remove.
+	if backend == "lvm" && strings.HasPrefix(disk, "/dev/") {
+		_ = lvm.RemoveLV(disk)
 		disk = "" // don't os.Remove a device node
 	}
 	for _, f := range []string{disk, vars, seed,
@@ -1159,7 +1544,7 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 		SeedISO:   s.SeedPath,
 		MAC:       s.MAC,
 		SerialSock: filepath.Join(m.cfg.Paths.DiskDir, s.ID+".serial"),
-		DiskRaw:    s.DiskBackend == "zvol",
+		DiskRaw:    s.DiskBackend == "zvol" || s.DiskBackend == "lvm",
 		DiskLockingOff: onCIFS(s.DiskPath), // CIFS shared disk: no image locking
 		// Hardware MUST be byte-identical to the source or live migration fails
 		// (or, worse, Windows reactivates/loses NICs). Mirror every knob.

@@ -23,6 +23,10 @@ type Spec struct {
 	DiskPath  string // per-session overlay qcow2
 	CPUs      int
 	MemoryMB  int
+	// HugePages backs guest RAM with hugepages (memory-backend-memfd + hugetlb).
+	// The caller only sets this when the host has a reserved hugepage pool big
+	// enough for MemoryMB (otherwise QEMU would refuse to start).
+	HugePages bool
 	VNCPort   int    // TCP port for the VNC display (bound to loopback only)
 	WSPort    int    // TCP port for the VNC websocket (bound to loopback only)
 	QMPSocket string // unix socket path for QMP control
@@ -189,6 +193,17 @@ func ImageOK(path string) error {
 	return nil
 }
 
+// ProbeReadable runs `qemu-img info` and returns an error if qemu-img can't read
+// the image (e.g. an unsupported/corrupt source). Used before converting an
+// imported VMware disk so we fail fast with a clear message.
+func ProbeReadable(path string) error {
+	cmd := exec.Command("qemu-img", "info", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img info: %v: %s", err, out)
+	}
+	return nil
+}
+
 func ConvertToRaw(src, dst string) error {
 	cmd := exec.Command("qemu-img", "convert", "-O", "raw", src, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -216,16 +231,45 @@ func (s Spec) Args() []string {
 	if mach == "" {
 		mach = "q35"
 	}
+	// Disable the legacy HPET: modern guests keep time with kvm-clock (Linux) or
+	// the Hyper-V reference TSC (Windows), so an emulated HPET only adds timer
+	// VM-exits. Removing it is a standard, guest-safe win.
+	mach += ",hpet=off"
+	// Hugepage-backed RAM is wired through a memory-backend object referenced by
+	// the machine; the object itself is appended right after -m below.
+	if s.HugePages {
+		mach += ",memory-backend=mem0"
+	}
+	// CPU topology: one socket with one core per vCPU (threads=1). A bare "-smp N"
+	// presents N *sockets*, which Windows client editions silently cap (wasting
+	// cores) and which hands every guest a bogus cache/NUMA topology; one socket ×
+	// N cores is the portable, scheduler-friendly layout.
+	cpus := s.CPUs
+	if cpus < 1 {
+		cpus = 1
+	}
 	a := []string{
 		"-name", "vdx-" + s.ID,
 		"-machine", mach,
-		"-smp", strconv.Itoa(s.CPUs),
+		"-smp", fmt.Sprintf("%d,sockets=1,cores=%d,threads=1", cpus, cpus),
 		"-m", strconv.Itoa(s.MemoryMB),
 	}
-	// Windows keeps its hardware clock in local time; without this the guest
-	// clock is off by the UTC offset on every boot.
+	if s.HugePages {
+		// Prealloc'd hugetlb-backed anonymous RAM: fewer TLB misses + no page-fault
+		// jitter once running. mem0 is referenced by -machine memory-backend above.
+		a = append(a, "-object",
+			fmt.Sprintf("memory-backend-memfd,id=mem0,size=%dM,hugetlb=on,prealloc=on", s.MemoryMB))
+	}
+	// Clock discipline. The host is NTP-disciplined (chrony), and the guest's
+	// paravirt kvm-clock (automatic with -cpu host) follows it closely. We also
+	// pin the emulated RTC to the host clock and slew (not jump) recovered ticks
+	// so the wall clock stays monotonic and accurate across pauses/migration.
+	// Windows keeps its hardware clock in LOCAL time; Linux/other expect UTC —
+	// getting this wrong offsets the guest by the UTC offset on every boot.
 	if s.Windows {
-		a = append(a, "-rtc", "base=localtime")
+		a = append(a, "-rtc", "base=localtime,clock=host,driftfix=slew")
+	} else {
+		a = append(a, "-rtc", "base=utc,clock=host,driftfix=slew")
 	}
 	// UEFI firmware: readonly code (unit 0) + per-VM writable vars (unit 1). The
 	// pflash drives must come before the OS disk so unit ordering is stable.
@@ -264,7 +308,7 @@ func (s Spec) Args() []string {
 		a = append(a,
 			"-object", "iothread,id=iothread0",
 			"-drive", diskOpts,
-			"-device", "virtio-scsi-pci,id=scsi0,iothread=iothread0",
+			"-device", "virtio-scsi-pci,id=scsi0,iothread=iothread0,packed=on",
 			"-device", "scsi-hd,bus=scsi0.0,drive=disk0",
 		)
 	case "sata":
@@ -277,7 +321,9 @@ func (s Spec) Args() []string {
 		a = append(a,
 			"-object", "iothread,id=iothread0",
 			"-drive", diskOpts,
-			"-device", fmt.Sprintf("virtio-blk-pci,drive=disk0,iothread=iothread0,num-queues=%d", blkQ),
+			// packed=on uses virtio-1.1 packed virtqueues (fewer cache-line bounces
+			// than split rings); negotiated, so guests without support fall back.
+			"-device", fmt.Sprintf("virtio-blk-pci,drive=disk0,iothread=iothread0,num-queues=%d,packed=on", blkQ),
 		)
 	}
 	// Optical drives (cloud-init seed and/or an installer ISO), attached to the
@@ -320,6 +366,11 @@ func (s Spec) Args() []string {
 	// `ethtool -L <nic> combined N`). SLIRP user-net doesn't support multiqueue.
 	// Only virtio-net supports multiqueue; emulated NICs ignore it.
 	if nicDev == "virtio-net-pci" {
+		// Packed virtqueues are negotiated (safe fallback for guests without them).
+		// A deeper RX ring (default 256) absorbs bursts and cuts drops under load.
+		// (tx_queue_size>256 is only accepted once vhost negotiates it, which is
+		// fragile to rely on at launch, so the TX ring is left at its default.)
+		dev += ",packed=on,rx_queue_size=1024"
 		if nq := s.netQueues(); nq > 1 {
 			dev += fmt.Sprintf(",mq=on,vectors=%d", 2*nq+2)
 		}
@@ -348,9 +399,10 @@ func (s Spec) Args() []string {
 		"-device", "usb-tablet",
 		"-device", "usb-kbd",
 		// virtio-rng feeds the guest entropy (stops boot stalling on randomness);
-		// virtio-balloon lets the host reclaim unused guest RAM.
+		// virtio-balloon lets the host reclaim unused guest RAM — free-page-reporting
+		// hands back pages the guest frees without waiting on a balloon inflate.
 		"-device", "virtio-rng-pci",
-		"-device", "virtio-balloon-pci",
+		"-device", "virtio-balloon-pci,free-page-reporting=on",
 	)
 	// A SINGLE virtio-serial controller carries both the SPICE vdagent channel
 	// (clipboard/resolution) and the qemu-guest-agent channel. Emitting two
@@ -400,9 +452,16 @@ func (s Spec) Args() []string {
 		// stable under KVM (they teach Windows it is virtualized). Harmless to add
 		// only for Windows guests.
 		if s.Windows {
-			cpu += ",hv_relaxed,hv_vapic,hv_time,hv_spinlocks=0x1fff,hv_vpindex,hv_synic,hv_stimer,hv_frequencies"
+			// Base enlightenments PLUS paravirt TLB-shootdown (hv_tlbflush) and IPIs
+			// (hv_ipi) — major wins on contended/overcommitted hosts — direct synthetic
+			// timers (hv_stimer_direct), vCPU run-time (hv_runtime) and re-enlightenment
+			// (hv_reenlightenment, keeps the TSC sane across live migration). hv_ipi/
+			// hv_tlbflush require hv_vpindex, which is included.
+			cpu += ",hv_relaxed,hv_vapic,hv_time,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_stimer_direct,hv_tlbflush,hv_ipi,hv_frequencies,hv_reenlightenment,hv_spinlocks=0x1fff"
 		}
-		a = append(a, "-enable-kvm", "-cpu", cpu)
+		// Discard (don't replay) PIT ticks lost while a vCPU was descheduled — avoids
+		// time-drift catch-up storms under CPU contention.
+		a = append(a, "-enable-kvm", "-cpu", cpu, "-global", "kvm-pit.lost_tick_policy=discard")
 	} else {
 		a = append(a, "-cpu", "max")
 	}

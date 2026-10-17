@@ -139,6 +139,22 @@
    }
    return { add:add };
  })();
+
+ /* Flash errors: the server stashes a one-off error message in the vdx_flash
+    cookie before redirecting back; show it as a toast and clear the cookie. The
+    message is set with textContent (see VDXToast), so it can't inject markup. */
+ (function(){
+   try{
+     var m=document.cookie.match(/(?:^|;\s*)vdx_flash=([^;]*)/);
+     if(!m) return;
+     document.cookie='vdx_flash=; Path=/; Max-Age=0; SameSite=Lax';
+     var msg=decodeURIComponent((m[1]||'').replace(/\+/g,'%20'));
+     if(!msg) return;
+     if(msg.slice(0,3)==='ok:'){ var ok=VDXToast.add('Done'); ok.progress(1); ok.done(msg.slice(3)); return; }
+     var t=VDXToast.add('Something went wrong'); t.fail(msg);
+     setTimeout(t.remove, 7000);
+   }catch(e){}
+ })();
 </script>
 <div id="vdx-toasts"></div>
 </body></html>{{end}}

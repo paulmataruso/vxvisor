@@ -1,18 +1,34 @@
 package service
 
 import (
+	"strings"
+
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
 )
 
 // HostInterfaces returns the host's network interfaces (admin only). Backs the
-// create-network interface picker and the topology diagram.
+// create-network / storage-NIC interface pickers. Per-VM tap devices are filtered
+// out — they're an internal implementation detail (one per running VM NIC) that
+// only clutters the admin UI; the topology diagram uses hostinfo.Interfaces()
+// directly and still renders taps as the VMs they belong to.
 func (s *Service) HostInterfaces(p *Principal) ([]hostinfo.Iface, error) {
 	if !p.IsAdmin {
 		return nil, ErrUnauthorized
 	}
-	return hostinfo.Interfaces()
+	all, err := hostinfo.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	out := all[:0]
+	for _, i := range all {
+		if i.Type == "tap" {
+			continue // per-VM tap — hidden from the admin interface lists
+		}
+		out = append(out, i)
+	}
+	return out, nil
 }
 
 // HostBlockDevices returns whole disks + partitions (admin only). Backs the
@@ -134,14 +150,24 @@ type TopoUplink struct {
 	Speed   int      `json:"speed"`   // Mbps (0 = unknown)
 }
 
-// TopoSwitch is a vSwitch: a host bridge (standard switch) or the synthetic
-// user-mode switch, with its uplinks and port groups.
+// TopoVMK is a host IP endpoint on a vSwitch — a host-adapter box (e.g. the
+// management interface), drawn as its own box on the left like an ESXi host adapter
+// port so it's clear how the host's own IPs are wired to the switches.
+type TopoVMK struct {
+	Label string   `json:"label"` // "Management" or an interface name
+	IPs   []string `json:"ips"`   // CIDRs on this one adapter (IPv4 + IPv6 together)
+	Iface string   `json:"iface"` // the interface carrying it
+}
+
+// TopoSwitch is a vSwitch: a host bridge (standard switch), the synthetic
+// user-mode switch, or a management switch for a NIC that carries a host IP.
 type TopoSwitch struct {
 	Name       string          `json:"name"`
-	Kind       string          `json:"kind"` // standard | user-mode | overlay
+	Kind       string          `json:"kind"` // standard | user-mode | overlay | management
 	Uplinks    []TopoUplink    `json:"uplinks"`
 	VXLAN      bool            `json:"vxlan"`
 	Addrs      []string        `json:"addrs"`
+	VMKs       []TopoVMK       `json:"vmks"` // host IP adapters (host-adapter boxes)
 	PortGroups []TopoPortGroup `json:"port_groups"`
 }
 
@@ -169,11 +195,35 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	if err != nil {
 		return nil, err
 	}
+	mgmtIf := s.mgmtIface() // the NIC carrying the admin IP, labelled "Management"
+	// A host adapter is a HOST management endpoint. Only the interface that
+	// carries the admin IP gets one — the SLAAC/link-local IPv6 that VM data
+	// bridges pick up off the wire are not management endpoints and must not be
+	// drawn as host adapters (that was the "7 copies on 3 switches" clutter).
+	mkVMKs := func(iface string, addrs []string) []TopoVMK {
+		if iface != mgmtIf || mgmtIf == "" {
+			return nil
+		}
+		// One host adapter, carrying all of its real IPs (IPv4 + IPv6) — a
+		// single box, exactly like one vmk in VMware, not one box per address.
+		var ips []string
+		for _, a := range addrs {
+			if strings.HasPrefix(strings.ToLower(a), "fe80:") {
+				continue // skip IPv6 link-local — it's noise, not a wired endpoint
+			}
+			ips = append(ips, a)
+		}
+		if len(ips) == 0 {
+			return nil
+		}
+		return []TopoVMK{{Label: "Management", IPs: ips, Iface: iface}}
+	}
 	// Map each session's deterministic tap name back to the VM, and collect all
 	// (running/known) VMs for the user-mode case.
 	tapToVM := map[string]TopoVM{}
 	var allVMs []TopoVM
 	netToVMs := map[int64][]TopoVM{} // port group id -> bound VMs
+	vmNetID := map[string]int64{}    // vm id -> its bound port group (0 = default/NAT)
 	if rows, err := s.db.Query(`SELECT id, name, state, COALESCE(network_id,0) FROM sessions WHERE deleted_at IS NULL`); err == nil {
 		for rows.Next() {
 			var id, name, state string
@@ -182,6 +232,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 				vm := TopoVM{ID: id, Name: name, Tap: netdrv.TapName(id), State: state}
 				tapToVM[vm.Tap] = vm
 				allVMs = append(allVMs, vm)
+				vmNetID[vm.ID] = netID
 				if netID > 0 {
 					netToVMs[netID] = append(netToVMs[netID], vm)
 				}
@@ -253,6 +304,27 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		}
 		rows.Close()
 	}
+	// A VM bound (network_id) to a port group whose bridge is a REAL host bridge is
+	// rendered under that port group. Its live tap may still sit on its previous
+	// bridge until the next start ("applies on next start"), which would otherwise
+	// draw the VM a second time as a loose tap there — so suppress that loose copy.
+	// (Only when the bound bridge actually exists, so a VM is never hidden.)
+	realBridge := map[string]bool{}
+	for _, it := range ifaces {
+		if it.Type == "bridge" {
+			realBridge[it.Name] = true
+		}
+	}
+	netBridge := map[int64]string{}
+	for _, n := range nets {
+		netBridge[n.id] = n.bridge
+	}
+	boundElsewhere := map[string]bool{} // vm id -> shown under its bound port group
+	for id, netID := range vmNetID {
+		if netID > 0 && realBridge[netBridge[netID]] {
+			boundElsewhere[id] = true
+		}
+	}
 
 	// placed tracks VMs (by id) already shown on some vSwitch, so the user-mode
 	// NAT block only picks up VMs that aren't on a standard vSwitch.
@@ -262,7 +334,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		if br.Type != "bridge" {
 			continue
 		}
-		sw := TopoSwitch{Name: br.Name, Kind: "standard", Addrs: br.Addrs}
+		sw := TopoSwitch{Name: br.Name, Kind: "standard", Addrs: br.Addrs, VMKs: mkVMKs(br.Name, br.Addrs)}
 		var looseVMs []TopoVM // taps on the bridge not bound to a specific port group
 		for _, m := range ifaces {
 			if m.Master != br.Name {
@@ -303,11 +375,17 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		}
 		var unbound []TopoVM
 		for _, vm := range looseVMs {
-			if !boundTaps[vm.Tap] {
-				unbound = append(unbound, vm)
+			// Skip a tap whose VM is bound to a port group on a real bridge — it's
+			// drawn there, not as a loose tap on the bridge it hasn't left yet.
+			if boundTaps[vm.Tap] || boundElsewhere[vm.ID] {
 				if vm.ID != "" {
 					placed[vm.ID] = true
 				}
+				continue
+			}
+			unbound = append(unbound, vm)
+			if vm.ID != "" {
+				placed[vm.ID] = true
 			}
 		}
 		sw.PortGroups[0].VMs = append(sw.PortGroups[0].VMs, unbound...)
@@ -315,6 +393,26 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		if cts := bridgeToCts[br.Name]; len(cts) > 0 {
 			sw.PortGroups[0].VMs = append(sw.PortGroups[0].VMs, cts...)
 			renderedBridges[br.Name] = true
+		}
+		// Skip an empty orphan bridge — no uplink, no host IP, no VMs/containers,
+		// no management endpoint (e.g. a stale/down default bridge). We only draw
+		// what is real and in use.
+		hasVMs := false
+		for _, pg := range sw.PortGroups {
+			if len(pg.VMs) > 0 {
+				hasVMs = true
+				break
+			}
+		}
+		realAddr := false
+		for _, a := range sw.Addrs {
+			if !strings.HasPrefix(strings.ToLower(a), "fe80:") {
+				realAddr = true
+				break
+			}
+		}
+		if len(sw.Uplinks) == 0 && len(sw.VMKs) == 0 && !realAddr && !hasVMs {
+			continue
 		}
 		topo.Switches = append(topo.Switches, sw)
 	}
@@ -350,17 +448,11 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		}
 	}
 	if len(natPGs) > 0 || len(natDefault) > 0 || len(looseCts) > 0 || len(topo.Switches) == 0 {
-		uplink := ""
-		for _, it := range ifaces { // the up physical NIC carrying the host IP
-			if it.Type == "physical" && it.State == "up" && len(it.Addrs) > 0 {
-				uplink = it.Name
-				break
-			}
-		}
-		sw := TopoSwitch{Name: "vSwitch0", Kind: "user-mode"}
-		if uplink != "" {
-			sw.Uplinks = []TopoUplink{mkUplink(uplink)}
-		}
+		// User-mode/NAT networking does NOT bridge to a physical NIC — QEMU SLIRP
+		// NATs out through the host's own routing. Showing a physical uplink here
+		// (previously the management NIC) wrongly implied VM traffic rides that NIC,
+		// so this switch is drawn with no uplink.
+		sw := TopoSwitch{Name: "VM Network (NAT)", Kind: "user-mode"}
 		if len(natPGs) == 0 {
 			natPGs = []TopoPortGroup{{Name: "VM Network (NAT)"}}
 		}
@@ -370,8 +462,28 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		topo.Switches = append(topo.Switches, sw)
 	}
 
+	// Physical NICs not on any vSwitch. One that carries a host IP (the management
+	// NIC, or a storage/other host IP) is drawn as its own management vSwitch with
+	// a host-adapter box box showing the IP — so the diagram makes clear how
+	// the host's own IPs are wired, VMware-style. An address-less NIC is a free
+	// uplink available for a new vSwitch.
 	for _, it := range ifaces {
-		if it.Type == "physical" && it.Master == "" {
+		if it.Type != "physical" || it.Master != "" {
+			continue
+		}
+		if len(it.Addrs) > 0 {
+			name := "Management Network"
+			if it.Name != mgmtIf {
+				name = it.Name + " (host)"
+			}
+			topo.Switches = append(topo.Switches, TopoSwitch{
+				Name:    name,
+				Kind:    "management",
+				Addrs:   it.Addrs,
+				VMKs:    mkVMKs(it.Name, it.Addrs),
+				Uplinks: []TopoUplink{mkUplink(it.Name)},
+			})
+		} else {
 			topo.FreeNICs = append(topo.FreeNICs, it)
 		}
 	}

@@ -14,6 +14,7 @@ type Pool struct {
 	Name       string
 	ImageName  string
 	Kind       string
+	OSType     string // linux | windows — the full desktop OS this pool delivers
 	AssignMode string // pooled | persistent
 	CPUs       int
 	MemoryMB   int
@@ -29,10 +30,13 @@ type PoolStore struct{ db *db.DB }
 func NewPoolStore(d *db.DB) *PoolStore { return &PoolStore{db: d} }
 
 func (s *PoolStore) Create(p Pool) (int64, error) {
+	if p.OSType != "windows" {
+		p.OSType = "linux"
+	}
 	res, err := s.db.Exec(`INSERT INTO desktop_pools
-		(org_id,name,image_name,kind,assign_mode,cpus,memory_mb,disk_gb,min_size,max_size)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		p.OrgID, p.Name, p.ImageName, p.Kind, p.AssignMode, p.CPUs, p.MemoryMB, p.DiskGB, p.MinSize, p.MaxSize)
+		(org_id,name,image_name,kind,os_type,assign_mode,cpus,memory_mb,disk_gb,min_size,max_size)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		p.OrgID, p.Name, p.ImageName, p.Kind, p.OSType, p.AssignMode, p.CPUs, p.MemoryMB, p.DiskGB, p.MinSize, p.MaxSize)
 	if err != nil {
 		return 0, err
 	}
@@ -45,7 +49,7 @@ func (s *PoolStore) Delete(orgID, id int64) error {
 }
 
 func (s *PoolStore) List(orgID int64) ([]Pool, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,name,image_name,kind,assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
+	rows, err := s.db.Query(`SELECT id,org_id,name,image_name,kind,COALESCE(os_type,'linux'),assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
 		FROM desktop_pools WHERE org_id=? ORDER BY name`, orgID)
 	if err != nil {
 		return nil, err
@@ -56,7 +60,7 @@ func (s *PoolStore) List(orgID int64) ([]Pool, error) {
 
 // AllPools returns every pool across all orgs (for the warm-pool worker).
 func (s *PoolStore) AllPools() ([]Pool, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,name,image_name,kind,assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
+	rows, err := s.db.Query(`SELECT id,org_id,name,image_name,kind,COALESCE(os_type,'linux'),assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
 		FROM desktop_pools ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -73,10 +77,10 @@ func (s *PoolStore) FreeCount(poolID int64) (int, error) {
 }
 
 func (s *PoolStore) Get(id int64) (Pool, error) {
-	row := s.db.QueryRow(`SELECT id,org_id,name,image_name,kind,assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
+	row := s.db.QueryRow(`SELECT id,org_id,name,image_name,kind,COALESCE(os_type,'linux'),assign_mode,cpus,memory_mb,disk_gb,min_size,max_size,created_at
 		FROM desktop_pools WHERE id=?`, id)
 	var p Pool
-	err := row.Scan(&p.ID, &p.OrgID, &p.Name, &p.ImageName, &p.Kind, &p.AssignMode,
+	err := row.Scan(&p.ID, &p.OrgID, &p.Name, &p.ImageName, &p.Kind, &p.OSType, &p.AssignMode,
 		&p.CPUs, &p.MemoryMB, &p.DiskGB, &p.MinSize, &p.MaxSize, &p.CreatedAt)
 	return p, err
 }
@@ -85,7 +89,7 @@ func scanPools(rows *sql.Rows) ([]Pool, error) {
 	var out []Pool
 	for rows.Next() {
 		var p Pool
-		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.ImageName, &p.Kind, &p.AssignMode,
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.ImageName, &p.Kind, &p.OSType, &p.AssignMode,
 			&p.CPUs, &p.MemoryMB, &p.DiskGB, &p.MinSize, &p.MaxSize, &p.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -124,7 +128,7 @@ func (s *PoolStore) GrantedUsers(poolID int64) ([]int64, error) {
 
 // PoolsForUser returns the pools a user may draw a desktop from.
 func (s *PoolStore) PoolsForUser(userID int64) ([]Pool, error) {
-	rows, err := s.db.Query(`SELECT p.id,p.org_id,p.name,p.image_name,p.kind,p.assign_mode,p.cpus,p.memory_mb,p.disk_gb,p.min_size,p.max_size,p.created_at
+	rows, err := s.db.Query(`SELECT p.id,p.org_id,p.name,p.image_name,p.kind,COALESCE(p.os_type,'linux'),p.assign_mode,p.cpus,p.memory_mb,p.disk_gb,p.min_size,p.max_size,p.created_at
 		FROM desktop_pools p JOIN pool_grants g ON g.pool_id=p.id
 		WHERE g.user_id=? ORDER BY p.name`, userID)
 	if err != nil {

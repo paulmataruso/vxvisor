@@ -41,7 +41,8 @@ func TapName(sessionID string) string {
 // enough for restart: a pre-existing tap is reused.
 func SetupTap(tap, bridge string) error {
 	if !ifaceExists(tap) {
-		if err := run("ip", "tuntap", "add", tap, "mode", "tap"); err != nil {
+		// multi_queue so QEMU can open one tap fd per virtio-net queue (per vCPU).
+		if err := run("ip", "tuntap", "add", tap, "mode", "tap", "multi_queue"); err != nil {
 			return err
 		}
 	}

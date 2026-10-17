@@ -45,6 +45,9 @@
     <label class="fld">Release<select name="release" id="ct-release"></select></label>
     <label class="fld">vCPUs<input type="number" name="cpus" value="1" min="1" max="64"></label>
     <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="512" min="64" step="64"></label>
+    <label class="fld full">Copies<input type="number" name="copies" value="1" min="1" max="50">
+      <span style="display:block;margin-top:4px;font-size:11px;color:var(--muted)">Create multiple independent containers at once. A trailing number increments (web01 → web01, web02…); otherwise a suffix is added (web → web-1, web-2…).</span>
+    </label>
     <label class="fld">Bridge (network)
       <select name="bridge">
         <option value="lxcbr0">lxcbr0 (default LXC NAT)</option>

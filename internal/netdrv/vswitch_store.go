@@ -87,6 +87,13 @@ func (s *Store) VSwitches() ([]VSwitch, error) {
 	return out, rows.Err()
 }
 
+// UpdateVSwitchUplink repoints a vSwitch's recorded uplink (e.g. after upgrading
+// it from a single NIC to a bond).
+func (s *Store) UpdateVSwitchUplink(name, uplink string) error {
+	_, err := s.db.Exec(`UPDATE net_vswitches SET uplink=? WHERE name=?`, uplink, name)
+	return err
+}
+
 func (s *Store) VSwitchByBridge(bridge string) (VSwitch, error) {
 	var v VSwitch
 	err := s.db.QueryRow(`SELECT id,name,bridge,uplink,created_at FROM net_vswitches WHERE bridge=?`, bridge).

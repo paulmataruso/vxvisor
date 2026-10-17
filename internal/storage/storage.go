@@ -318,11 +318,13 @@ type Backup struct {
 	SizeBytes  int64
 	Status     string
 	Error      string
+	TargetID   int64
+	Target     string // display name, filled by the service layer
 	CreatedAt  string
 }
 
-func (s *Store) CreateBackupRow(orgID int64, sessionID, name string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO backups(org_id,session_id,name,status) VALUES(?,?,?,'pending')`, orgID, sessionID, name)
+func (s *Store) CreateBackupRow(orgID int64, sessionID, name string, targetID int64) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO backups(org_id,session_id,name,status,target_id) VALUES(?,?,?,'pending',?)`, orgID, sessionID, name, targetID)
 	if err != nil {
 		return 0, err
 	}
@@ -330,7 +332,7 @@ func (s *Store) CreateBackupRow(orgID int64, sessionID, name string) (int64, err
 }
 
 func (s *Store) ListBackups(orgID int64) ([]Backup, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,session_id,name,path,compressor,size_bytes,status,error,created_at
+	rows, err := s.db.Query(`SELECT id,org_id,session_id,name,path,compressor,size_bytes,status,error,target_id,created_at
 		FROM backups WHERE org_id=? ORDER BY id DESC`, orgID)
 	if err != nil {
 		return nil, err
@@ -339,7 +341,7 @@ func (s *Store) ListBackups(orgID int64) ([]Backup, error) {
 	var out []Backup
 	for rows.Next() {
 		var b Backup
-		if err := rows.Scan(&b.ID, &b.OrgID, &b.SessionID, &b.Name, &b.Path, &b.Compressor, &b.SizeBytes, &b.Status, &b.Error, &b.CreatedAt); err != nil {
+		if err := rows.Scan(&b.ID, &b.OrgID, &b.SessionID, &b.Name, &b.Path, &b.Compressor, &b.SizeBytes, &b.Status, &b.Error, &b.TargetID, &b.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -349,10 +351,113 @@ func (s *Store) ListBackups(orgID int64) ([]Backup, error) {
 
 func (s *Store) GetBackup(orgID, id int64) (Backup, error) {
 	var b Backup
-	err := s.db.QueryRow(`SELECT id,org_id,session_id,name,path,compressor,size_bytes,status,error,created_at
+	err := s.db.QueryRow(`SELECT id,org_id,session_id,name,path,compressor,size_bytes,status,error,target_id,created_at
 		FROM backups WHERE id=? AND org_id=?`, id, orgID).
-		Scan(&b.ID, &b.OrgID, &b.SessionID, &b.Name, &b.Path, &b.Compressor, &b.SizeBytes, &b.Status, &b.Error, &b.CreatedAt)
+		Scan(&b.ID, &b.OrgID, &b.SessionID, &b.Name, &b.Path, &b.Compressor, &b.SizeBytes, &b.Status, &b.Error, &b.TargetID, &b.CreatedAt)
 	return b, err
+}
+
+// BackupTarget is a first-class, pool-independent place to store backups. Network
+// kinds carry mount details; 'secret' is AES-GCM sealed by the service layer.
+type BackupTarget struct {
+	ID         int64
+	OrgID      int64
+	Name       string
+	Kind       string // local|nfs|cifs|cephfs
+	Mountpoint string
+	Server     string
+	Share      string
+	Username   string
+	Secret     string // sealed (enc:…) at rest
+	Domain     string
+	Vers       string
+	Options    string
+	CreatedAt  string
+}
+
+const backupTargetCols = `id,org_id,name,kind,mountpoint,server,share,username,secret,domain,vers,options,created_at`
+
+func scanBackupTarget(sc interface{ Scan(...any) error }) (BackupTarget, error) {
+	var t BackupTarget
+	err := sc.Scan(&t.ID, &t.OrgID, &t.Name, &t.Kind, &t.Mountpoint, &t.Server, &t.Share,
+		&t.Username, &t.Secret, &t.Domain, &t.Vers, &t.Options, &t.CreatedAt)
+	return t, err
+}
+
+func (s *Store) CreateBackupTarget(t BackupTarget) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO backup_targets(org_id,name,kind,mountpoint,server,share,username,secret,domain,vers,options)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		t.OrgID, t.Name, t.Kind, t.Mountpoint, t.Server, t.Share, t.Username, t.Secret, t.Domain, t.Vers, t.Options)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) ListBackupTargets(orgID int64) ([]BackupTarget, error) {
+	rows, err := s.db.Query(`SELECT `+backupTargetCols+` FROM backup_targets WHERE org_id=? ORDER BY name`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BackupTarget
+	for rows.Next() {
+		t, err := scanBackupTarget(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetBackupTarget(orgID, id int64) (BackupTarget, error) {
+	return scanBackupTarget(s.db.QueryRow(`SELECT `+backupTargetCols+` FROM backup_targets WHERE id=? AND org_id=?`, id, orgID))
+}
+
+// GetBackupTargetByID looks up a target without org scoping — used when resolving
+// a backup/schedule's destination (the caller is already authorized by the row it
+// came from).
+func (s *Store) GetBackupTargetByID(id int64) (BackupTarget, error) {
+	return scanBackupTarget(s.db.QueryRow(`SELECT `+backupTargetCols+` FROM backup_targets WHERE id=?`, id))
+}
+
+// AllBackupTargets returns every target across all orgs (boot remount, name map).
+func (s *Store) AllBackupTargets() ([]BackupTarget, error) {
+	rows, err := s.db.Query(`SELECT ` + backupTargetCols + ` FROM backup_targets ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BackupTarget
+	for rows.Next() {
+		t, err := scanBackupTarget(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetBackupTargetMountpoint(id int64, mp string) error {
+	_, err := s.db.Exec(`UPDATE backup_targets SET mountpoint=? WHERE id=?`, mp, id)
+	return err
+}
+
+func (s *Store) DeleteBackupTarget(orgID, id int64) error {
+	_, err := s.db.Exec(`DELETE FROM backup_targets WHERE id=? AND org_id=?`, id, orgID)
+	return err
+}
+
+// BackupTargetInUse reports whether any backup row or schedule still points at a
+// target, so the service can refuse to delete a target that is still referenced.
+func (s *Store) BackupTargetInUse(id int64) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM backups WHERE target_id=?) +
+		(SELECT COUNT(*) FROM backup_schedules WHERE target_id=?)`, id, id).Scan(&n)
+	return n > 0
 }
 
 func (s *Store) DeleteBackup(orgID, id int64) error {
@@ -373,14 +478,17 @@ func (s *Store) DeleteBackup(orgID, id int64) error {
 // with the best available compressor (zstd, then gzip), recording size and any
 // stderr. This mirrors the decompiled backup pipeline's detectCompressor stage
 // while keeping everything local.
-func (s *Store) RunBackup(id int64, diskPath string) error {
+func (s *Store) RunBackup(id int64, diskPath, destDir string) error {
 	_, _ = s.db.Exec(`UPDATE backups SET status='running' WHERE id=?`, id)
 	fail := func(e error) error {
 		_, _ = s.db.Exec(`UPDATE backups SET status='error', error=? WHERE id=?`, e.Error(), id)
 		return e
 	}
+	if destDir == "" {
+		destDir = s.cfg.Paths.BackupDir
+	}
 
-	tmp := filepath.Join(s.cfg.Paths.BackupDir, fmt.Sprintf("bk%d-%s.qcow2", id, timestamp()))
+	tmp := filepath.Join(destDir, fmt.Sprintf("bk%d-%s.qcow2", id, timestamp()))
 	if err := qemu.ConvertStandaloneCopy(diskPath, tmp); err != nil {
 		return fail(err)
 	}
@@ -421,6 +529,32 @@ func (s *Store) RestoreBackup(b Backup) (string, error) {
 	return imgName, nil
 }
 
+// RegisterImage records an existing qcow2 on disk as a ready base image (used by
+// the vCenter import after it converts a source VMDK). ImageDir() exposes where
+// imported disks should land.
+func (s *Store) RegisterImage(name, path, sourceURL string) error {
+	size := int64(0)
+	if fi, err := os.Stat(path); err == nil {
+		size = fi.Size()
+	}
+	_, err := s.db.Exec(`INSERT INTO images(name,path,source_url,size_bytes,status) VALUES(?,?,?,?,'ready')
+		ON CONFLICT(name) DO UPDATE SET path=excluded.path, size_bytes=excluded.size_bytes, status='ready'`,
+		name, path, sourceURL, size)
+	return err
+}
+
+// ImageDir returns the configured base-image directory.
+func (s *Store) ImageDir() string { return s.cfg.Paths.ImageDir }
+
+// FreeBytes returns the free space available at dir (0 if unknown).
+func (s *Store) FreeBytes(dir string) int64 {
+	used, total := diskUsage(dir)
+	if total <= 0 {
+		return 0
+	}
+	return total - used
+}
+
 // ---- backup schedules ----------------------------------------------------
 
 type Schedule struct {
@@ -432,13 +566,15 @@ type Schedule struct {
 	Enabled       bool
 	LastRunAt     string
 	NextRunAt     string
+	TargetID      int64
+	Target        string // display name, filled by the service layer
 	CreatedAt     string
 }
 
-func (s *Store) CreateSchedule(orgID int64, sessionID string, intervalHours, keep int) (int64, error) {
+func (s *Store) CreateSchedule(orgID int64, sessionID string, intervalHours, keep int, targetID int64) (int64, error) {
 	next := time.Now().UTC().Add(time.Duration(intervalHours) * time.Hour).Format(time.RFC3339)
-	res, err := s.db.Exec(`INSERT INTO backup_schedules(org_id,session_id,interval_hours,keep,next_run_at) VALUES(?,?,?,?,?)`,
-		orgID, sessionID, intervalHours, keep, next)
+	res, err := s.db.Exec(`INSERT INTO backup_schedules(org_id,session_id,interval_hours,keep,next_run_at,target_id) VALUES(?,?,?,?,?,?)`,
+		orgID, sessionID, intervalHours, keep, next, targetID)
 	if err != nil {
 		return 0, err
 	}
@@ -446,7 +582,7 @@ func (s *Store) CreateSchedule(orgID int64, sessionID string, intervalHours, kee
 }
 
 func (s *Store) ListSchedules(orgID int64) ([]Schedule, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,session_id,interval_hours,keep,enabled,COALESCE(last_run_at,''),COALESCE(next_run_at,''),created_at
+	rows, err := s.db.Query(`SELECT id,org_id,session_id,interval_hours,keep,enabled,COALESCE(last_run_at,''),COALESCE(next_run_at,''),target_id,created_at
 		FROM backup_schedules WHERE org_id=? ORDER BY id DESC`, orgID)
 	if err != nil {
 		return nil, err
@@ -457,7 +593,7 @@ func (s *Store) ListSchedules(orgID int64) ([]Schedule, error) {
 
 // DueSchedules returns enabled schedules whose next_run_at has passed.
 func (s *Store) DueSchedules(now time.Time) ([]Schedule, error) {
-	rows, err := s.db.Query(`SELECT id,org_id,session_id,interval_hours,keep,enabled,COALESCE(last_run_at,''),COALESCE(next_run_at,''),created_at
+	rows, err := s.db.Query(`SELECT id,org_id,session_id,interval_hours,keep,enabled,COALESCE(last_run_at,''),COALESCE(next_run_at,''),target_id,created_at
 		FROM backup_schedules WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?`,
 		now.UTC().Format(time.RFC3339))
 	if err != nil {
@@ -472,7 +608,7 @@ func scanSchedules(rows *sql.Rows) ([]Schedule, error) {
 	for rows.Next() {
 		var s Schedule
 		var en int
-		if err := rows.Scan(&s.ID, &s.OrgID, &s.SessionID, &s.IntervalHours, &s.Keep, &en, &s.LastRunAt, &s.NextRunAt, &s.CreatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.OrgID, &s.SessionID, &s.IntervalHours, &s.Keep, &en, &s.LastRunAt, &s.NextRunAt, &s.TargetID, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		s.Enabled = en != 0

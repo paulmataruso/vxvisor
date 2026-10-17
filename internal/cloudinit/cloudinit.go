@@ -31,6 +31,12 @@ type Config struct {
 	Gateway     string
 	Nameservers []string
 
+	// DHCP, when true (and StaticIP empty), emits a DHCP network-config instead of
+	// a static one. Used when the VM bridge is enslaved to a real LAN uplink: the
+	// guest takes its address/gateway/DNS from the network's own DHCP server rather
+	// than the platform's static IPAM.
+	DHCP bool
+
 	// InstallRDP adds an xrdp server on first boot so the browser-desktop gateway
 	// can offer a full RDP session (clipboard, audio, microphone, webcam) rather
 	// than only the VNC framebuffer. Requires guest internet to fetch the package.
@@ -58,6 +64,11 @@ func (c Config) userData() string {
 	// the "make-ssl-cert: Could not get FQDN" / "hostname: Name or service not
 	// known" warnings on first boot).
 	b.WriteString("manage_etc_hosts: true\n")
+	// Time sync: the host is NTP-disciplined and the guest follows via kvm-clock,
+	// but also pin the guest to UTC and make sure network time sync is on so the
+	// wall clock stays correct even without the hypervisor clock (and for logs /
+	// TLS / Kerberos). UTC matches the -rtc base=utc we give Linux guests.
+	b.WriteString("timezone: UTC\n")
 	b.WriteString("users:\n")
 	fmt.Fprintf(&b, "  - name: %s\n", yamlStr(c.Username))
 	b.WriteString("    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n")
@@ -74,6 +85,9 @@ func (c Config) userData() string {
 	b.WriteString("  list: |\n")
 	fmt.Fprintf(&b, "    %s:%s\n", c.Username, c.Password)
 	var pkgs, cmds []string
+	// Guarantee NTP sync is enabled (systemd-timesyncd is present on cloud images
+	// by default; this is a no-op if already on). Keeps guest time correct.
+	cmds = append(cmds, "[ timedatectl, set-ntp, true ]")
 	if c.InstallRDP {
 		// A minimal XFCE + xrdp desktop so the guest answers RDP on :3389.
 		pkgs = append(pkgs, "xrdp", "xfce4")
@@ -87,10 +101,16 @@ func (c Config) userData() string {
 		cmds = append(cmds, "[ systemctl, enable, --now, qemu-guest-agent ]")
 	}
 	if c.Desktop == "xfce" {
-		// Lightweight graphical console: XFCE + lightdm on the local display.
-		pkgs = append(pkgs, "xorg", "xfce4", "xfce4-goodies", "lightdm", "dbus-x11")
+		// Lightweight graphical console: XFCE + lightdm on the local display, with
+		// Firefox so the desktop is immediately useful, and lightdm autologin so a
+		// VDI user lands straight on the desktop (the browser VNC can't easily type
+		// a graphical login). Renders to the QEMU display, which the console/desktop
+		// gateway shows over VNC.
+		pkgs = append(pkgs, "xorg", "xfce4", "xfce4-goodies", "lightdm", "dbus-x11", "firefox")
 		cmds = append(cmds,
 			"[ systemctl, set-default, graphical.target ]",
+			"[ bash, -c, \"install -d /etc/lightdm/lightdm.conf.d && printf '[Seat:*]\\nautologin-user="+c.Username+"\\nautologin-user-timeout=0\\n' > /etc/lightdm/lightdm.conf.d/50-vdx-autologin.conf\" ]",
+			"[ bash, -c, \"groupadd -f autologin && usermod -aG autologin "+c.Username+"\" ]",
 			"[ systemctl, enable, --now, lightdm ]")
 	}
 	if len(pkgs) > 0 {
@@ -113,11 +133,13 @@ func (c Config) metaData() string {
 	return fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", c.InstanceID, c.Hostname)
 }
 
-// hasNetwork reports whether a static network-config should be emitted.
-func (c Config) hasNetwork() bool { return c.StaticIP != "" }
+// hasNetwork reports whether a network-config should be emitted (static or DHCP).
+func (c Config) hasNetwork() bool { return c.StaticIP != "" || c.DHCP }
 
 // networkConfig renders a NoCloud network-config (netplan v2) that pins the
 // static address to the NIC matching MAC (or the first NIC when MAC is empty).
+// With DHCP set (and no StaticIP) it emits a DHCP config instead so the guest
+// leases its address from the bridged LAN.
 func (c Config) networkConfig() string {
 	var b strings.Builder
 	b.WriteString("version: 2\n")
@@ -129,6 +151,11 @@ func (c Config) networkConfig() string {
 		b.WriteString("    set-name: nic0\n")
 	} else {
 		b.WriteString("    match: {name: \"e*\"}\n")
+	}
+	if c.StaticIP == "" {
+		// DHCP: the LAN's own server provides address, gateway and DNS.
+		b.WriteString("    dhcp4: true\n")
+		return b.String()
 	}
 	b.WriteString("    dhcp4: false\n")
 	b.WriteString("    addresses:\n")

@@ -29,7 +29,11 @@
  // Auto-refresh while any ISO is still downloading so status updates live.
  if (document.querySelector('[data-downloading]')) setTimeout(function(){ location.reload(); }, 4000);
 
- (function(){
+ // Wire the upload/pull forms AFTER the whole page is parsed — these modals are
+ // defined further down the document, so querying for them at parse time returns
+ // null and the handlers never attach (the form then does a blocking native POST
+ // with no background upload / status bar). DOMContentLoaded guarantees they exist.
+ function initISOForms(){
    function closeModals(){ document.querySelectorAll('.modal.open').forEach(function(m){m.classList.remove('open');}); document.body.style.overflow=''; }
    function fmtBytes(n){ if(!n) return '0 B'; var u=['B','KB','MB','GB','TB'],i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} return v.toFixed(v<10&&i>0?1:0)+' '+u[i]; }
 
@@ -44,7 +48,7 @@
      var t=VDXToast.add('Uploading '+nm); t.progress(0); t.note('starting…');
      var xhr=new XMLHttpRequest();
      xhr.open('POST','/isos/upload?ajax=1');
-     xhr.upload.onprogress=function(ev){ if(ev.lengthComputable){ t.progress(ev.loaded/ev.total); t.note(fmtBytes(ev.loaded)+' / '+fmtBytes(ev.total)); } };
+     xhr.upload.onprogress=function(ev){ if(ev.lengthComputable){ t.progress(ev.loaded/ev.total); t.note(ev.loaded>=ev.total ? 'writing to disk…' : (fmtBytes(ev.loaded)+' / '+fmtBytes(ev.total))); } };
      xhr.onload=function(){ if(xhr.status>=200&&xhr.status<300){ t.title('Uploaded '+nm); t.done('done'); setTimeout(function(){ location.reload(); },900); } else { t.fail('upload failed ('+xhr.status+')'); } };
      xhr.onerror=function(){ t.fail('upload failed — network error'); };
      xhr.send(fd);
@@ -74,7 +78,9 @@
        })
        .catch(function(err){ t.fail('could not start: '+err.message); });
    });
- })();
+ }
+ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', initISOForms);
+ else initISOForms();
 </script>
 
 <div class="modal" id="m-iso-upload"><div class="modal-card">

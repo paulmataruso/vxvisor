@@ -1,5 +1,29 @@
 {{define "instance.html"}}{{template "head" .}}
 {{$s := .Session}}
+<style>
+  /* Specification: flowing tiles. Flex items GROW to fill each row (flex:1 1 …),
+     so the last row's tiles just expand — never empty cells, no table. */
+  .spec{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+  .spec .si{flex:1 1 150px;background:var(--panel2,#0e121a);border:1px solid var(--line);
+    border-radius:10px;padding:11px 14px;display:flex;flex-direction:column;gap:5px;min-width:0}
+  .spec .si-l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+  .spec .si-v{font-size:14px;font-weight:600;word-break:break-word;line-height:1.3}
+  .spec .si-v.big{font-size:23px;font-weight:700;line-height:1}
+  .spec .si-v.big small{font-size:12px;color:var(--muted);font-weight:600;margin-left:3px}
+  .spec .si-v .muted{font-weight:400}
+  .spec .si.wide{flex-basis:100%}
+  .spec .si .pill{font-weight:600}
+  .spec select{background:var(--panel,#161922);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:5px 8px;font:inherit;font-size:13px;max-width:100%}
+  .spec .si.editable{cursor:pointer;transition:border-color .12s}
+  .spec .si.editable:hover{border-color:var(--primary)}
+  .spec .si.editable .si-l::after{content:"✎";margin-left:6px;opacity:0;font-size:10px;color:var(--primary)}
+  .spec .si.editable:hover .si-l::after{opacity:.8}
+  .spec .si-max{font-size:11px;color:var(--muted);font-weight:400}
+  .spec .si-edit{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px}
+  .spec .si-edit input[type=number]{width:96px;background:var(--panel,#161922);border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:5px 8px;font:inherit}
+  .spec .feat{display:flex;gap:7px;align-items:center;font-size:13px;font-weight:400}
+  .spec .feat input{width:auto}
+</style>
 <div class="card">
   <div style="display:flex;align-items:center;gap:14px">
     <h2 style="margin:0">{{$s.Name}}</h2>
@@ -9,7 +33,6 @@
     {{if .Running}}
       <a class="btn sm primary" href="/console/{{$s.ID}}" target="_blank" rel="noopener" title="Graphical VNC console (noVNC). Best for GUI guests; cloud images/cirros put their shell on the serial console instead.">VNC console</a>
       <a class="btn sm" href="/console/{{$s.ID}}/serial" target="_blank" rel="noopener" title="Text serial console (xterm.js) → guest ttyS0. The console that accepts input for cloud images/cirros/headless servers. Needs the VM (re)started since serial was enabled.">Serial console</a>
-      <a class="btn sm" href="/desktop/{{$s.ID}}" target="_blank" rel="noopener" title="Full desktop via the guacd gateway — RDP (Windows/xrdp) or SPICE{{if eq $s.Display "spice"}} (this VM uses SPICE){{end}}, with clipboard, audio, microphone, webcam">Desktop</a>
       <form method="post" action="/sessions/{{$s.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
     {{else}}
       <form method="post" action="/sessions/{{$s.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>
@@ -28,18 +51,101 @@
         <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" title="Detach the install ISO so the VM boots its disk (takes effect next start)"><svg class="ic"><use href="#i-disc"/></svg>Eject ISO</button>
       </form>
       {{end}}
-      <button class="btn" data-modal="m-resize" {{if .Running}}disabled title="Stop the instance to change specs"{{end}}>Resize</button>
+      {{if eq $s.OSType "windows"}}
+        {{if and $.VirtioAvail (not $s.EjectVirtio)}}
+        <form method="post" action="/sessions/{{$s.ID}}/eject-virtio" style="display:inline" onsubmit="return confirm('Detach the virtio-win driver CD? Do this after the drivers are installed. Takes effect on next start.')">
+          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" title="Detach the virtio-win driver ISO (after installing the drivers; takes effect next start)"><svg class="ic"><use href="#i-disc"/></svg>Eject virtio drivers</button>
+        </form>
+        {{end}}
+        <form method="post" action="/sessions/{{$s.ID}}/mount-virtio" style="display:inline">
+          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" {{if not $.VirtioAvail}}disabled title="virtio-win ISO not found in the ISO library"{{else}}title="Attach the virtio-win driver ISO (to install/repair drivers or the guest agent; takes effect next start)"{{end}}><svg class="ic"><use href="#i-disc"/></svg>Mount virtio drivers</button>
+        </form>
+      {{end}}
+      <span class="muted" style="font-size:12px;align-self:center">click a value to edit</span>
     </div>
   </div>
-  <table>
-    <tr><th>Image</th><td>{{$s.ImageName}}</td><th>Type</th><td>{{$s.Kind}}</td></tr>
-    <tr><th>Firmware</th><td>{{$s.Firmware}}</td><th>Created</th><td class="muted">{{$s.CreatedAt}}</td></tr>
-    <tr><th>vCPUs</th><td>{{$s.CPUs}}</td><th>Memory</th><td>{{$s.MemoryMB}} MB</td></tr>
-    <tr><th>Disk</th><td>{{if $s.DiskGB}}{{$s.DiskGB}} GB{{else}}image default{{end}}</td><th>Networking</th><td class="muted">user (NAT)</td></tr>
-    <tr><th>OS / Machine</th><td>{{$s.OSType}} · {{$s.MachineType}}</td><th>Disk bus</th><td>{{$s.DiskBus}}</td></tr>
-    <tr><th>NIC / Graphics</th><td>{{$s.NICModel}} · {{$s.VGA}}</td><th>Features</th><td class="muted">{{if $s.GuestAgent}}<span class="pill">agent</span> {{end}}{{if $s.TPM}}<span class="pill">tpm 2.0</span> {{end}}{{if $s.SecureBoot}}<span class="pill">secure boot</span>{{end}}{{if not (or $s.GuestAgent $s.TPM $s.SecureBoot)}}—{{end}}</td></tr>
-  </table>
+  <div class="spec" id="spec-grid">
+    <div class="si editable" data-field="cpus" data-type="num" data-value="{{$s.CPUs}}" data-min="1"{{if .HostCPUs}} data-max="{{.HostCPUs}}"{{end}} title="click to edit">
+      <span class="si-l">vCPUs</span><span class="si-v big" data-disp>{{$s.CPUs}}</span>{{if .HostCPUs}}<span class="si-max">max {{.HostCPUs}}</span>{{end}}</div>
+    <div class="si editable" data-field="memory_mb" data-type="num" data-value="{{$s.MemoryMB}}" data-min="256" data-step="256"{{if .HostMemMB}} data-max="{{.HostMemMB}}"{{end}} title="click to edit">
+      <span class="si-l">Memory</span><span class="si-v big" data-disp>{{$s.MemoryMB}}<small>MB</small></span>{{if .HostMemMB}}<span class="si-max">max {{.HostMemMB}} MB</span>{{end}}</div>
+    <div class="si editable" data-field="disk_gb" data-type="num" data-value="{{$s.DiskGB}}" data-min="{{if $s.DiskGB}}{{$s.DiskGB}}{{else}}1{{end}}" data-max="2048" title="disk can only grow">
+      <span class="si-l">Disk</span><span class="si-v big" data-disp>{{if $s.DiskGB}}{{$s.DiskGB}}<small>GB</small>{{else}}<span class="muted" style="font-size:14px">image default</span>{{end}}</span><span class="si-max">grow only · max 2048 GB</span></div>
+    <div class="si"><span class="si-l">Image</span><span class="si-v">{{$s.DisplayImage}}</span></div>
+    <div class="si"><span class="si-l">Purpose</span><span class="si-v">{{if eq $s.Kind "desktop"}}VDI desktop{{else}}Server / workstation{{end}}</span></div>
+    <div class="si editable" data-field="os_type" data-type="select" data-value="{{$s.OSType}}" data-options="linux|Linux;windows|Windows" title="click to edit">
+      <span class="si-l">OS type</span><span class="si-v" style="text-transform:capitalize" data-disp>{{$s.OSType}}</span></div>
+    <div class="si editable" data-field="machine_type" data-type="select" data-value="{{$s.MachineType}}" data-options="q35|q35 (modern);pc|pc (i440fx)" title="click to edit">
+      <span class="si-l">Machine</span><span class="si-v" data-disp>{{$s.MachineType}}</span></div>
+    <div class="si editable" data-field="firmware" data-type="select" data-value="{{$s.Firmware}}" data-options="uefi|UEFI;bios|BIOS" title="click to edit">
+      <span class="si-l">Firmware</span><span class="si-v" style="text-transform:uppercase" data-disp>{{$s.Firmware}}</span></div>
+    <div class="si editable" data-field="disk_bus" data-type="select" data-value="{{$s.DiskBus}}" data-options="virtio-blk|virtio-blk;virtio-scsi|virtio-scsi;sata|SATA" title="click to edit">
+      <span class="si-l">Disk bus</span><span class="si-v" data-disp>{{$s.DiskBus}}</span></div>
+    <div class="si editable" data-field="nic_model" data-type="select" data-value="{{$s.NICModel}}" data-options="virtio|virtio;e1000e|e1000e;rtl8139|rtl8139" title="click to edit">
+      <span class="si-l">NIC model</span><span class="si-v" data-disp>{{$s.NICModel}}</span></div>
+    <div class="si editable" data-field="vga" data-type="select" data-value="{{$s.VGA}}" data-options="qxl|qxl;virtio|virtio-gpu;std|std" title="click to edit">
+      <span class="si-l">Graphics</span><span class="si-v" data-disp>{{$s.VGA}}</span></div>
+    <div class="si"><span class="si-l">Created</span><span class="si-v"><span class="muted">{{$s.CreatedAt}}</span></span></div>
+    <div class="si wide"><span class="si-l">Network</span>
+      <form method="post" action="/sessions/{{$s.ID}}/network" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <select name="network_id">
+          <option value="0"{{if eq $s.NetworkID 0}} selected{{end}}>default (NAT)</option>
+          {{range $.Networks}}<option value="{{.ID}}"{{if eq $s.NetworkID .ID}} selected{{end}}>{{.Name}}{{if .VLANID}} · VLAN {{.VLANID}}{{end}}</option>{{end}}
+        </select>
+        <button class="btn sm">Change</button>
+        <span class="muted" style="font-size:11px">moves live — no restart (to/from NAT needs a restart)</span>
+      </form>
+    </div>
+    <div class="si wide"><span class="si-l">Features <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— toggle any; applies on next start</span></span>
+      <div class="si-v" style="display:flex;gap:16px;flex-wrap:wrap;font-weight:400;margin-top:2px">
+        <label class="feat"><input type="checkbox" data-feat="guest_agent"{{if $s.GuestAgent}} checked{{end}}> guest agent</label>
+        <label class="feat"><input type="checkbox" data-feat="tpm"{{if $s.TPM}} checked{{end}}> TPM 2.0</label>
+        <label class="feat"><input type="checkbox" data-feat="secure_boot"{{if $s.SecureBoot}} checked{{end}}> secure boot</label>
+        <label class="feat"><input type="checkbox" data-feat="perf_pin"{{if $s.PinCPUs}} checked{{end}}> pinned vCPUs</label>
+        <label class="feat"><input type="checkbox" data-feat="perf_hugepages"{{if $s.HugePages}} checked{{end}}> hugepages</label>
+      </div>
+    </div>
+  </div>
+  <p class="muted" style="font-size:11px;margin:10px 2px 0">CPU, memory, disk and hardware changes apply when the instance is next started{{if .Running}} (it's running now, so you'll be asked to stop it){{end}}. Network moves live.</p>
 </div>
+<script>
+ (function(){
+   var EP="/sessions/{{$s.ID}}/spec-field", CSRF="{{.CSRF}}";
+   function post(field,value){
+     var f=document.createElement("form"); f.method="post"; f.action=EP;
+     [["csrf",CSRF],["field",field],["value",value]].forEach(function(kv){
+       var i=document.createElement("input"); i.type="hidden"; i.name=kv[0]; i.value=kv[1]; f.appendChild(i); });
+     document.body.appendChild(f); f.submit();
+   }
+   document.querySelectorAll('#spec-grid .si.editable').forEach(function(si){
+     si.addEventListener('click', function(){
+       if(si.querySelector('.si-edit')) return;            // already editing
+       var disp=si.querySelector('[data-disp]'); var type=si.dataset.type, cur=si.dataset.value;
+       var ed=document.createElement('div'); ed.className='si-edit';
+       var ctrl;
+       if(type==='num'){ ctrl=document.createElement('input'); ctrl.type='number'; ctrl.value=cur;
+         if(si.dataset.min)ctrl.min=si.dataset.min; if(si.dataset.max)ctrl.max=si.dataset.max; if(si.dataset.step)ctrl.step=si.dataset.step;
+       } else { ctrl=document.createElement('select');
+         (si.dataset.options||'').split(';').forEach(function(o){ if(!o)return; var p=o.split('|');
+           var op=document.createElement('option'); op.value=p[0]; op.textContent=p[1]||p[0]; if(p[0]===cur)op.selected=true; ctrl.appendChild(op); });
+         ctrl.className='btn sm'; ctrl.style.cssText='background:var(--panel,#161922);color:var(--fg)';
+       }
+       var save=document.createElement('button'); save.textContent='Save'; save.className='btn sm primary';
+       var cancel=document.createElement('button'); cancel.textContent='✕'; cancel.className='btn sm';
+       ed.appendChild(ctrl); ed.appendChild(save); ed.appendChild(cancel);
+       disp.style.display='none'; si.appendChild(ed); ctrl.focus();
+       ed.addEventListener('click', function(e){ e.stopPropagation(); });
+       cancel.onclick=function(){ ed.remove(); disp.style.display=''; };
+       save.onclick=function(){ post(si.dataset.field, ctrl.value); };
+       ctrl.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); post(si.dataset.field, ctrl.value); } });
+     });
+   });
+   document.querySelectorAll('#spec-grid input[data-feat]').forEach(function(cb){
+     cb.addEventListener('change', function(){ post(cb.dataset.feat, cb.checked?'1':'0'); });
+   });
+ })();
+</script>
 
 {{if $s.GuestAgent}}
 <div class="card" id="guest-card">
@@ -54,12 +160,12 @@
 {{if $s.CloudInit}}
 <div class="card">
   <h2>First-boot credentials (cloud-init)</h2>
-  <p class="muted">Injected on first boot. Usable at the console and over SSH once the guest finishes cloud-init.</p>
-  <table>
-    <tr><th>Username</th><td class="mono">{{$s.CIUsername}}</td></tr>
-    <tr><th>Password</th><td class="mono">{{$s.CIPassword}}</td></tr>
-    {{if $s.CISSHKey}}<tr><th>SSH key</th><td class="mono" style="font-size:12px;word-break:break-all">{{$s.CISSHKey}}</td></tr>{{end}}
-  </table>
+  <p class="muted" style="margin:4px 0 0">Injected on first boot. Usable at the console and over SSH once the guest finishes cloud-init.</p>
+  <div class="spec">
+    <div class="si"><span class="si-l">Username</span><span class="si-v mono">{{$s.CIUsername}}</span></div>
+    <div class="si"><span class="si-l">Password</span><span class="si-v mono">{{$s.CIPassword}}</span></div>
+    {{if $s.CISSHKey}}<div class="si wide"><span class="si-l">SSH key</span><span class="si-v mono" style="font-size:12px;word-break:break-all;font-weight:400">{{$s.CISSHKey}}</span></div>{{end}}
+  </div>
 </div>
 {{end}}
 
@@ -159,6 +265,53 @@
   </form>
 </div></div>
 
+<div class="modal" id="m-spec"><div class="modal-card">
+  <div class="modal-head"><h3>Edit hardware</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/spec">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">OS type
+      <select name="os_type">
+        <option value="linux"{{if eq $s.OSType "linux"}} selected{{end}}>Linux</option>
+        <option value="windows"{{if eq $s.OSType "windows"}} selected{{end}}>Windows</option>
+      </select></label>
+    <label class="fld">Firmware
+      <select name="firmware">
+        <option value="uefi"{{if eq $s.Firmware "uefi"}} selected{{end}}>UEFI (OVMF)</option>
+        <option value="bios"{{if eq $s.Firmware "bios"}} selected{{end}}>BIOS (SeaBIOS)</option>
+      </select></label>
+    <label class="fld">Machine type
+      <select name="machine_type">
+        <option value="q35"{{if eq $s.MachineType "q35"}} selected{{end}}>q35 (modern)</option>
+        <option value="pc"{{if eq $s.MachineType "pc"}} selected{{end}}>pc (i440fx)</option>
+      </select></label>
+    <label class="fld">Disk bus
+      <select name="disk_bus">
+        <option value="virtio-blk"{{if eq $s.DiskBus "virtio-blk"}} selected{{end}}>virtio-blk (fastest)</option>
+        <option value="virtio-scsi"{{if eq $s.DiskBus "virtio-scsi"}} selected{{end}}>virtio-scsi</option>
+        <option value="sata"{{if eq $s.DiskBus "sata"}} selected{{end}}>SATA (AHCI)</option>
+      </select></label>
+    <label class="fld">NIC model
+      <select name="nic_model">
+        <option value="virtio"{{if eq $s.NICModel "virtio"}} selected{{end}}>virtio (fastest)</option>
+        <option value="e1000e"{{if eq $s.NICModel "e1000e"}} selected{{end}}>e1000e (Intel)</option>
+        <option value="rtl8139"{{if eq $s.NICModel "rtl8139"}} selected{{end}}>rtl8139 (Realtek)</option>
+      </select></label>
+    <label class="fld">Graphics
+      <select name="vga">
+        <option value="qxl"{{if eq $s.VGA "qxl"}} selected{{end}}>qxl (SPICE)</option>
+        <option value="virtio"{{if eq $s.VGA "virtio"}} selected{{end}}>virtio-gpu</option>
+        <option value="std"{{if eq $s.VGA "std"}} selected{{end}}>std (VGA)</option>
+      </select></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="guest_agent"{{if $s.GuestAgent}} checked{{end}}> QEMU guest agent channel</label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="tpm"{{if $s.TPM}} checked{{end}}> TPM 2.0 (swtpm)</label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="secure_boot"{{if $s.SecureBoot}} checked{{end}}> Secure Boot (UEFI only)</label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="perf_pin"{{if $s.PinCPUs}} checked{{end}}> Pin vCPUs to host cores (lower latency/jitter)</label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="perf_hugepages"{{if $s.HugePages}} checked{{end}}> Back RAM with hugepages (needs a host pool; falls back if none)</label>
+    <p class="muted" style="margin:0">Applies on next start. Raw (LVM/ZFS) disks always use virtio-blk. Secure Boot requires UEFI and re-provisions the UEFI NVRAM; the data disk is never touched.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save hardware</button></div>
+  </form>
+</div></div>
+
 <div class="modal" id="m-fwd"><div class="modal-card">
   <div class="modal-head"><h3>Add port forward</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/sessions/{{$s.ID}}/forwards">
@@ -185,6 +338,11 @@
   <form class="mform" method="post" action="/sessions/{{$s.ID}}/backup" {{if .Running}}onsubmit="return confirm('Instance is running — stop it first for a clean backup. Continue anyway?')"{{end}}>
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Backup name<input type="text" name="name" placeholder="manual" value="manual"></label>
+    <label class="fld">Target storage
+      <select name="target_id">
+        {{range $.Targets}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+      </select>
+    </label>
     <p class="muted" style="margin:0">Compressed copy — stop the instance first for a consistent image.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Back up now</button></div>
   </form>
@@ -194,6 +352,11 @@
   <div class="modal-head"><h3>Schedule backups</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/sessions/{{$s.ID}}/schedule">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Target storage
+      <select name="target_id">
+        {{range $.Targets}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+      </select>
+    </label>
     <label class="fld">Every (hours)<input type="number" name="interval_hours" value="24" min="1"></label>
     <label class="fld">Keep (most recent)<input type="number" name="keep" value="7" min="1"></label>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Schedule</button></div>

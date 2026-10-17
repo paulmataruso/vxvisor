@@ -46,11 +46,13 @@ func (s *Server) vncProxy(w http.ResponseWriter, r *http.Request, p *service.Pri
 			return
 		}
 		defer tcp.Close()
+		nagleOff(tcp) // keystrokes/pointer/incremental updates must not wait on Nagle
 		ws, uerr := vncUpgrader.Upgrade(w, r, nil)
 		if uerr != nil {
 			return
 		}
 		defer ws.Close()
+		nagleOff(ws.UnderlyingConn())
 		bridgeWSTCP(ws, tcp)
 		return
 	}
@@ -103,11 +105,13 @@ func (s *Server) peerConsoleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tcp.Close()
+	nagleOff(tcp)
 	ws, uerr := vncUpgrader.Upgrade(w, r, nil)
 	if uerr != nil {
 		return
 	}
 	defer ws.Close()
+	nagleOff(ws.UnderlyingConn())
 	bridgeWSTCP(ws, tcp)
 }
 
@@ -122,11 +126,62 @@ func (s *Server) peerConsoleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, info)
 }
 
+// Console keepalive: ping the browser so a half-open / stalled WebSocket is
+// detected and torn down promptly (the client then auto-reconnects) instead of
+// the console silently freezing and going black until a manual refresh.
+const (
+	vncPingPeriod = 45 * time.Second
+	vncWriteWait  = 30 * time.Second
+)
+
+// nagleOff disables Nagle's algorithm on a TCP connection so small console
+// packets (keystrokes, pointer moves, incremental framebuffer updates) are sent
+// immediately instead of being coalesced (up to a ~40ms delay). Go enables
+// TCP_NODELAY by default, but we set it explicitly so a transport change can't
+// silently reintroduce input lag. No-op for a non-TCP conn.
+func nagleOff(c net.Conn) {
+	if t, ok := c.(*net.TCPConn); ok {
+		_ = t.SetNoDelay(true)
+	}
+}
+
 // bridgeWSTCP forwards bytes between a websocket and a TCP conn until either ends.
 func bridgeWSTCP(ws *websocket.Conn, tcp net.Conn) {
 	var once sync.Once
 	done := make(chan struct{})
 	closeBoth := func() { once.Do(func() { close(done) }) }
+
+	// Serialize all websocket writes (data frames + pings) — gorilla forbids
+	// concurrent writers — and bound each write with a deadline.
+	var wmu sync.Mutex
+	wsWrite := func(mt int, data []byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		_ = ws.SetWriteDeadline(time.Now().Add(vncWriteWait))
+		return ws.WriteMessage(mt, data)
+	}
+
+	// Periodic ping keeps intermediaries from idling the socket out AND detects a
+	// dead/half-open peer: the ping write fails (or hits the write deadline) within
+	// ~vncWriteWait, tearing the bridge down so the client reconnects. We do NOT
+	// impose a read deadline — a healthy console is idle inbound for long stretches
+	// (input only flows on user activity), and dropping it on silence is exactly
+	// what caused the console to flap.
+	go func() { // periodic ping
+		t := time.NewTicker(vncPingPeriod)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if wsWrite(websocket.PingMessage, nil) != nil {
+					closeBoth()
+					return
+				}
+			}
+		}
+	}()
 
 	go func() { // TCP (QEMU) -> browser
 		defer closeBoth()
@@ -134,7 +189,7 @@ func bridgeWSTCP(ws *websocket.Conn, tcp net.Conn) {
 		for {
 			n, err := tcp.Read(buf)
 			if n > 0 {
-				if ws.WriteMessage(websocket.BinaryMessage, buf[:n]) != nil {
+				if wsWrite(websocket.BinaryMessage, buf[:n]) != nil {
 					return
 				}
 			}

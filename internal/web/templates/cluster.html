@@ -42,8 +42,12 @@
 <div class="card">
   <div class="card-head">
     <h2>Nodes</h2>
-    <button class="btn primary" data-modal="m-node">+ Add worker node</button>
+    <span>
+      <button class="btn" data-modal="m-node">+ Add existing node</button>
+      <button class="btn primary" data-modal="m-join">+ Join new worker</button>
+    </span>
   </div>
+  <div id="joinprog"></div>
   {{if .Nodes}}
   <table>
     <tr><th>Name</th><th>Role</th><th>Address</th><th>Status</th><th>CPUs</th><th>Free RAM</th><th>Last seen</th><th></th></tr>
@@ -87,6 +91,91 @@
   <p class="muted" style="margin:0">Converts a foreign disk to qcow2 (qemu-img) and registers it as a base image. ESXi: extract the .vmdk from the OVA first. Proxmox: export the volume. Also available as <span class="mono">vdxd import &lt;name&gt; &lt;file&gt;</span>.</p>
 </div>
 
+<div class="card">
+  <div class="card-head">
+    <h2>Import from vCenter / ESXi <span class="pill" title="Validated for connect+list; export needs a real vCenter">experimental</span></h2>
+    {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-vmware">+ Connect &amp; import</button>{{end}}
+  </div>
+  <div id="vmwprog"></div>
+  <p class="muted" style="margin:8px 0 0">Imports a VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source VM is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong> (for a consistent copy). Each disk is streamed in and registered as a base image you can launch. Use a read-only vSphere account.</p>
+</div>
+
+<div class="modal" id="m-vmware"><div class="modal-card lg">
+  <div class="modal-head"><h3>Import from vCenter / ESXi</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="vmwform" method="post" action="/import/vmware/start">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">vCenter / ESXi host or URL<input type="text" name="vc_url" placeholder="vcenter.example.com or https://host/sdk" required></label>
+    <label class="fld">Username (read-only role)<input type="text" name="vc_user" autocomplete="off" placeholder="readonly@vsphere.local" required></label>
+    <label class="fld">Password<input type="password" name="vc_pass" autocomplete="new-password" required></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="vc_insecure" value="1"> Trust self-signed TLS certificate (LAN only)</label>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="vmwconnect">Connect &amp; list VMs</button>
+    </div>
+    <div id="vmwlist" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+      <p class="muted" style="margin:0 0 6px">Pick a <strong>powered-off</strong> VM to import:</p>
+      <div id="vmwtable" style="max-height:260px;overflow:auto"></div>
+      <label class="fld">OS type (for launch defaults)
+        <select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option></select>
+      </label>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="vmwgo" disabled>Import selected VM</button></div>
+    </div>
+  </form>
+</div></div>
+<script>
+(function(){
+  var form=document.getElementById('vmwform'); if(!form) return;
+  var btn=document.getElementById('vmwconnect'), list=document.getElementById('vmwlist'),
+      tbl=document.getElementById('vmwtable'), go=document.getElementById('vmwgo');
+  btn.addEventListener('click',function(){
+    btn.disabled=true; btn.textContent='Connecting…';
+    var fd=new FormData(form);
+    fetch('/import/vmware/connect',{method:'POST',body:fd,credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        btn.disabled=false; btn.textContent='Connect & list VMs';
+        if(d.error){ tbl.innerHTML='<p style="color:var(--bad,#e55)">'+d.error+'</p>'; list.style.display=''; return; }
+        var vms=d.vms||[];
+        if(!vms.length){ tbl.innerHTML='<p class="muted">No VMs visible to this account.</p>'; list.style.display=''; return; }
+        var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th><th>Disks</th></tr>';
+        vms.forEach(function(v){
+          var ok=v.Importable && v.PowerState==='poweredOff';
+          var disks=(v.Disks||[]).length, cap=(v.Disks||[]).reduce(function(a,x){return a+(x.CapacityGB||0);},0);
+          h+='<tr>'+
+            '<td>'+(ok?'<input type="radio" name="moid" value="'+v.MOID+'">':'<span title="'+(v.ImportNote||'')+'">—</span>')+'</td>'+
+            '<td><strong>'+v.Name+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+v.ImportNote+'</span>':'')+'</td>'+
+            '<td><span class="pill '+(v.PowerState==='poweredOff'?'':'error')+'">'+v.PowerState+'</span></td>'+
+            '<td class="muted" style="font-size:12px">'+(v.GuestFullName||'')+'</td>'+
+            '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td>'+
+            '<td class="muted">'+disks+' · '+cap+'G</td></tr>';
+        });
+        tbl.innerHTML=h+'</table>'; list.style.display='';
+        tbl.addEventListener('change',function(){ go.disabled=!form.querySelector('input[name=moid]:checked'); });
+      })
+      .catch(function(e){ btn.disabled=false; btn.textContent='Connect & list VMs'; tbl.innerHTML='<p style="color:var(--bad,#e55)">'+e+'</p>'; list.style.display=''; });
+  });
+  // progress poller
+  var box=document.getElementById('vmwprog');
+  function badge(s){var c=s==='done'?'running':(s==='failed'?'error':'');return '<span class="pill '+c+'">'+s+'</span>';}
+  function poll(){
+    fetch('/api/vmware-import',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      var l=(d&&d.imports)||[]; if(!l.length){box.innerHTML='';return;}
+      function gb(b){b=b||0; if(b>=1073741824)return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB';}
+      function rate(b){b=b||0; return b>=1048576?(b/1048576).toFixed(1)+' MB/s':(b/1024).toFixed(0)+' KB/s';}
+      var h='<table style="margin:8px 0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th></tr>';
+      l.forEach(function(j){
+        var xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
+        var spd=(j.status==='exporting'&&j.rate)?rate(j.rate):'—';
+        h+='<tr><td><strong>'+(j.vm||'')+'</strong></td><td>'+badge(j.status)+'</td>'+
+        '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+j.err+'</span>'):(j.step||''))+'</td>'+
+        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+(j.pct||0)+'%</td></tr>';});
+      box.innerHTML=h+'</table>';
+    }).catch(function(){});
+  }
+  poll(); setInterval(poll,3000);
+})();
+</script>
+
 <div class="modal" id="m-node"><div class="modal-card">
   <div class="modal-head"><h3>Add worker node</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/cluster/nodes">
@@ -98,6 +187,53 @@
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add node</button></div>
   </form>
 </div></div>
+
+<div class="modal" id="m-join"><div class="modal-card lg">
+  <div class="modal-head"><h3>Join a new worker node (zero-touch)</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/cluster/nodes/join">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="muted" style="margin:0 0 6px">Give the new host's SSH login and the IPs it should use. VXVisor configures its
+      management + cluster interfaces over SSH and <strong>verifies reachability on the new management IP before committing</strong>.
+      If it can't reach the node, the node <strong>auto-reverts to its original address within 5 minutes</strong> (reboot-safe) — it can't be stranded.</p>
+    <label class="fld">SSH address (current)<input type="text" name="address" placeholder="172.16.0.50 or 172.16.0.50:22" required></label>
+    <label class="fld">SSH user<input type="text" name="ssh_user" value="root" required></label>
+    <label class="fld">SSH password<input type="password" name="ssh_pass" autocomplete="new-password" placeholder="(or paste a private key below)"></label>
+    <label class="fld">SSH private key (optional, overrides password)<textarea name="ssh_key" rows="3" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" style="font-family:monospace;font-size:12px"></textarea></label>
+    <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+    <label class="fld">Management interface<input type="text" name="mgmt_iface" placeholder="eno1" required></label>
+    <label class="fld">Management IP / CIDR<input type="text" name="mgmt_cidr" placeholder="172.16.0.170/24" required></label>
+    <label class="fld">Default gateway<input type="text" name="gateway" placeholder="172.16.0.1"></label>
+    <label class="fld">DNS servers (comma-separated)<input type="text" name="dns" placeholder="1.1.1.1, 8.8.8.8"></label>
+    <label class="fld">Cluster interface<input type="text" name="cluster_iface" placeholder="eno2"></label>
+    <label class="fld">Cluster IP / CIDR<input type="text" name="cluster_cidr" placeholder="10.10.0.5/24"></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="bootstrap" value="1"> Also install &amp; start vdxd on the node (best-effort)</label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Start join</button></div>
+  </form>
+</div></div>
+<script>
+(function(){
+  var box=document.getElementById('joinprog'); if(!box) return;
+  function badge(s){var c=s==='done'?'running':(s==='failed'?'error':'');return '<span class="pill '+c+'">'+s+'</span>';}
+  function render(list){
+    if(!list||!list.length){box.innerHTML='';return;}
+    var h='<table style="margin:8px 0"><tr><th>Node</th><th>Status</th><th>Step</th></tr>';
+    list.forEach(function(j){
+      h+='<tr><td><strong>'+(j.name||j.address)+'</strong>'+(j.new_addr?' <span class="muted mono" style="font-size:11px">→ '+j.new_addr+'</span>':'')+'</td>'+
+         '<td>'+badge(j.status)+'</td>'+
+         '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+j.err+'</span>'):(j.step||''))+'</td></tr>';
+    });
+    box.innerHTML=h+'</table>';
+  }
+  var active=false;
+  function poll(){
+    fetch('/api/node-join',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      var list=(d&&d.joins)||[]; render(list);
+      active=list.some(function(j){return j.status!=='done'&&j.status!=='failed';});
+    }).catch(function(){});
+  }
+  poll(); setInterval(poll, 2500);
+})();
+</script>
 
 <div class="modal" id="m-import"><div class="modal-card">
   <div class="modal-head"><h3>Import a VM disk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
