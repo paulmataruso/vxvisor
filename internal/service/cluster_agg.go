@@ -24,12 +24,14 @@ type ClusterVM struct {
 	MemoryMB int    `json:"mem"`
 	Kind     string `json:"kind"`
 	Owner    string `json:"owner"`
+	Storage  string `json:"storage"` // disk backend + pool/target
 }
 
 // AllLocalSessions lists every VM on THIS node (all orgs), tagged with node. It
 // backs the peer API's /sessions endpoint and the local half of the aggregator.
 func (s *Service) AllLocalSessions(node string) ([]ClusterVM, error) {
-	rows, err := s.db.Query(`SELECT s.id,s.name,s.state,s.cpus,s.memory_mb,s.kind,COALESCE(u.username,'')
+	rows, err := s.db.Query(`SELECT s.id,s.name,s.state,s.cpus,s.memory_mb,s.kind,COALESCE(u.username,''),
+		COALESCE(s.disk_backend,'qcow2'),COALESCE(s.disk_path,'')
 		FROM sessions s LEFT JOIN users u ON u.id=s.owner_id
 		WHERE s.deleted_at IS NULL ORDER BY s.created_at DESC`)
 	if err != nil {
@@ -39,7 +41,9 @@ func (s *Service) AllLocalSessions(node string) ([]ClusterVM, error) {
 	var out []ClusterVM
 	for rows.Next() {
 		v := ClusterVM{Node: node}
-		if err := rows.Scan(&v.ID, &v.Name, &v.State, &v.CPUs, &v.MemoryMB, &v.Kind, &v.Owner); err == nil {
+		var backend, diskPath string
+		if err := rows.Scan(&v.ID, &v.Name, &v.State, &v.CPUs, &v.MemoryMB, &v.Kind, &v.Owner, &backend, &diskPath); err == nil {
+			v.Storage = session.StorageLabelFor(backend, diskPath)
 			out = append(out, v)
 		}
 	}

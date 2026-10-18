@@ -20,12 +20,13 @@
        VMs in one pane; actions route to the owning node over the cluster API. */}}
   {{if .ClusterVMs}}
   <table>
-    <tr><th>Name</th><th>Node</th><th>Type</th><th>Specs</th><th>Owner</th><th>State</th><th></th></tr>
+    <tr><th>Name</th><th>Node</th><th>Type</th><th>Storage</th><th>Specs</th><th>Owner</th><th>State</th><th></th></tr>
     {{range .ClusterVMs}}
     <tr>
       <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
       <td><span class="host-tag{{if ne .Node $.SelfNode}} remote{{end}}">{{.Node}}</span>{{if eq .Node $.SelfNode}} <span class="muted" style="font-size:11px">this node</span>{{end}}</td>
       <td>{{.Kind}}</td>
+      <td class="muted">{{if .Storage}}{{.Storage}}{{else}}—{{end}}</td>
       <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB</td>
       <td class="muted">{{.Owner}}</td>
       <td><span class="pill {{.State}}">{{.State}}</span></td>
