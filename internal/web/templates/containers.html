@@ -55,7 +55,7 @@
       </select>
     </label>
     <label class="fld">Storage pool<select name="storage_pool_id"><option value="0">— default (/var/lib/lxc) —</option>{{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}</select></label>
-    <label class="fld">Root disk GB <span style="font-size:11px;color:var(--muted)">(Ceph RBD pools only)</span><input type="number" name="disk_gb" value="10" min="1" max="2048"></label>
+    <label class="fld">Root disk GB <span style="font-size:11px;color:var(--muted)">(RBD / LVM pools only)</span><input type="number" name="disk_gb" value="10" min="1" max="2048"></label>
     <div class="modal-actions full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create container</button></div>
   </form>
 </div></div>

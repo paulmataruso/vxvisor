@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
@@ -108,18 +109,29 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 	if copies > maxContainerCopies {
 		return fmt.Errorf("at most %d copies at a time", maxContainerCopies)
 	}
-	// rootfs location: a chosen storage pool decides where the rootfs lives. An rbd
-	// pool (a Ceph block pool, no directory) puts the rootfs on an RBD image via
-	// liblxc's native backing store; any other pool uses a directory under its path.
+	// rootfs location: a chosen storage pool decides where the rootfs lives. A
+	// block pool (rbd / lvm — no filesystem directory) puts the rootfs on a volume
+	// liblxc provisions via its native backing store; a dir/zfs pool uses a
+	// directory under the pool's path.
 	lxcpath := ""
-	rbdPool := ""
+	rbdPool, lvmVG, lvmThin := "", "", ""
 	if in.StoragePoolID > 0 {
-		var kind, ppath string
-		if err := s.db.QueryRow(`SELECT kind, COALESCE(path,'') FROM storage_pools WHERE id=?`, in.StoragePoolID).Scan(&kind, &ppath); err == nil {
-			if kind == "rbd" {
+		var kind, pname, ppath string
+		if err := s.db.QueryRow(`SELECT kind, name, COALESCE(path,'') FROM storage_pools WHERE id=?`, in.StoragePoolID).Scan(&kind, &pname, &ppath); err == nil {
+			switch kind {
+			case "rbd":
 				rbdPool = ppath // the Ceph pool name
-			} else if ppath != "" {
-				lxcpath = filepath.Join(ppath, "lxc")
+			case "lvm":
+				// Pool name is "<vg>/<thinpool>" (same convention as the VM LVM backend).
+				if vg, tp, ok := strings.Cut(pname, "/"); ok {
+					lvmVG, lvmThin = vg, tp
+				} else {
+					lvmVG = pname
+				}
+			default: // dir / zfs — a real directory path
+				if ppath != "" {
+					lxcpath = filepath.Join(ppath, "lxc")
+				}
 			}
 		}
 	}
@@ -170,7 +182,8 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 			err := lxc.Create(lxc.CreateOpts{
 				Name: b.name, Lxcpath: lxcpath, Dist: in.Dist, Release: in.Release,
 				Arch: "amd64", Bridge: bridge, MAC: b.mac, CPUs: in.CPUs, MemMB: in.MemoryMB,
-				RBDPool: rbdPool, RBDName: "lxc-" + b.name, RBDSizeG: in.DiskGB,
+				RBDPool: rbdPool, LVMVG: lvmVG, LVMThin: lvmThin,
+				BlockName: "lxc-" + b.name, SizeG: in.DiskGB,
 			})
 			if err != nil {
 				_, _ = s.db.Exec(`UPDATE containers SET status='error' WHERE id=?`, b.id)
