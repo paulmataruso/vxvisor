@@ -1260,6 +1260,38 @@ func (s *Session) DisplayImage() string {
 	return isoInstallImage
 }
 
+// StorageLabel is a short human description of where/how the VM's disk is stored
+// — the storage provider plus the pool/target it lives on — for the instances
+// list. Derived from the disk backend and the disk path.
+func (s *Session) StorageLabel() string {
+	switch s.DiskBackend {
+	case "rbd":
+		pool := "rbd"
+		if rest, ok := strings.CutPrefix(s.DiskPath, "rbd:"); ok {
+			if i := strings.IndexByte(rest, '/'); i > 0 {
+				pool = rest[:i]
+			}
+		}
+		return "Ceph RBD · " + pool
+	case "lvm":
+		if p, ok := strings.CutPrefix(s.DiskPath, "/dev/"); ok {
+			if i := strings.IndexByte(p, '/'); i > 0 {
+				return "LVM thin · " + p[:i]
+			}
+		}
+		return "LVM thin"
+	case "zvol":
+		if p, ok := strings.CutPrefix(s.DiskPath, "/dev/zvol/"); ok {
+			if i := strings.IndexByte(p, '/'); i > 0 {
+				return "ZFS zvol · " + p[:i]
+			}
+		}
+		return "ZFS zvol"
+	default:
+		return "qcow2 file"
+	}
+}
+
 func (m *Manager) Delete(id string) error {
 	if m.MigrationBusy(id) {
 		return fmt.Errorf("instance is migrating its storage; try again when the move finishes")

@@ -49,12 +49,14 @@
   {{else}}
   {{if .Sessions}}
   <table>
-    <tr><th>Name</th><th>Type</th><th>Image</th><th>Specs</th><th>State</th><th></th></tr>
+    <tr><th>Name</th><th>Location</th><th>Type</th><th>Image</th><th>Storage</th><th>Specs</th><th>State</th><th></th></tr>
     {{range .Sessions}}
     <tr>
-      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong>{{if $.Clustered}} <span class="host-tag">{{$.NodeName}}</span>{{end}}<br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td><strong><a href="/instances/{{.ID}}">{{.Name}}</a></strong><br><span class="muted mono" style="font-size:12px">{{.ID}}</span></td>
+      <td><span class="host-tag">{{$.LocalNode}}</span></td>
       <td>{{.Kind}}{{if eq .Firmware "uefi"}} · <span class="muted">uefi</span>{{end}}</td>
       <td>{{.DisplayImage}}</td>
+      <td class="muted">{{.StorageLabel}}</td>
       <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .DiskGB}} · {{.DiskGB}} GB{{end}}</td>
       <td><span class="pill {{.State}}">{{.State}}</span></td>
       <td style="text-align:right;white-space:nowrap">

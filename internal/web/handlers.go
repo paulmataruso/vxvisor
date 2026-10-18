@@ -100,6 +100,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 			hasRBD = true
 		}
 	}
+	// Where these instances live: the cluster node name, or (standalone) the host's
+	// own hostname — so the instances list always shows a location.
+	localNode := s.svc.ClusterSelfName()
+	if localNode == "" {
+		localNode, _ = os.Hostname()
+	}
 	data := map[string]any{
 		"Sessions":  sessions,
 		"Images":    images,
@@ -110,6 +116,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 		"ZFSPools":  zfspools,
 		"HasLVMPool": hasLVM,
 		"HasRBDPool": hasRBD,
+		"LocalNode":  localNode,
 	}
 	// Unified cluster view (VIP, admin): list every node's VMs — the single pane.
 	// Actions route to the owning node; the local table is used otherwise.
