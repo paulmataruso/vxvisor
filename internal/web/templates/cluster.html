@@ -98,6 +98,7 @@
   </div>
   <div id="vmwprog"></div>
   <p class="muted" style="margin:8px 0 0">Imports a VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source VM is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong> (for a consistent copy). Each disk is streamed in and registered as a base image you can launch. Use a read-only vSphere account.</p>
+  <p class="muted" style="margin:4px 0 0;font-size:12px">Disks arrive as a <strong>compressed stream</strong>: a thin 25 GiB disk may only pull a few GiB and still be complete — the amount downloaded is normally well below the disk's size, and that is <strong>not</strong> a truncated transfer. Watch for the status to reach <strong>done</strong>.</p>
 </div>
 
 <div class="modal" id="m-vmware"><div class="modal-card lg">
@@ -165,12 +166,20 @@
       function esc(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
       var h='<table style="margin:8px 0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th><th>Log</th></tr>';
       l.forEach(function(j){
-        var xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
+        var xfer,pctcell;
+        if(j.status==='exporting'){
+          // Compressed stream — show bytes pulled, not a fraction of a total we never reach.
+          xfer=gb(j.done_bytes)+' pulled'+(j.nominal?(' <span class="muted" style="font-size:11px">(src up to '+gb(j.nominal)+', thin)</span>'):'');
+          pctcell='—';
+        }else{
+          xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
+          pctcell=(j.pct||0)+'%';
+        }
         var spd=(j.status==='exporting'&&j.rate)?rate(j.rate):'—';
         var logcell=j.has_log?('<a href="/api/vmware-import/'+encodeURIComponent(j.id)+'/log" target="_blank" rel="noopener">view</a>'):'—';
         h+='<tr><td><strong>'+esc(j.vm)+'</strong></td><td>'+badge(j.status)+'</td>'+
         '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+esc(j.err)+'</span>'):esc(j.step))+'</td>'+
-        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+(j.pct||0)+'%</td><td>'+logcell+'</td></tr>';
+        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+pctcell+'</td><td>'+logcell+'</td></tr>';
         if(j.status==='failed'&&j.log_tail&&j.log_tail.length){
           h+='<tr><td colspan="7" style="padding:0 0 10px"><pre style="margin:4px 0;max-height:180px;overflow:auto;background:var(--panel2,#1a1a1a);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap">'+esc(j.log_tail.join('\n'))+'</pre></td></tr>';
         }});

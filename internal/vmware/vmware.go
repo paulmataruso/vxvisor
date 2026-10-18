@@ -205,10 +205,18 @@ func (c *Client) GetVM(ctx context.Context, moid string) (VMInfo, error) {
 // partial files. Returns the local vmdk paths in device order (first = boot).
 // Non-disk lease items (.ovf/.mf/.nvram) are skipped.
 // ExportProgress reports live transfer stats to the caller.
+//
+// IMPORTANT: a vSphere export is a COMPRESSED, stream-optimized VMDK. The bytes
+// actually streamed are the compressed contents of the (often thin) disk, which
+// is normally far smaller than the disk's nominal capacity. NominalBytes is that
+// capacity (the only "total" vCenter gives us up front); it is an upper bound, NOT
+// the number of bytes we will download — a completed export of a 25 GiB thin disk
+// routinely pulls only a few GiB. So DO NOT compute a percentage of NominalBytes
+// and present it as import progress: it will never reach 100% and looks stuck.
 type ExportProgress struct {
-	DoneBytes   int64 // bytes written so far across all disks
-	TotalBytes  int64 // total expected (sum of disk sizes), 0 if unknown
-	BytesPerSec int64 // instantaneous transfer rate
+	DoneBytes    int64 // compressed stream bytes written so far across all disks
+	NominalBytes int64 // sum of source disk CAPACITIES (upper bound, not the transfer size)
+	BytesPerSec  int64 // instantaneous transfer rate
 }
 
 func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(string, ...any), prog func(ExportProgress)) ([]string, error) {
@@ -232,15 +240,15 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 	defer updater.Done()
 
 	logf("export lease granted: %d item(s) in manifest", len(info.Items))
-	var totalBytes int64
+	var nominalBytes int64
 	for _, item := range info.Items {
 		isDisk := strings.HasSuffix(strings.ToLower(item.Path), ".vmdk")
 		logf("  lease item: %s (%d MiB)%s", item.Path, item.Size/(1<<20), map[bool]string{true: "", false: " — skipped (non-disk)"}[isDisk])
 		if isDisk {
-			totalBytes += item.Size
+			nominalBytes += item.Size
 		}
 	}
-	logf("will download %d MiB of disk data", totalBytes/(1<<20))
+	logf("source disk capacity %d MiB nominal (thin+compressed stream — actual download is usually much less)", nominalBytes/(1<<20))
 	var files []string
 	cleanup := func() {
 		for _, f := range files {
@@ -286,7 +294,7 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 					if dt > 0 {
 						bps = int64(float64(cur-lastBytes) / dt)
 					}
-					prog(ExportProgress{DoneBytes: cur, TotalBytes: totalBytes, BytesPerSec: bps})
+					prog(ExportProgress{DoneBytes: cur, NominalBytes: nominalBytes, BytesPerSec: bps})
 					lastBytes, lastT = cur, now
 				}
 			}
@@ -301,10 +309,11 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 		if s := elapsed.Seconds(); s > 0 {
 			avg = int64(float64(wrote) / s)
 		}
-		logf("downloaded %q: %d MiB in %s (avg %d MiB/s)", item.Path, wrote/(1<<20), elapsed.Round(time.Second), avg/(1<<20))
+		logf("downloaded %q: %d MiB written in %s (avg %d MiB/s) — source nominal %d MiB; a thin disk exports as a smaller compressed stream, so a lower figure here is normal and complete, not truncated",
+			item.Path, wrote/(1<<20), elapsed.Round(time.Second), avg/(1<<20), item.Size/(1<<20))
 		files = append(files, local)
 		if prog != nil {
-			prog(ExportProgress{DoneBytes: completedBytes, TotalBytes: totalBytes})
+			prog(ExportProgress{DoneBytes: completedBytes, NominalBytes: nominalBytes})
 		}
 	}
 	logf("finalizing export lease")

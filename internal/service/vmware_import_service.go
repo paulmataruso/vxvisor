@@ -40,8 +40,9 @@ type VMwareImportState struct {
 	Step       string `json:"step"`
 	Pct        int    `json:"pct"`
 	DoneBytes  int64  `json:"done_bytes"`
-	TotalBytes int64  `json:"total_bytes"`
-	Rate       int64  `json:"rate"` // bytes/sec during export
+	TotalBytes int64  `json:"total_bytes"` // 0 = unknown (true for the compressed export stream)
+	Nominal    int64  `json:"nominal"`     // sum of source disk capacities — an upper bound for context, NOT the download size
+	Rate       int64  `json:"rate"`        // bytes/sec during export
 	Image      string `json:"image,omitempty"`
 	Err        string `json:"err,omitempty"`
 	StartedAt  int64  `json:"started"`
@@ -318,17 +319,21 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 	vmdks, err := cli.ExportVM(ctx, moid, destDir, lg.logf, func(ep vmware.ExportProgress) {
 		s.vmwimp.set(id, func(st *VMwareImportState) {
 			st.DoneBytes = ep.DoneBytes
-			st.TotalBytes = ep.TotalBytes
+			// A stream-optimized export is compressed: the true total is unknown
+			// until it finishes, and the nominal capacity is NOT it. Report total
+			// as unknown (0) so the UI shows "X downloaded @ rate" instead of a
+			// fraction of a number we'll never reach. Nominal is kept for context.
+			st.TotalBytes = 0
+			st.Nominal = ep.NominalBytes
 			st.Rate = ep.BytesPerSec
-			if ep.TotalBytes > 0 {
-				st.Pct = int(ep.DoneBytes * 100 / ep.TotalBytes)
-			}
+			st.Pct = 0
 		})
 		// Throttle periodic progress to one line every ~15s (per-disk start/finish
 		// lines come from ExportVM itself).
 		if time.Since(lastLog) >= 15*time.Second {
 			lastLog = time.Now()
-			lg.logf("export progress %d/%d MiB @ %d MiB/s", ep.DoneBytes/(1<<20), ep.TotalBytes/(1<<20), ep.BytesPerSec/(1<<20))
+			lg.logf("export progress: %d MiB pulled @ %d MiB/s (source nominal %d MiB; compressed, total unknown until done)",
+				ep.DoneBytes/(1<<20), ep.BytesPerSec/(1<<20), ep.NominalBytes/(1<<20))
 		}
 	})
 	if err != nil {
