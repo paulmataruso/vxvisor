@@ -354,7 +354,7 @@ type CreateInput struct {
 	NetworkID     int64  // port group to attach the NIC to; 0 = default/NAT
 	StoragePoolID int64  // storage pool for the disk; 0 = default disk dir
 	Display       string // vnc | spice
-	DiskBackend   string // qcow2 | zvol | lvm
+	DiskBackend   string // qcow2 | zvol | lvm | rbd
 	ZvolPool      string // ZFS pool name for the zvol (zvol backend)
 	Desktop       string // "" | xfce
 	// Hardware profile knobs (empty => safe defaults; see normalizeHardware).

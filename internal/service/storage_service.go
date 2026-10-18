@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"vdxclone/internal/ceph"
 	"vdxclone/internal/lvm"
 	"vdxclone/internal/storage"
 )
@@ -343,6 +344,16 @@ func (s *Service) ListPools(p *Principal) ([]storage.Pool, error) {
 				pools[i].UsedBytes = int64(float64(tp.SizeBytes) * tp.DataPct / 100)
 				break
 			}
+		}
+	}
+	// An RBD pool is backed by the Ceph cluster, not a local filesystem — overlay
+	// its real used/total from `ceph df` (path holds the Ceph pool name).
+	for i := range pools {
+		if pools[i].Kind != "rbd" {
+			continue
+		}
+		if used, total := ceph.PoolUsage(pools[i].Path); total > 0 {
+			pools[i].UsedBytes, pools[i].TotalBytes = used, total
 		}
 	}
 	return pools, nil

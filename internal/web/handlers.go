@@ -91,10 +91,13 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 	pools, _ := s.svc.ListPools(p)
 	zfspools, _ := s.svc.ZFSPools(p) // for the raw-zvol disk option (admin; empty otherwise)
 	hasLVM := false                  // enables the raw-LVM-thin disk option
+	hasRBD := false                  // enables the Ceph RBD disk option
 	for _, pl := range pools {
 		if pl.Kind == "lvm" {
 			hasLVM = true
-			break
+		}
+		if pl.Kind == "rbd" {
+			hasRBD = true
 		}
 	}
 	data := map[string]any{
@@ -106,6 +109,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 		"Pools":     pools,
 		"ZFSPools":  zfspools,
 		"HasLVMPool": hasLVM,
+		"HasRBDPool": hasRBD,
 	}
 	// Unified cluster view (VIP, admin): list every node's VMs — the single pane.
 	// Actions route to the owning node; the local table is used otherwise.

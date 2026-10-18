@@ -1,0 +1,89 @@
+{{define "ceph.html"}}{{template "head" .}}
+<div class="card">
+  <h2>Hyperconverged storage — Ceph / RBD</h2>
+  <p class="muted" style="margin:0">Turn this node's local disks into a distributed <strong>Ceph</strong> cluster and run VM disks on <strong>RBD</strong>. Compute and storage live on the same box. <strong>Hard rule:</strong> Ceph's network rides the dedicated <em>storage interface</em>, never the management NIC.</p>
+</div>
+
+{{if not .Avail}}
+<div class="card">
+  <div class="empty">Ceph server tools aren't installed on this host. Re-run <span class="mono">deploy/install.sh</span> (it installs the <span class="mono">ceph</span> package), then reload this page.</div>
+</div>
+{{else}}
+
+<!-- Cluster status -->
+<div class="card">
+  <div class="card-head">
+    <h2>Cluster status</h2>
+    {{if .Status.Configured}}<button class="btn" data-modal="m-osd">+ Add OSD (disk)</button>{{end}}
+  </div>
+  {{if .Status.Configured}}
+  <div class="row" style="gap:28px;flex-wrap:wrap;align-items:flex-start">
+    <div>
+      <div class="muted" style="font-size:12px">Health</div>
+      <div><span class="pill {{if eq .Status.Status "HEALTH_OK"}}running{{else if eq .Status.Status "HEALTH_WARN"}}paused{{else}}error{{end}}">{{.Status.Status}}</span></div>
+      {{if .Status.Summary}}<div class="muted" style="font-size:12px;margin-top:4px;max-width:360px">{{.Status.Summary}}</div>{{end}}
+    </div>
+    <div><div class="muted" style="font-size:12px">Monitors</div><div class="mono" style="font-size:20px">{{.Status.NumMons}}</div></div>
+    <div><div class="muted" style="font-size:12px">OSDs (up / in / total)</div><div class="mono" style="font-size:20px">{{.Status.OSDsUp}} / {{.Status.OSDsIn}} / {{.Status.NumOSDs}}</div></div>
+    <div>
+      <div class="muted" style="font-size:12px">Raw capacity</div>
+      <div class="mono" style="font-size:20px">{{humanBytes .Status.UsedBytes}} / {{humanBytes .Status.TotalBytes}}</div>
+      <div class="muted" style="font-size:12px">{{humanBytes .Status.AvailBytes}} free</div>
+    </div>
+    {{if .Pool}}<div><div class="muted" style="font-size:12px">RBD pool</div><div class="mono" style="font-size:20px">{{.Pool}}</div></div>{{end}}
+  </div>
+  {{if lt .Status.NumOSDs 3}}<p style="margin:12px 0 0;font-size:12px;color:var(--warn)"><strong>Single-node / low redundancy.</strong> This pool replicates at size 1 until more nodes/OSDs join — a disk or host loss can lose data. Add OSDs and cluster nodes to gain redundancy.</p>{{end}}
+  {{else}}
+  <!-- Not yet bootstrapped -->
+  <p class="muted" style="margin:0 0 10px">No Ceph cluster is running on this host yet. Bootstrap one to create the first monitor, consume a disk as the first OSD, and create an RBD pool for VM disks.</p>
+  {{if .StorageIface}}
+  <button class="btn primary" data-modal="m-bootstrap">Bootstrap Ceph cluster…</button>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">Ceph will bind the storage interface <span class="mono">{{.StorageIface}}</span> and its subnet.</p>
+  {{else}}
+  <button class="btn primary" disabled title="set a storage interface first">Bootstrap Ceph cluster…</button>
+  <p style="margin:8px 0 0;font-size:12px;color:var(--warn)">Set a dedicated <a href="/shared">storage interface</a> first — Ceph's public/cluster network must not ride the management NIC.</p>
+  {{end}}
+  {{end}}
+</div>
+
+{{if .Status.Configured}}
+<div class="card">
+  <h2>Using Ceph for VM disks</h2>
+  <p class="muted" style="margin:0">When creating an instance, pick the <span class="mono">{{if .Pool}}{{.Pool}}{{else}}rbd{{end}}</span> pool and the <strong>Ceph RBD</strong> disk backend. The VM's disk becomes an RBD image, shared across the cluster — so it can live-migrate between nodes without copying the disk.</p>
+</div>
+{{end}}
+
+<!-- Bootstrap modal -->
+<div class="modal" id="m-bootstrap"><div class="modal-card">
+  <div class="modal-head"><h3>Bootstrap Ceph cluster</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/ceph/bootstrap" onsubmit="return confirm('This ERASES the selected disk and stands up Ceph on the storage network. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">RBD pool name<input name="pool" value="rbd" required></label>
+    <label class="fld">First OSD disk (will be <strong>erased</strong>)
+      <select name="osd_disk" required>
+        <option value="">— choose a free disk —</option>
+        {{range .Disks}}{{if not .InUse}}<option value="{{.Path}}">{{.Path}}{{if .Model}} · {{.Model}}{{end}}{{if .Size}} · {{.Size}}{{end}}</option>{{end}}{{end}}
+      </select>
+    </label>
+    <p class="muted" style="font-size:12px;margin:0">In-use disks (the OS/boot disk, pool members) are hidden and refused server-side. On a single node the pool replicates at size 1 — not redundant until more OSDs/nodes join.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Bootstrap</button></div>
+  </form>
+</div></div>
+
+<!-- Add OSD modal -->
+<div class="modal" id="m-osd"><div class="modal-card">
+  <div class="modal-head"><h3>Add OSD</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/ceph/osd" onsubmit="return confirm('This ERASES the selected disk and adds it to Ceph as an OSD. Continue?')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Disk (will be <strong>erased</strong>)
+      <select name="osd_disk" required>
+        <option value="">— choose a free disk —</option>
+        {{range .Disks}}{{if not .InUse}}<option value="{{.Path}}">{{.Path}}{{if .Model}} · {{.Model}}{{end}}{{if .Size}} · {{.Size}}{{end}}</option>{{end}}{{end}}
+      </select>
+    </label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add OSD</button></div>
+  </form>
+</div></div>
+
+{{end}}
+{{template "foot" .}}{{end}}

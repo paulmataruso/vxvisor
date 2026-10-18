@@ -108,9 +108,13 @@ apt-get install -y -qq \
 #   lvm2 + thin-provisioning-tools  LVM-thin pools
 #   zfsutils-linux                  ZFS pools / datasets / zvols
 #   nfs-common cifs-utils ceph-common open-iscsi  shared storage (NFS/CIFS/Ceph/iSCSI)
-say "Storage backend tools (LVM / ZFS / NFS / CIFS / Ceph / iSCSI)"
+#   ceph                            hyperconverged Ceph server (mon/mgr/osd/ceph-volume)
+#                                   — the nodes BECOME the Ceph cluster; VM disks on RBD.
+#                                   No ceph unit is enabled here; the cluster is created on
+#                                   demand from the UI (which enables ceph-mon@/ceph-mgr@/OSDs).
+say "Storage backend tools (LVM / ZFS / NFS / CIFS / Ceph / iSCSI / Ceph HCI)"
 apt_opt lvm2 thin-provisioning-tools zfsutils-linux \
-  nfs-common cifs-utils ceph-common open-iscsi
+  nfs-common cifs-utils ceph-common open-iscsi ceph
 
 # SPICE display modules: on newer Ubuntu, SPICE/QXL support for qemu is split into
 # a separate module package. Install it if present so display=spice works.

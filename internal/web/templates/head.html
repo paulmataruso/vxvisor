@@ -225,6 +225,7 @@
     <a href="/backups" class="{{if eq .Active "backups"}}on{{end}}"><svg class="ic"><use href="#i-archive"/></svg><span>Backups</span></a>
     <a href="/storage" class="{{if eq .Active "storage"}}on{{end}}"><svg class="ic"><use href="#i-database"/></svg><span>Pools</span></a>
     {{if .P.IsAdmin}}<a href="/shared" class="{{if eq .Active "shared"}}on{{end}}"><svg class="ic"><use href="#i-archive"/></svg><span>Shared Storage</span></a>{{end}}
+    {{if .P.IsAdmin}}<a href="/ceph" class="{{if eq .Active "ceph"}}on{{end}}"><svg class="ic"><use href="#i-database"/></svg><span>Ceph / HCI</span></a>{{end}}
     <div class="grp">Network</div>
     <a href="/networks" class="{{if eq .Active "networks"}}on{{end}}"><svg class="ic"><use href="#i-network"/></svg><span>Networks</span></a>
     {{if .P.IsAdmin}}<a href="/routing" class="{{if eq .Active "routing"}}on{{end}}"><svg class="ic"><use href="#i-route"/></svg><span>L3 Routing</span></a>{{end}}

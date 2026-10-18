@@ -177,6 +177,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /shared/iscsi/adopt", s.auth(s.iscsiAdopt))
 	mux.HandleFunc("POST /shared/overlay", s.auth(s.addOverlay))
 	mux.HandleFunc("POST /shared/overlay/{id}/delete", s.auth(s.deleteOverlay))
+
+	// Hyperconverged Ceph (RBD): stand up / grow the on-node cluster.
+	mux.HandleFunc("GET /ceph", s.auth(s.cephPage))
+	mux.HandleFunc("POST /ceph/bootstrap", s.auth(s.bootstrapCeph))
+	mux.HandleFunc("POST /ceph/osd", s.auth(s.addCephOSD))
 	mux.HandleFunc("GET /api/iscsi/discover", s.auth(s.apiISCSIDiscover))
 	mux.HandleFunc("GET /api/migrations", s.auth(s.apiMigrations))
 	mux.HandleFunc("GET /api/instances/{id}/guest", s.auth(s.apiGuestInfo))

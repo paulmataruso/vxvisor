@@ -30,6 +30,12 @@ func IsSharedStorage(path, backend string) bool {
 	if backend == "zvol" {
 		return false
 	}
+	// A Ceph RBD image lives in the distributed cluster, reachable by the same
+	// rbd: path from every node — inherently shared, so a cross-node live
+	// migration can reuse it without copying the disk.
+	if backend == "rbd" {
+		return true
+	}
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		real = path

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -292,14 +293,23 @@ func (s Spec) Args() []string {
 	// qcow2 (aio=native can block on ZFS/NFS). writeback uses the host page cache
 	// for speed; discard/detect-zeroes keep the thin qcow2 small.
 	diskOpts := "file=" + s.DiskPath + ",if=none,id=disk0,discard=unmap,detect-zeroes=unmap"
-	if s.DiskLockingOff {
-		diskOpts += ",file.locking=off"
-	}
-	if s.DiskRaw {
-		// Raw block (zvol): O_DIRECT + native AIO is fastest for real block devices.
+	switch {
+	case strings.HasPrefix(s.DiskPath, "rbd:"):
+		// Ceph RBD is a NETWORK block device, not a local fd: file.locking and the
+		// O_DIRECT AIO engines (aio=native/io_uring) don't apply. Raw format with
+		// the librbd writeback cache (cache=writeback) is the recommended setup.
+		diskOpts += ",format=raw,cache=writeback"
+	case s.DiskRaw:
+		// Raw local block (zvol/lvm): O_DIRECT + native AIO is fastest.
+		if s.DiskLockingOff {
+			diskOpts += ",file.locking=off"
+		}
 		diskOpts += ",format=raw,cache=none,aio=native"
-	} else {
+	default:
 		// qcow2 file (incl. on ZFS datasets): io_uring + writeback.
+		if s.DiskLockingOff {
+			diskOpts += ",file.locking=off"
+		}
 		diskOpts += ",format=qcow2,cache=writeback,aio=io_uring"
 	}
 	// num-queues = vCPUs gives a 1:1 virtqueue↔vCPU mapping so completion IRQs land

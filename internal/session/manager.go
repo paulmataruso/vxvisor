@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"vdxclone/internal/ceph"
 	"vdxclone/internal/cloudinit"
 	"vdxclone/internal/config"
 	"vdxclone/internal/db"
@@ -166,7 +167,7 @@ type CreateOpts struct {
 	NetworkID      int64  // port group (networks.id) to attach the NIC to; 0 = default/NAT
 	StoragePoolID  int64  // storage pool (storage_pools.id) for the disk; 0 = default disk dir
 	Display        string // vnc | spice
-	DiskBackend    string // qcow2 | zvol | lvm
+	DiskBackend    string // qcow2 | zvol | lvm | rbd
 	ZvolPool       string // ZFS pool/dataset name to create the zvol under (zvol backend)
 	Desktop        string // "" | xfce (cloud-init installs a lightweight desktop)
 	MachineType    string // q35|pc (default q35)
@@ -226,7 +227,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	diskDir := m.cfg.Paths.DiskDir
 	// For the LVM-thin backend the disk is a raw thin LV, not a file in a
 	// directory, so resolve the pool to its VG/thin-pool names instead of a path.
-	var lvmVG, lvmPool string
+	var lvmVG, lvmPool, rbdPool string
 	if o.DiskBackend == "lvm" {
 		var pname string
 		if err := m.db.QueryRow(`SELECT COALESCE(name,'') FROM storage_pools WHERE id=? AND kind='lvm'`, o.StoragePoolID).Scan(&pname); err != nil || pname == "" {
@@ -237,6 +238,12 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 			return nil, fmt.Errorf("malformed lvm pool name %q", pname)
 		}
 		lvmVG, lvmPool = parts[0], parts[1]
+	} else if o.DiskBackend == "rbd" {
+		// The Ceph pool name is stored in the storage_pools row's path (it is not a
+		// filesystem directory). The disk is an RBD image in that pool, not a file.
+		if err := m.db.QueryRow(`SELECT COALESCE(path,'') FROM storage_pools WHERE id=? AND kind='rbd'`, o.StoragePoolID).Scan(&rbdPool); err != nil || rbdPool == "" {
+			return nil, fmt.Errorf("the rbd backend needs a Ceph RBD pool (choose one)")
+		}
 	} else if o.StoragePoolID > 0 {
 		var ppath string
 		if err := m.db.QueryRow(`SELECT COALESCE(path,'') FROM storage_pools WHERE id=?`, o.StoragePoolID).Scan(&ppath); err == nil && ppath != "" {
@@ -254,6 +261,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	var created []string
 	zvolName := "" // set when the disk backend is a raw ZFS zvol
 	lvPath := ""   // set when the disk backend is a raw LVM thin volume
+	rbdImage := "" // set when the disk backend is a Ceph RBD image
 	fail := func(e error) (*Session, error) {
 		for _, f := range created {
 			_ = os.Remove(f)
@@ -263,6 +271,9 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 		}
 		if lvPath != "" {
 			_ = lvm.RemoveLV(lvPath)
+		}
+		if rbdImage != "" {
+			_ = ceph.RemoveImage(rbdPool, rbdImage)
 		}
 		return nil, e
 	}
@@ -327,6 +338,42 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 				return fail(err)
 			}
 		}
+	} else if o.DiskBackend == "rbd" {
+		// Ceph RBD: the disk is a raw block image in a distributed pool, shared
+		// across the cluster (so a live migration can reuse the same rbd: path).
+		// No COW-on-COW, no local file — the image IS the VM's disk.
+		diskBackend = "rbd"
+		if !ceph.Bootstrapped() {
+			return fail(fmt.Errorf("the rbd backend requires a running Ceph cluster"))
+		}
+		sizeGB := o.DiskGB
+		if sizeGB <= 0 {
+			sizeGB = 20
+		}
+		if !blankInstall { // the image must be at least the base image's virtual size
+			if vb, err := qemu.VirtualSizeBytes(imgPath); err == nil && vb > int64(sizeGB)<<30 {
+				sizeGB = int(vb>>30) + 1
+			}
+		}
+		_, _ = ceph.EnsureClientKeyring(rbdPool) // QEMU keyring (idempotent)
+		imgName := "vdx-" + id[:8]
+		if blankInstall {
+			if err := ceph.CreateImage(rbdPool, imgName, int64(sizeGB)<<30); err != nil {
+				return fail(err)
+			}
+		} else {
+			// qemu-img convert auto-creates the rbd image and fills it as raw.
+			if err := ceph.ImportImage(rbdPool, imgName, imgPath); err != nil {
+				return fail(err)
+			}
+			if o.DiskGB > 0 { // grow to the requested size if larger than the import
+				if err := ceph.ResizeImage(rbdPool, imgName, int64(sizeGB)<<30); err != nil {
+					return fail(err)
+				}
+			}
+		}
+		rbdImage = imgName // arm cleanup
+		disk = ceph.RBDPath(rbdPool, imgName)
 	} else {
 		disk = filepath.Join(diskDir, id+".qcow2")
 		if blankInstall {
@@ -674,6 +721,16 @@ func (m *Manager) Resize(id string, cpus, memMB, diskGB int) error {
 			if diskGB > s.DiskGB {
 				if err := lvm.ExtendLV(s.DiskPath, int64(diskGB)<<30); err != nil {
 					return err
+				}
+			}
+		} else if s.DiskBackend == "rbd" {
+			// Grow the RBD image (Ceph refuses to shrink). The guest expands its
+			// filesystem on next boot.
+			if diskGB > s.DiskGB {
+				if pool, image, ok := ceph.ParseRBD(s.DiskPath); ok {
+					if err := ceph.ResizeImage(pool, image, int64(diskGB)<<30); err != nil {
+						return err
+					}
 				}
 			}
 		} else {
@@ -1312,6 +1369,13 @@ func (m *Manager) Purge(id string) error {
 	if backend == "lvm" && strings.HasPrefix(disk, "/dev/") {
 		_ = lvm.RemoveLV(disk)
 		disk = "" // don't os.Remove a device node
+	}
+	// An rbd-backed disk is a Ceph RBD image — remove it via rbd rm, not os.Remove.
+	if backend == "rbd" {
+		if pool, image, ok := ceph.ParseRBD(disk); ok {
+			_ = ceph.RemoveImage(pool, image)
+		}
+		disk = "" // not a local path
 	}
 	for _, f := range []string{disk, vars, seed,
 		filepath.Join(m.cfg.Paths.DiskDir, id+".vncpw"),
