@@ -8,14 +8,18 @@ package vmware
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/nfc"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -33,7 +37,8 @@ type Creds struct {
 
 // Client wraps a connected govmomi client.
 type Client struct {
-	gc *govmomi.Client
+	gc       *govmomi.Client
+	insecure bool
 }
 
 // DiskInfo describes one virtual disk on a source VM.
@@ -92,7 +97,7 @@ func Connect(ctx context.Context, c Creds) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to vSphere: %w", err)
 	}
-	return &Client{gc: gc}, nil
+	return &Client{gc: gc, insecure: c.Insecure}, nil
 }
 
 // Close logs out.
@@ -249,6 +254,27 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 		}
 	}
 	logf("source disk capacity %d MiB nominal (thin+compressed stream — actual download is usually much less)", nominalBytes/(1<<20))
+
+	// SPEED: when connected to vCenter, the disk URLs come back with host "*",
+	// which govmomi rewrites to the host WE connected to — vCenter. That proxies
+	// every byte through vCenter's NFC service, which is heavily throttled. Pull
+	// directly from the ESXi host that owns the VM instead (what virt-v2v/Veeam
+	// do): typically several times faster. Best-effort — we only switch if the
+	// host is actually reachable from here, else we keep the proxied path.
+	directHost := ""
+	thumbs := map[string]string{} // vmdk filename -> host SSL thumbprint (for secure mode)
+	if c.gc.ServiceContent.About.ApiType == "VirtualCenter" {
+		if ha := c.ownerHostAddr(ctx, ref); ha != "" {
+			if reachableTCP(net.JoinHostPort(ha, "443")) {
+				directHost = ha
+				thumbs = c.leaseThumbprints(ctx, lease)
+				logf("DIRECT TRANSFER: pulling from ESXi host %s, bypassing the vCenter NFC proxy (faster)", ha)
+			} else {
+				logf("ESXi host %s is not reachable on :443 from here — using the slower vCenter-proxied transfer (open that path for full speed)", ha)
+			}
+		}
+	}
+
 	var files []string
 	cleanup := func() {
 		for _, f := range files {
@@ -261,43 +287,70 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 			continue // skip .ovf / .mf / .nvram — we only want the disks
 		}
 		local := filepath.Join(destDir, "."+sanitizeName(item.Path))
+		// Redirect this disk's transfer straight to the owning ESXi host.
+		rewroteFrom := "" // non-empty if we redirected this disk to the ESXi host
+		if directHost != "" && item.URL != nil {
+			rewroteFrom = item.URL.Host
+			if _, port, e := net.SplitHostPort(rewroteFrom); e == nil && port != "" {
+				item.URL.Host = net.JoinHostPort(directHost, port)
+			} else {
+				item.URL.Host = directHost
+			}
+			if !c.insecure {
+				if tp := thumbs[path.Base(item.URL.Path)]; tp != "" {
+					c.gc.Client.SetThumbprint(item.URL.Host, tp)
+				}
+			}
+			logf("  → disk %q routed direct to %s (was %s)", item.Path, item.URL.Host, rewroteFrom)
+		}
 		logf("downloading disk %q (%d MiB) → %s", item.Path, item.Size/(1<<20), filepath.Base(local))
 		diskStart := time.Now()
 
-		// Download in a goroutine; poll the output file for bytes + rate so the UI
-		// can show "X / Y GB @ Z MB/s".
-		errCh := make(chan error, 1)
-		go func() { errCh <- lease.DownloadFile(ctx, local, item, soap.Download{}) }()
-		tick := time.NewTicker(time.Second)
-		lastBytes, lastT := completedBytes, time.Now()
-	poll:
-		for {
-			select {
-			case derr := <-errCh:
-				tick.Stop()
-				if derr != nil {
-					_ = os.Remove(local)
-					cleanup()
-					_ = lease.Abort(ctx, nil)
-					logf("download of %q FAILED after %s: %v", item.Path, time.Since(diskStart).Round(time.Second), derr)
-					return nil, fmt.Errorf("download %s: %w", item.Path, derr)
-				}
-				break poll
-			case now := <-tick.C:
-				cur := completedBytes
-				if fi, e := os.Stat(local); e == nil {
-					cur += fi.Size()
-				}
-				if prog != nil {
-					dt := now.Sub(lastT).Seconds()
-					var bps int64
-					if dt > 0 {
-						bps = int64(float64(cur-lastBytes) / dt)
+		// One download attempt: stream in a goroutine while polling the output file
+		// for bytes + rate so the UI can show "X downloaded @ Z MB/s".
+		downloadOnce := func() error {
+			_ = os.Remove(local) // drop any partial from a previous attempt
+			errCh := make(chan error, 1)
+			go func() { errCh <- lease.DownloadFile(ctx, local, item, soap.Download{}) }()
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			lastBytes, lastT := completedBytes, time.Now()
+			for {
+				select {
+				case derr := <-errCh:
+					return derr
+				case now := <-tick.C:
+					cur := completedBytes
+					if fi, e := os.Stat(local); e == nil {
+						cur += fi.Size()
 					}
-					prog(ExportProgress{DoneBytes: cur, NominalBytes: nominalBytes, BytesPerSec: bps})
-					lastBytes, lastT = cur, now
+					if prog != nil {
+						dt := now.Sub(lastT).Seconds()
+						var bps int64
+						if dt > 0 {
+							bps = int64(float64(cur-lastBytes) / dt)
+						}
+						prog(ExportProgress{DoneBytes: cur, NominalBytes: nominalBytes, BytesPerSec: bps})
+						lastBytes, lastT = cur, now
+					}
 				}
 			}
+		}
+		derr := downloadOnce()
+		// If the direct-to-host transfer failed, fall back once to the original
+		// (vCenter-proxied) URL so a blocked direct path never breaks the import.
+		if derr != nil && rewroteFrom != "" && ctx.Err() == nil {
+			logf("direct transfer of %q failed (%v) — falling back to the vCenter-proxied path", item.Path, derr)
+			item.URL.Host = rewroteFrom
+			directHost = "" // don't try direct for the remaining disks either
+			derr = downloadOnce()
+		}
+		if derr != nil {
+			_ = os.Remove(local)
+			cleanup()
+			_ = lease.Abort(ctx, nil)
+			logf("download of %q FAILED after %s: %v", item.Path, time.Since(diskStart).Round(time.Second), derr)
+			return nil, fmt.Errorf("download %s: %w", item.Path, derr)
 		}
 		var wrote int64
 		if fi, e := os.Stat(local); e == nil {
@@ -332,4 +385,50 @@ func sanitizeName(p string) string {
 	p = strings.ReplaceAll(p, "/", "_")
 	p = strings.ReplaceAll(p, "..", "_")
 	return "vdximport-" + p
+}
+
+// ownerHostAddr returns the management address (name/IP as vCenter knows it) of
+// the ESXi host currently running the VM, or "" if it can't be determined. Used
+// to pull disks directly from the host rather than via the vCenter NFC proxy.
+func (c *Client) ownerHostAddr(ctx context.Context, ref types.ManagedObjectReference) string {
+	pc := property.DefaultCollector(c.gc.Client)
+	var vm mo.VirtualMachine
+	if err := pc.RetrieveOne(ctx, ref, []string{"runtime.host"}, &vm); err != nil || vm.Runtime.Host == nil {
+		return ""
+	}
+	var hs mo.HostSystem
+	if err := pc.RetrieveOne(ctx, *vm.Runtime.Host, []string{"name"}, &hs); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hs.Name)
+}
+
+// leaseThumbprints maps each disk's vmdk filename to the SSL thumbprint of the
+// host serving it, read from the raw lease info — needed so a direct-to-host
+// transfer verifies TLS when the connection is not insecure.
+func (c *Client) leaseThumbprints(ctx context.Context, lease *nfc.Lease) map[string]string {
+	out := map[string]string{}
+	var le mo.HttpNfcLease
+	if err := property.DefaultCollector(c.gc.Client).RetrieveOne(ctx, lease.Reference(), []string{"info"}, &le); err != nil || le.Info == nil {
+		return out
+	}
+	for _, d := range le.Info.DeviceUrl {
+		if d.SslThumbprint == "" {
+			continue
+		}
+		if u, err := url.Parse(d.Url); err == nil {
+			out[path.Base(u.Path)] = d.SslThumbprint
+		}
+	}
+	return out
+}
+
+// reachableTCP reports whether a TCP connection to hostport succeeds quickly.
+func reachableTCP(hostport string) bool {
+	conn, err := net.DialTimeout("tcp", hostport, 3*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

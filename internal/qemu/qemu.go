@@ -163,9 +163,17 @@ func CreateBlank(path string, gib int) error {
 // ConvertToQcow2 copies any-format source to a new qcow2 at dst (used by offline
 // storage vMotion). The source is only READ; dst is created fresh.
 func ConvertToQcow2(src, dst string) error {
-	cmd := exec.Command("qemu-img", "convert", "-O", "qcow2", src, dst)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("qemu-img convert to qcow2: %v: %s", err, out)
+	// -m 16: up to 16 coroutines copying in parallel; -W: out-of-order writes
+	// (both markedly faster for a large convert); -t none / -T none: skip the host
+	// page cache so the convert doesn't evict the running VMs' working set.
+	cmd := exec.Command("qemu-img", "convert", "-m", "16", "-W",
+		"-t", "none", "-T", "none", "-O", "qcow2", src, dst)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		// Older qemu-img / some inputs reject -T/-t; retry with a safe subset.
+		cmd = exec.Command("qemu-img", "convert", "-m", "16", "-W", "-O", "qcow2", src, dst)
+		if out2, err2 := cmd.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("qemu-img convert to qcow2: %v: %s", err2, out2)
+		}
 	}
 	return nil
 }
