@@ -285,25 +285,36 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 		return fail(fmt.Errorf("target failed verification: %w", err))
 	}
 
-	// 3. Per-VM OVMF vars + seed: relocate alongside a qcow2 target; for a block
-	//    backend they stay in the disk dir (always reachable), as at create time.
-	newVars, newSeed := s.OVMFVarsPath, s.SeedPath
+	// 3. The per-VM NVRAM + seed travel WITH the disk: to the target pool dir for a
+	//    qcow2 disk, or the default disk dir for a block-backed disk (which has no
+	//    directory of its own, so its metadata always lives in the disk dir). A
+	//    relocation is skipped when the file is already there.
+	metaDir := m.cfg.Paths.DiskDir
 	if tgt.backend == "qcow2" {
-		if s.OVMFVarsPath != "" {
-			nv := filepath.Join(tgt.dir, s.ID+".ovmf_vars.fd")
-			if err := copyRegular(s.OVMFVarsPath, nv); err != nil {
-				cleanupTarget()
-				return fail(fmt.Errorf("copy firmware vars: %w", err))
-			}
-			newVars = nv
+		metaDir = tgt.dir
+	}
+	newVars, newSeed := s.OVMFVarsPath, s.SeedPath
+	if s.OVMFVarsPath != "" && filepath.Clean(filepath.Dir(s.OVMFVarsPath)) != filepath.Clean(metaDir) {
+		if err := os.MkdirAll(metaDir, 0o750); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("target metadata dir: %w", err))
 		}
-		if s.SeedPath != "" {
-			ns := filepath.Join(tgt.dir, s.ID+".seed.iso")
-			if err := copyRegular(s.SeedPath, ns); err == nil {
-				newSeed = ns
-			}
+		nv := filepath.Join(metaDir, s.ID+".ovmf_vars.fd")
+		if err := copyRegular(s.OVMFVarsPath, nv); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("copy firmware vars: %w", err))
 		}
-		m.chownRunAs(tgt.disk, newVars, newSeed)
+		newVars = nv
+	}
+	if s.SeedPath != "" && filepath.Clean(filepath.Dir(s.SeedPath)) != filepath.Clean(metaDir) {
+		ns := filepath.Join(metaDir, s.ID+".seed.iso")
+		if err := copyRegular(s.SeedPath, ns); err == nil {
+			newSeed = ns
+		}
+	}
+	m.chownRunAs(newVars, newSeed)
+	if tgt.backend == "qcow2" {
+		m.chownRunAs(tgt.disk)
 		fsyncFile(tgt.disk)
 	}
 
@@ -317,8 +328,11 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 
 	// 5. Reclaim the source now that the target is committed and durable.
 	m.reclaimMovedSource(s.DiskBackend, src)
-	if tgt.backend == "qcow2" && s.OVMFVarsPath != "" && newVars != s.OVMFVarsPath {
+	if s.OVMFVarsPath != "" && newVars != s.OVMFVarsPath {
 		retainAside(s.OVMFVarsPath)
+	}
+	if s.SeedPath != "" && newSeed != s.SeedPath {
+		retainAside(s.SeedPath)
 	}
 	log.Printf("vmotion: offline-moved %s disk to %s (backend %s→%s)", s.ID, tgt.disk, s.DiskBackend, tgt.backend)
 	return nil
