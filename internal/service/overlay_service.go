@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -11,6 +12,58 @@ import (
 
 	"vdxclone/internal/sharedstg"
 )
+
+// ClusterPeerUnderlayIPs returns the underlay IPs of the OTHER live cluster
+// members, for auto-peering a VXLAN segment across the cluster. It prefers each
+// peer's cluster-net address (the dedicated inter-node link) and falls back to
+// its management address, stripping any port. Empty on a single-host install.
+func (s *Service) ClusterPeerUnderlayIPs(p *Principal) []string {
+	if p == nil || !p.IsAdmin || s.role == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, pr := range s.role.Peers() {
+		if pr.Self {
+			continue
+		}
+		addr := pr.ClusterAddr
+		if addr == "" {
+			addr = pr.MgmtAddr
+		}
+		if h, _, err := net.SplitHostPort(addr); err == nil {
+			addr = h
+		}
+		addr = strings.TrimSpace(addr)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+	return out
+}
+
+// MergePeerCSV unions a manual peer CSV with auto-discovered peer IPs, deduped.
+func MergePeerCSV(manual string, auto []string) string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	for _, v := range strings.Split(manual, ",") {
+		add(v)
+	}
+	for _, v := range auto {
+		add(v)
+	}
+	return strings.Join(out, ",")
+}
 
 // Storage overlays (VXLAN). An overlay gives the cluster a shared L2 for storage
 // traffic that rides over an existing underlay (e.g. the management network) as

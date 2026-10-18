@@ -246,7 +246,12 @@
     <label class="fld">VNI<input type="number" name="vni" min="1" max="16777215" placeholder="100" required></label>
     <label class="fld">Underlay NIC<input type="text" name="underlay" placeholder="e.g. eth0 / bond0" required></label>
     <label class="fld">Underlay local IP<input type="text" name="vxlan_local" placeholder="(optional) this node's underlay IP"></label>
-    <label class="fld full">Peer underlay IPs<input type="text" name="vxlan_peers" placeholder="comma-separated other-node IPs, e.g. 10.10.2.160"></label>
+    <label class="fld full">Peer underlay IPs<input type="text" id="vxlan-peers" name="vxlan_peers" placeholder="comma-separated other-node IPs, e.g. 10.10.2.160"></label>
+    {{if .ClusterPeers}}
+    <label class="fld full" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="vxlan_autopeer" value="1" style="width:auto" checked> Auto-peer with cluster members <span class="muted mono" style="font-size:11px">({{range $i,$ip := .ClusterPeers}}{{if $i}}, {{end}}{{$ip}}{{end}})</span></label>
+    {{else}}
+    <p class="muted full" style="margin:0;font-size:11px">No other cluster members detected — add peers manually above, or join nodes to the cluster and they can be auto-peered.</p>
+    {{end}}
     <label class="fld">UDP port<input type="number" name="vxlan_dstport" value="4789"></label>
     <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" title="underlay MTU minus ~50"></label>
     <label class="fld">Guest CIDR<input type="text" name="cidr" placeholder="(optional) 10.100.0.0/24"></label>

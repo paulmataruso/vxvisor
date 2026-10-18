@@ -17,10 +17,11 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	bonds, _ := s.svc.ListBonds(p)
 	vswitches, _ := s.svc.ListVSwitches(p)
 	s.render(w, p, "networks.html", "networks", map[string]any{
-		"Networks":   list,
-		"Bonds":      bonds,
-		"VSwitches":  vswitches,
-		"MgmtBridge": s.svc.MgmtInterface(),
+		"Networks":     list,
+		"Bonds":        bonds,
+		"VSwitches":    vswitches,
+		"MgmtBridge":   s.svc.MgmtInterface(),
+		"ClusterPeers": s.svc.ClusterPeerUnderlayIPs(p),
 	})
 }
 
@@ -40,6 +41,11 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *servic
 		PoolStart: r.FormValue("pool_start"), PoolEnd: r.FormValue("pool_end"),
 		VNI: vni, Underlay: r.FormValue("underlay"), VXLANLocal: r.FormValue("vxlan_local"),
 		VXLANPeers: r.FormValue("vxlan_peers"), DstPort: dstport, MTU: mtu,
+	}
+	// Auto-peer with the other cluster members (their cluster-net underlay IPs),
+	// so a VXLAN segment spans the cluster without hand-typing every peer.
+	if r.FormValue("vxlan_autopeer") == "1" {
+		n.VXLANPeers = service.MergePeerCSV(n.VXLANPeers, s.svc.ClusterPeerUnderlayIPs(p))
 	}
 	if _, err := s.svc.CreateNetwork(p, n, clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
