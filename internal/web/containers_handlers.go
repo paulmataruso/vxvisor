@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"os"
 	"strconv"
 
 	"vdxclone/internal/service"
@@ -11,11 +12,16 @@ func (s *Server) containersPage(w http.ResponseWriter, r *http.Request, p *servi
 	list, _ := s.svc.ListContainers(p)
 	ifaces, _ := s.svc.HostInterfaces(p)
 	pools, _ := s.svc.ListPools(p)
+	localNode := s.svc.ClusterSelfName()
+	if localNode == "" {
+		localNode, _ = os.Hostname()
+	}
 	s.render(w, p, "containers.html", "containers", map[string]any{
 		"Containers": list,
 		"Interfaces": ifaces,
 		"Pools":      pools,
 		"LXCReady":   s.svc.LXCAvailable(p),
+		"LocalNode":  localNode,
 	})
 }
 

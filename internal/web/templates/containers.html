@@ -7,11 +7,13 @@
   {{if not .LXCReady}}<div class="empty">LXC tools not installed on this host (<span class="mono">lxc</span>).</div>
   {{else if .Containers}}
   <table>
-    <tr><th>Name</th><th>Template</th><th>Spec</th><th>State</th><th>IP</th><th></th></tr>
+    <tr><th>Name</th><th>Location</th><th>Template</th><th>Storage</th><th>Spec</th><th>State</th><th>IP</th><th></th></tr>
     {{range .Containers}}
     <tr{{if eq .Status "creating"}} data-creating{{end}}>
-      <td><strong>{{.Name}}</strong>{{if $.Clustered}} <span class="host-tag">{{$.NodeName}}</span>{{end}}</td>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="host-tag">{{$.LocalNode}}</span></td>
       <td class="muted">{{.Dist}}/{{.Release}} · {{.Arch}}</td>
+      <td class="muted">{{if .Storage}}{{.Storage}}{{else}}—{{end}}</td>
       <td class="muted">{{.CPUs}} vCPU · {{.MemoryMB}} MB{{if .Bridge}} · {{.Bridge}}{{end}}</td>
       <td>
         {{if eq .Status "creating"}}<span class="pill stopped"><span class="vdx-spin"></span>creating</span>

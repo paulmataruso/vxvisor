@@ -55,6 +55,51 @@ func basePath(lxcpath string) string {
 	return "/var/lib/lxc"
 }
 
+// StorageLabel describes where a container's rootfs lives — the backing store
+// plus its pool/target — read from the container config's lxc.rootfs.path. Used
+// for the containers list UI (parallel to a VM's StorageLabel).
+func StorageLabel(name, lxcpath string) string {
+	b, err := os.ReadFile(filepath.Join(basePath(lxcpath), name, "config"))
+	if err != nil {
+		if lxcpath != "" {
+			return "Directory · " + lxcpath
+		}
+		return "Directory"
+	}
+	rootfs := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "lxc.rootfs.path") {
+			if i := strings.IndexByte(line, '='); i >= 0 {
+				rootfs = strings.TrimSpace(line[i+1:])
+			}
+		}
+	}
+	switch {
+	case strings.HasPrefix(rootfs, "rbd:"): // rbd:/dev/rbd/<pool>/<image>
+		p := strings.TrimPrefix(strings.TrimPrefix(rootfs, "rbd:"), "/dev/rbd/")
+		pool := p
+		if i := strings.IndexByte(p, '/'); i > 0 {
+			pool = p[:i]
+		}
+		return "Ceph RBD · " + pool
+	case strings.HasPrefix(rootfs, "lvm:"): // lvm:/dev/<vg>/<lv>
+		p := strings.TrimPrefix(rootfs, "lvm:/dev/")
+		vg := p
+		if i := strings.IndexByte(p, '/'); i > 0 {
+			vg = p[:i]
+		}
+		return "LVM thin · " + vg
+	case strings.HasPrefix(rootfs, "zfs:"):
+		return "ZFS"
+	default: // dir:/path or a bare directory path
+		if lxcpath != "" {
+			return "Directory · " + lxcpath
+		}
+		return "Directory"
+	}
+}
+
 // Container is the live state of one container (from lxc-info).
 type Container struct {
 	Name     string `json:"name"`

@@ -28,6 +28,7 @@ type ContainerRow struct {
 	MemoryMB  int
 	Status    string // creating|stopped|error (DB)
 	CreatedAt string
+	Storage   string // backend + pool/target of the rootfs (from the lxc config)
 	// live (from lxc-info)
 	State    string
 	PID      int
@@ -62,6 +63,7 @@ func (s *Service) ListContainers(p *Principal) ([]ContainerRow, error) {
 		if c.Status != "creating" && c.Status != "error" {
 			info, _ := lxc.Info(c.Name, c.Lxcpath)
 			c.State, c.PID, c.IP, c.MemBytes = info.State, info.PID, info.IP, info.MemBytes
+			c.Storage = lxc.StorageLabel(c.Name, c.Lxcpath)
 		} else {
 			c.State = c.Status
 		}
