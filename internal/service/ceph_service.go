@@ -72,9 +72,14 @@ func (s *Service) BootstrapCeph(p *Principal, poolName, osdDisk, ip string) erro
 	if err != nil {
 		return err
 	}
-	// Never wipe an in-use disk (OS/boot/live pool member).
-	if d, note, used := deviceInUse([]string{osdDisk}); used {
-		return fmt.Errorf("disk %s is in use (%s) — refusing to wipe it for an OSD", d, note)
+	// Never wipe an in-use disk (OS/boot/live pool member). A disk that is already
+	// THIS cluster's OSD is exempt — otherwise a bootstrap that failed after the
+	// OSD was added could never be retried (the disk now reads as "in use"), and
+	// the remaining steps (pool/keyring/registration) are all idempotent anyway.
+	if !ceph.DiskIsOSD(osdDisk) {
+		if d, note, used := deviceInUse([]string{osdDisk}); used {
+			return fmt.Errorf("disk %s is in use (%s) — refusing to wipe it for an OSD", d, note)
+		}
 	}
 	// Single node today ⇒ replica size 1 (non-redundant until a 2nd node joins).
 	size := 1

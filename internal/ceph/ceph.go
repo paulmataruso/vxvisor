@@ -227,11 +227,33 @@ func waitForMon(timeout time.Duration) error {
 	return fmt.Errorf("mon did not reach quorum in time: %v", last)
 }
 
+// DiskIsOSD reports whether disk is already consumed as a Ceph OSD on this host.
+// A resumed/retried bootstrap uses this to skip re-adding the OSD (and to skip
+// the caller's in-use guard, which is meant for foreign disks) instead of
+// failing on the now-consumed disk.
+func DiskIsOSD(disk string) bool {
+	if disk == "" {
+		return false
+	}
+	// `ceph-volume lvm list <disk>` prints a "====== osd.N ======" block per OSD
+	// backed by the device, and nothing (exit 0) when the disk is not an OSD.
+	out, err := run(30*time.Second, "ceph-volume", "lvm", "list", disk)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(out, "====== osd")
+}
+
 // AddOSD consumes a whole disk as a BlueStore OSD. DESTRUCTIVE — the caller must
-// have already verified the disk is not in use (service.deviceInUse).
+// have already verified the disk is not in use (service.deviceInUse). It is
+// idempotent: a disk that is already an OSD on this host is left untouched so a
+// retried bootstrap converges rather than erroring on the consumed disk.
 func AddOSD(disk string) error {
 	if disk == "" {
 		return fmt.Errorf("no disk specified")
+	}
+	if DiskIsOSD(disk) {
+		return nil
 	}
 	// ceph-volume reads the bootstrap-osd keyring to self-register the OSD.
 	if _, err := run(5*time.Minute, "ceph-volume", "lvm", "create", "--data", disk); err != nil {
@@ -259,7 +281,16 @@ func CreatePool(name string, size int) error {
 	if _, err := run(30*time.Second, "rbd", "pool", "init", name); err != nil {
 		return err
 	}
-	if _, err := run(30*time.Second, "ceph", "osd", "pool", "set", name, "size", fmt.Sprint(size)); err != nil {
+	// A replica size of 1 (single-node, intentionally non-redundant) is refused by
+	// default in modern Ceph — it must be explicitly allowed and confirmed.
+	sizeArgs := []string{"osd", "pool", "set", name, "size", fmt.Sprint(size)}
+	if size == 1 {
+		if _, err := run(15*time.Second, "ceph", "config", "set", "global", "mon_allow_pool_size_one", "true"); err != nil {
+			return err
+		}
+		sizeArgs = append(sizeArgs, "--yes-i-really-mean-it")
+	}
+	if _, err := run(30*time.Second, "ceph", sizeArgs...); err != nil {
 		return err
 	}
 	if _, err := run(30*time.Second, "ceph", "osd", "pool", "set", name, "min_size", "1"); err != nil {
@@ -279,7 +310,18 @@ func EnsureClientKeyring(pool string) (string, error) {
 	}
 	args := append([]string{"auth", "get-or-create", "client." + ClientName}, caps...)
 	args = append(args, "-o", ClientKeyring)
-	if _, err := run(15*time.Second, "ceph", args...); err != nil {
+	// get-or-create is idempotent; retry briefly because the mon/mgr can be
+	// momentarily busy right after a fresh pool is created and initialised.
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		if _, err = run(15*time.Second, "ceph", args...); err == nil {
+			break
+		}
+	}
+	if err != nil {
 		return "", fmt.Errorf("client.%s keyring: %w", ClientName, err)
 	}
 	// World-readable: it only grants pool-scoped RBD access, and the QEMU run-as
