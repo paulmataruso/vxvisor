@@ -78,6 +78,7 @@ type CreateContainerInput struct {
 	CPUs          int
 	MemoryMB      int
 	StoragePoolID int64
+	DiskGB        int // rootfs size for an RBD-backed container (GiB; default 10)
 	Copies        int // >1 creates that many independent containers with generated names
 }
 
@@ -107,12 +108,19 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 	if copies > maxContainerCopies {
 		return fmt.Errorf("at most %d copies at a time", maxContainerCopies)
 	}
-	// rootfs location: a chosen storage pool's path (under /lxc), else default.
+	// rootfs location: a chosen storage pool decides where the rootfs lives. An rbd
+	// pool (a Ceph block pool, no directory) puts the rootfs on an RBD image via
+	// liblxc's native backing store; any other pool uses a directory under its path.
 	lxcpath := ""
+	rbdPool := ""
 	if in.StoragePoolID > 0 {
-		var ppath string
-		if err := s.db.QueryRow(`SELECT COALESCE(path,'') FROM storage_pools WHERE id=?`, in.StoragePoolID).Scan(&ppath); err == nil && ppath != "" {
-			lxcpath = filepath.Join(ppath, "lxc")
+		var kind, ppath string
+		if err := s.db.QueryRow(`SELECT kind, COALESCE(path,'') FROM storage_pools WHERE id=?`, in.StoragePoolID).Scan(&kind, &ppath); err == nil {
+			if kind == "rbd" {
+				rbdPool = ppath // the Ceph pool name
+			} else if ppath != "" {
+				lxcpath = filepath.Join(ppath, "lxc")
+			}
 		}
 	}
 	bridge := in.Bridge
@@ -159,7 +167,12 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 	// download races and resource spikes.
 	go func() {
 		for _, b := range batch {
-			if err := lxc.Create(b.name, lxcpath, in.Dist, in.Release, "amd64", bridge, b.mac, in.CPUs, in.MemoryMB); err != nil {
+			err := lxc.Create(lxc.CreateOpts{
+				Name: b.name, Lxcpath: lxcpath, Dist: in.Dist, Release: in.Release,
+				Arch: "amd64", Bridge: bridge, MAC: b.mac, CPUs: in.CPUs, MemMB: in.MemoryMB,
+				RBDPool: rbdPool, RBDName: "lxc-" + b.name, RBDSizeG: in.DiskGB,
+			})
+			if err != nil {
 				_, _ = s.db.Exec(`UPDATE containers SET status='error' WHERE id=?`, b.id)
 				continue
 			}

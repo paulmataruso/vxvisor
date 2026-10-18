@@ -27,6 +27,7 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request, p *serv
 	cpus, _ := strconv.Atoi(r.FormValue("cpus"))
 	mem, _ := strconv.Atoi(r.FormValue("memory_mb"))
 	copies, _ := strconv.Atoi(r.FormValue("copies"))
+	diskGB, _ := strconv.Atoi(r.FormValue("disk_gb"))
 	in := service.CreateContainerInput{
 		Name:          r.FormValue("name"),
 		Dist:          r.FormValue("dist"),
@@ -35,6 +36,7 @@ func (s *Server) createContainer(w http.ResponseWriter, r *http.Request, p *serv
 		CPUs:          cpus,
 		MemoryMB:      mem,
 		StoragePoolID: atoi(r.FormValue("storage_pool_id")),
+		DiskGB:        diskGB,
 		Copies:        copies,
 	}
 	if err := s.svc.CreateContainer(p, in, clientIP(r)); err != nil {

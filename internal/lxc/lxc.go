@@ -64,23 +64,67 @@ type Container struct {
 	MemBytes int64  `json:"mem_bytes"`
 }
 
-// Create builds a container from the download template (dist/release/arch) under
-// lxcpath, then applies NIC + CPU/memory limits to its config.
-func Create(name, lxcpath, dist, release, arch, bridge, mac string, cpus, memMB int) error {
-	if arch == "" {
-		arch = "amd64"
+// CreateOpts parameterises a new container. When RBDPool is set the rootfs lives
+// on a Ceph RBD image via liblxc's native rbd backing store (-B rbd) — liblxc
+// creates the image, maps it as a kernel block device, lays down a filesystem and
+// mounts it as the rootfs (and maps/unmaps it on start/stop). Otherwise the rootfs
+// is a directory under Lxcpath (default /var/lib/lxc).
+type CreateOpts struct {
+	Name     string
+	Lxcpath  string
+	Dist     string
+	Release  string
+	Arch     string
+	Bridge   string
+	MAC      string
+	CPUs     int
+	MemMB    int
+	RBDPool  string // Ceph pool name — non-empty ⇒ rootfs on RBD (-B rbd)
+	RBDName  string // RBD image name (defaults to "lxc-"+Name)
+	RBDUser  string // cephx id used for map/auth (defaults to "admin")
+	RBDSizeG int    // rootfs size in GiB (defaults to 10)
+}
+
+// Create builds a container from the download template (dist/release/arch), then
+// applies NIC + CPU/memory limits to its config.
+func Create(o CreateOpts) error {
+	if o.Arch == "" {
+		o.Arch = "amd64"
 	}
-	if lxcpath != "" {
-		if err := os.MkdirAll(lxcpath, 0o755); err != nil {
-			return err
+	var args []string
+	if o.RBDPool != "" {
+		img := o.RBDName
+		if img == "" {
+			img = "lxc-" + o.Name
 		}
+		user := o.RBDUser
+		if user == "" {
+			user = "admin"
+		}
+		size := o.RBDSizeG
+		if size <= 0 {
+			size = 10
+		}
+		// The container's config still lives under the default lxcpath; the rbd
+		// backing store owns the rootfs device, so Lxcpath is not used here.
+		args = []string{"-n", o.Name, "-B", "rbd",
+			"--rbdpool", o.RBDPool, "--rbdname", img, "--rbduser", user,
+			"--fstype", "ext4", "--fssize", fmt.Sprintf("%dG", size),
+			"-t", "download", "--",
+			"--dist", o.Dist, "--release", o.Release, "--arch", o.Arch}
+	} else {
+		if o.Lxcpath != "" {
+			if err := os.MkdirAll(o.Lxcpath, 0o755); err != nil {
+				return err
+			}
+		}
+		args = append(pathArgs(o.Lxcpath), "-n", o.Name, "-t", "download", "--",
+			"--dist", o.Dist, "--release", o.Release, "--arch", o.Arch)
 	}
-	args := append(pathArgs(lxcpath), "-n", name, "-t", "download", "--",
-		"--dist", dist, "--release", release, "--arch", arch)
 	if _, err := run(600*time.Second, "lxc-create", args...); err != nil {
 		return err
 	}
-	return applyConfig(name, lxcpath, bridge, mac, cpus, memMB)
+	return applyConfig(o.Name, o.Lxcpath, o.Bridge, o.MAC, o.CPUs, o.MemMB)
 }
 
 // applyConfig appends vdxd-managed NIC + limit settings to the container config.
