@@ -182,11 +182,11 @@ fi
 # ---- routing stack (FRR) -------------------------------------------------
 # vdxd writes /etc/frr/frr.conf and reloads via /usr/lib/frr/frr-reload.py, but
 # FRR ships with every routing daemon DISABLED. Turn on the ones vdxd drives
-# (ospfd/bgpd/staticd) in /etc/frr/daemons, then enable the service. We never
-# touch frr.conf here — that file is owned by vdxd.
+# (ospfd/bgpd/eigrpd/staticd) in /etc/frr/daemons, then enable the service. We
+# never touch frr.conf here — that file is owned by vdxd.
 if [ -f /etc/frr/daemons ]; then
-  say "Enabling FRR routing daemons (ospfd, bgpd, staticd)"
-  for d in ospfd bgpd staticd; do
+  say "Enabling FRR routing daemons (ospfd, bgpd, eigrpd, staticd)"
+  for d in ospfd bgpd eigrpd staticd; do
     if grep -q "^${d}=" /etc/frr/daemons; then
       sed -i "s/^${d}=.*/${d}=yes/" /etc/frr/daemons
     else

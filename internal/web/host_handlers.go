@@ -268,5 +268,16 @@ func (s *Server) rtAddBGPNetwork(w http.ResponseWriter, r *http.Request, p *serv
 func (s *Server) rtDelBGPNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	s.routingDo(w, r, p, func() error { return s.svc.DeleteBGPNetwork(p, pidx(r), clientIP(r)) })
 }
+func (s *Server) rtSetEIGRP(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.routingDo(w, r, p, func() error {
+		return s.svc.SetEIGRP(p, r.FormValue("enabled") == "1", atoiInt(r.FormValue("asn")), r.FormValue("router_id"), clientIP(r))
+	})
+}
+func (s *Server) rtAddEIGRPNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.routingDo(w, r, p, func() error { return s.svc.AddEIGRPNetwork(p, r.FormValue("cidr"), clientIP(r)) })
+}
+func (s *Server) rtDelEIGRPNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.routingDo(w, r, p, func() error { return s.svc.DeleteEIGRPNetwork(p, pidx(r), clientIP(r)) })
+}
 
 func atoiInt(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }

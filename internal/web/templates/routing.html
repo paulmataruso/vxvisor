@@ -142,6 +142,26 @@
   {{end}}
 </div>
 
+<!-- EIGRP -->
+<div class="card">
+  <div class="card-head"><h2>EIGRP <span class="pill {{if .Cfg.EIGRP.Enabled}}running{{end}}">{{if .Cfg.EIGRP.Enabled}}enabled{{else}}off{{end}}</span></h2><button class="btn primary" data-modal="m-eigrp-net">+ Add network</button></div>
+  <form method="post" action="/routing/eigrp" class="row" style="align-items:end">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="enabled" value="1" style="width:auto" {{if .Cfg.EIGRP.Enabled}}checked{{end}}> enabled</label>
+    <label class="fld">AS number<input name="asn" type="number" min="1" max="65535" value="{{if .Cfg.EIGRP.ASN}}{{.Cfg.EIGRP.ASN}}{{end}}" placeholder="100"></label>
+    <label class="fld">Router ID<input name="router_id" value="{{.Cfg.EIGRP.RouterID}}" placeholder="1.1.1.1"></label>
+    <button class="btn">Save EIGRP</button>
+  </form>
+  <p class="muted" style="margin:6px 0 0;font-size:12px">All routers in the EIGRP domain must share the same AS number. Each added network runs EIGRP on the matching interface(s) and advertises it.</p>
+  {{if .Cfg.EIGRP.Networks}}
+  <h3 style="margin:14px 0 6px;font-size:13px">Networks</h3>
+  <table><tr><th>Network</th><th></th></tr>
+    {{range $i, $x := .Cfg.EIGRP.Networks}}<tr><td class="mono">{{$x}}</td>
+      <td style="text-align:right"><form method="post" action="/routing/eigrp/network/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+  </table>
+  {{end}}
+</div>
+
 <!-- Live status -->
 <div class="card">
   <h2>Live route table</h2>
@@ -237,6 +257,15 @@
 <div class="modal" id="m-bgp-net"><div class="modal-card">
   <div class="modal-head"><h3>Advertise a network</h3><button class="modal-x" data-close>&times;</button></div>
   <form class="mform" method="post" action="/routing/bgp/network">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Network (CIDR)<input name="cidr" placeholder="10.0.0.0/24" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-eigrp-net"><div class="modal-card">
+  <div class="modal-head"><h3>Add EIGRP network</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/routing/eigrp/network">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Network (CIDR)<input name="cidr" placeholder="10.0.0.0/24" required></label>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>

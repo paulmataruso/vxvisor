@@ -210,6 +210,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /routing/bgp/neighbor/{i}/delete", s.auth(s.rtDelBGPNeighbor))
 	mux.HandleFunc("POST /routing/bgp/network", s.auth(s.rtAddBGPNetwork))
 	mux.HandleFunc("POST /routing/bgp/network/{i}/delete", s.auth(s.rtDelBGPNetwork))
+	mux.HandleFunc("POST /routing/eigrp", s.auth(s.rtSetEIGRP))
+	mux.HandleFunc("POST /routing/eigrp/network", s.auth(s.rtAddEIGRPNetwork))
+	mux.HandleFunc("POST /routing/eigrp/network/{i}/delete", s.auth(s.rtDelEIGRPNetwork))
 
 	// M4: networking
 	mux.HandleFunc("GET /networks", s.auth(s.networks))

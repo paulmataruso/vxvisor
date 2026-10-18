@@ -213,3 +213,23 @@ func (s *Service) AddBGPNetwork(p *Principal, cidr, ip string) error {
 func (s *Service) DeleteBGPNetwork(p *Principal, idx int, ip string) error {
 	return s.mutateRouting(p, ip, "bgp.network.delete", func(c *routing.Config) { c.BGP.Networks = delAt(c.BGP.Networks, idx) })
 }
+
+func (s *Service) SetEIGRP(p *Principal, enabled bool, asn int, routerID, ip string) error {
+	if enabled && (asn < 1 || asn > 65535) {
+		return fmt.Errorf("EIGRP AS number must be 1-65535")
+	}
+	return s.mutateRouting(p, ip, "eigrp.set", func(c *routing.Config) {
+		c.EIGRP.Enabled = enabled
+		c.EIGRP.ASN = asn
+		c.EIGRP.RouterID = routerID
+	})
+}
+func (s *Service) AddEIGRPNetwork(p *Principal, cidr, ip string) error {
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return fmt.Errorf("invalid network %q (use e.g. 10.0.0.0/24)", cidr)
+	}
+	return s.mutateRouting(p, ip, "eigrp.network.add", func(c *routing.Config) { c.EIGRP.Networks = append(c.EIGRP.Networks, cidr) })
+}
+func (s *Service) DeleteEIGRPNetwork(p *Principal, idx int, ip string) error {
+	return s.mutateRouting(p, ip, "eigrp.network.delete", func(c *routing.Config) { c.EIGRP.Networks = delAt(c.EIGRP.Networks, idx) })
+}

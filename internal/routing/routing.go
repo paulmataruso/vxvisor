@@ -104,6 +104,15 @@ type BGP struct {
 	Networks  []string   `json:"networks"` // CIDRs to advertise
 }
 
+// EIGRP is the EIGRP config (opt-in; FRR eigrpd). ASN is the autonomous-system
+// number shared by all routers in the EIGRP domain (1-65535).
+type EIGRP struct {
+	Enabled  bool     `json:"enabled"`
+	ASN      int      `json:"asn"`
+	RouterID string   `json:"router_id"`
+	Networks []string `json:"networks"` // CIDRs to run EIGRP on + advertise
+}
+
 // FirewallRule is one edge filter rule (applied on the forward chain).
 type FirewallRule struct {
 	Action string `json:"action"` // accept | drop
@@ -124,6 +133,7 @@ type Config struct {
 	RouteMaps     []RouteMapClause `json:"route_maps"`
 	OSPF          OSPF             `json:"ospf"`
 	BGP           BGP              `json:"bgp"`
+	EIGRP         EIGRP            `json:"eigrp"`
 }
 
 // ---- kernel forwarding ---------------------------------------------------
@@ -172,6 +182,11 @@ log syslog informational
 {{end}}{{if .RouteMapOut}}  neighbor {{.Addr}} route-map {{.RouteMapOut}} out
 {{end}}{{end}} exit-address-family
 exit
+!
+{{end}}{{if .EIGRP.Enabled}}router eigrp {{.EIGRP.ASN}}
+{{if .EIGRP.RouterID}} eigrp router-id {{.EIGRP.RouterID}}
+{{end}}{{range .EIGRP.Networks}} network {{.}}
+{{end}}exit
 !
 {{end}}line vty
 !
