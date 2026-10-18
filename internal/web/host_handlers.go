@@ -159,10 +159,12 @@ func (s *Server) routingPage(w http.ResponseWriter, r *http.Request, p *service.
 	cfg, _ := s.svc.GetRoutingConfig(p)
 	status, _ := s.svc.RoutingStatus(p)
 	ifaces, _ := s.svc.HostInterfaces(p)
+	transit, _ := s.svc.TransitCandidates(p)
 	s.render(w, p, "routing.html", "routing", map[string]any{
 		"Cfg":        cfg,
 		"Status":     status,
 		"Interfaces": ifaces,
+		"Transit":    transit,
 		"FRRReady":   s.svc.RoutingAvailable(p),
 	})
 }

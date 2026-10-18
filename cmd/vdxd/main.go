@@ -76,6 +76,8 @@ func main() {
 		cmdImport(cfgPath, os.Args[2:])
 	case "self-update":
 		cmdSelfUpdate(cfgPath)
+	case "shutdown-vms":
+		cmdShutdownVMs(cfgPath, os.Args[2:])
 	case "migrate-recv":
 		cmdMigrateRecv(cfgPath, os.Args[2:])
 	case "license":
@@ -88,7 +90,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: vdxd <serve|user add <name> [--admin]|org add <name> <slug>|org member <slug> <user> <role>|image pull <name>|import <name> <file>|self-update|license <sign|show> <file> --key K|version>")
+	fmt.Fprintln(os.Stderr, "usage: vdxd <serve|user add <name> [--admin]|org add <name> <slug>|org member <slug> <user> <role>|image pull <name>|import <name> <file>|self-update|shutdown-vms [--timeout 120s]|license <sign|show> <file> --key K|version>")
 	os.Exit(2)
 }
 
@@ -401,6 +403,36 @@ func cmdImport(cfgPath string, args []string) {
 		log.Fatalf("import: %v", err)
 	}
 	fmt.Printf("imported as base image %q (ready)\n", img)
+}
+
+// cmdShutdownVMs gracefully powers down every running VM on this host and then
+// returns. It is invoked from the vdxd-shutdown.service ExecStop at real host
+// poweroff/reboot (NOT on a `systemctl restart vdxd`), so guests get a clean ACPI
+// shutdown instead of being SIGKILLed with the host. It runs standalone (its own
+// DB handle + Manager) because the `serve` process is being torn down in the same
+// shutdown transaction; the QEMU guests survive (KillMode=process) long enough
+// for us to power them down over their loopback QMP sockets.
+func cmdShutdownVMs(cfgPath string, args []string) {
+	fs := flag.NewFlagSet("shutdown-vms", flag.ExitOnError)
+	timeout := fs.Duration("timeout", 120*time.Second, "overall budget for all guests to power down before SIGKILL")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	// Light open: no startup backup/prune — this is the shutdown path and must be
+	// quick and side-effect-free beyond powering down guests.
+	d, err := db.OpenResilient(cfg.DBPath(), cfg.Paths.BackupDir)
+	if err != nil {
+		log.Fatalf("db: %v", err)
+	}
+	defer d.Close()
+	mgr := session.NewManager(cfg, d)
+	// Rediscover any live QEMU whose row is stale, so nothing is missed.
+	mgr.AdoptRunningVMs()
+	n := mgr.ShutdownAll(*timeout)
+	log.Printf("shutdown-vms: powered down %d VM(s)", n)
 }
 
 func cmdSelfUpdate(cfgPath string) {

@@ -8,6 +8,8 @@ package lxc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +20,16 @@ import (
 )
 
 func Available() bool { _, err := exec.LookPath("lxc-create"); return err == nil }
+
+// VethName is the deterministic host-side veth name for a container. LXC would
+// otherwise name the host end randomly (vethXXXXXX), which the topology diagram
+// can't match back to the container. Pinning it to a hash of the name lets the
+// diagram draw each container → its own veth → the switch. Linux caps interface
+// names at 15 chars, so this is "vdx" + 10 hex of sha256(name) = 13 chars.
+func VethName(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return "vdx" + hex.EncodeToString(sum[:])[:10]
+}
 
 func run(timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -79,6 +91,9 @@ func applyConfig(name, lxcpath, bridge, mac string, cpus, memMB int) error {
 	if bridge != "" {
 		b.WriteString("lxc.net.0.type = veth\n")
 		b.WriteString("lxc.net.0.link = " + bridge + "\n")
+		// Pin the host-side veth name so the topology diagram can match this
+		// container's cable back to it (LXC would otherwise pick a random name).
+		b.WriteString("lxc.net.0.veth.pair = " + VethName(name) + "\n")
 		b.WriteString("lxc.net.0.flags = up\n")
 		if mac != "" {
 			b.WriteString("lxc.net.0.hwaddr = " + mac + "\n")

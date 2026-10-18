@@ -724,6 +724,13 @@ CREATE TABLE IF NOT EXISTS vdi_desktops (
 );
 CREATE INDEX IF NOT EXISTS idx_vdi_user ON vdi_desktops(user_id);
 `},
+	{36, "vm-autostart", `
+-- "Start at boot": when set, vdxd powers the VM on automatically after a HOST
+-- reboot (detected via the kernel boot_id, so a plain control-plane restart does
+-- NOT touch running/stopped VMs). Default ON so existing VMs come back after a
+-- power cycle; clear it per-VM to keep one powered off across reboots.
+ALTER TABLE sessions ADD COLUMN autostart INTEGER NOT NULL DEFAULT 1;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

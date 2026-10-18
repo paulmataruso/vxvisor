@@ -10,7 +10,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"vdxclone/internal/cluster"
@@ -76,6 +79,12 @@ func (s *Supervisor) Run(ctx context.Context) {
 	// if it verifies; otherwise keep the untouched source). Runs before any
 	// reconcile could act on a half-moved VM.
 	s.mgr.RecoverMigrations()
+	// Autostart flagged VMs — but ONLY after a real HOST reboot, never on a plain
+	// control-plane restart/upgrade (where KillMode=process keeps guests alive and
+	// adoption above re-attaches them). We tell the two apart by the kernel boot_id:
+	// it changes across a reboot but is stable across a vdxd restart. Runs after
+	// adoption so a VM already running is skipped (AutostartIDs excludes running).
+	s.bootAutostart()
 	// When the management interface is a default vSwitch, ensure its attachable
 	// "VM Network" port group exists (ESXi-style). One-shot at boot so an admin's
 	// deletion stays deleted; a fresh install / mgmt-NIC conversion gets it here.
@@ -83,6 +92,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 		if err := s.svc.EnsureDefaultPortGroup(); err != nil {
 			log.Printf("ensure default port group: %v", err)
 		}
+		// Bring every physical NIC up (even unconfigured ones) so the UI can show
+		// which ports have a live cable (carrier). One-shot at boot.
+		s.svc.EnsurePhysicalLinksUp()
 		// Remount any configured network backup targets (NFS/CIFS/CephFS) so
 		// scheduled + manual backups to shares work after a reboot.
 		s.svc.EnsureBackupMounts()
@@ -123,6 +135,65 @@ func (s *Supervisor) loop(ctx context.Context, name string, every time.Duration,
 			safe()
 		}
 	}
+}
+
+// bootAutostart powers on every autostart-flagged VM, but only once per host
+// boot. It compares the current kernel boot_id against the one recorded at the
+// last run: equal means this is a control-plane restart (do nothing — adoption
+// already handled live VMs and a stopped VM stays stopped); different (or no
+// record) means the host rebooted, so flagged VMs are started. The boot_id is
+// then recorded so a subsequent vdxd restart within the same boot is a no-op.
+func (s *Supervisor) bootAutostart() {
+	cur := currentBootID()
+	marker := filepath.Join(s.cfg.Paths.DataDir, "last_boot_id")
+	prev := ""
+	if b, err := os.ReadFile(marker); err == nil {
+		prev = strings.TrimSpace(string(b))
+	}
+	if cur != "" && cur == prev {
+		return // same boot → vdxd restarted, not a host reboot
+	}
+	// Record the new boot_id first, so a crash-restart mid-autostart doesn't
+	// re-trigger a second mass start within the same boot.
+	if cur != "" {
+		if err := os.WriteFile(marker, []byte(cur+"\n"), 0o600); err != nil {
+			log.Printf("autostart: record boot_id: %v", err)
+		}
+	}
+	// First run ever on this host (no marker): do NOT mass-start — just establish
+	// the baseline, so installing this feature on a live host doesn't disturb it.
+	if prev == "" {
+		log.Printf("autostart: baseline boot_id recorded; VMs will autostart on the next host reboot")
+		return
+	}
+	ids, err := s.mgr.AutostartIDs()
+	if err != nil {
+		log.Printf("autostart: list candidates: %v", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf("autostart: host reboot detected — starting %d VM(s) flagged start-at-boot", len(ids))
+	for _, id := range ids {
+		if _, err := s.mgr.Start(id); err != nil {
+			log.Printf("autostart: start %s: %v", id, err)
+		} else {
+			log.Printf("autostart: started %s", id)
+		}
+		time.Sleep(500 * time.Millisecond) // stagger so a mass boot doesn't thrash disk/CPU
+	}
+}
+
+// currentBootID reads the kernel's per-boot random id (stable for the life of a
+// boot, regenerated on reboot). Empty string if unreadable (then autostart falls
+// back to the marker-file presence check, which still fires at most once).
+func currentBootID() string {
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // reconcile marks sessions whose QEMU process has died as stopped.

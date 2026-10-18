@@ -105,6 +105,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /instances/{id}", s.auth(s.vmManage(s.instanceDetail)))
 	mux.HandleFunc("POST /sessions/{id}/start", s.auth(s.vmManage(s.startSession)))
 	mux.HandleFunc("POST /sessions/{id}/stop", s.auth(s.vmManage(s.stopSession)))
+	mux.HandleFunc("POST /sessions/{id}/autostart", s.auth(s.vmManage(s.autostartSession)))
 	mux.HandleFunc("POST /sessions/{id}/resize", s.auth(s.vmManage(s.resizeSession)))
 	mux.HandleFunc("POST /sessions/{id}/spec", s.auth(s.vmManage(s.updateSessionSpec)))
 	mux.HandleFunc("POST /sessions/{id}/network", s.auth(s.vmManage(s.setSessionNetwork)))

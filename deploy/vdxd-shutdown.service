@@ -1,0 +1,27 @@
+[Unit]
+Description=Gracefully power down VXVisor guest VMs at host shutdown
+Documentation=https://github.com/ (internal)
+# This unit's ONLY job is its ExecStop, which runs when the unit is stopped. With
+# RemainAfterExit the unit is "active" from boot, and systemd stops it as part of
+# the shutdown/reboot transaction — so ExecStop fires at a real host poweroff but
+# NOT on a `systemctl restart vdxd` (which never stops this unit). That is exactly
+# the distinction we need: a control-plane restart must leave guests running
+# (vdxd.service uses KillMode=process and re-adopts them), while a host shutdown
+# must give every guest a clean ACPI powerdown instead of a SIGKILL.
+DefaultDependencies=no
+After=network-online.target vdxd.service
+Before=shutdown.target reboot.target halt.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=VDX_CONFIG=/etc/vdxclone/config.toml
+ExecStart=/bin/true
+# vdxd talks each running guest's loopback QMP socket (system_powerdown), waits,
+# then falls back to SIGTERM/SIGKILL so we always return within the budget.
+ExecStop=/usr/local/bin/vdxd shutdown-vms --timeout 120s
+# Must exceed the shutdown-vms budget so systemd doesn't kill the hook early.
+TimeoutStopSec=150
+
+[Install]
+WantedBy=multi-user.target

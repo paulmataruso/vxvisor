@@ -71,16 +71,21 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 
 # apt_opt installs whatever of the given packages actually have an install
-# candidate on this release, and warns (not fail) about any that don't. Used for
-# the broad "install everything we could need" set, where a package name may vary
-# or be absent on a given Ubuntu/Debian version.
+# candidate on this release. A package with NO candidate on this Ubuntu/Debian
+# (name differs or doesn't exist here) is skipped with a warning — that is the
+# only tolerated miss. But a package that HAS a candidate and then FAILS to
+# install is a hard error: silently swallowing it (the old `|| true`) is exactly
+# how a UI feature ends up dead on a host with no trace. Every tool the UI can
+# drive must really be installed, so we fail loudly instead.
 apt_opt(){
   local want="$*" have=() miss=() p
   for p in $want; do
     if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [^(]'; then have+=("$p"); else miss+=("$p"); fi
   done
-  [ ${#have[@]} -gt 0 ] && apt-get install -y -qq "${have[@]}" || true
-  [ ${#miss[@]} -gt 0 ] && echo "  (skipped unavailable: ${miss[*]})"
+  [ ${#miss[@]} -gt 0 ] && echo "  (skipped — no install candidate on this release: ${miss[*]})"
+  if [ ${#have[@]} -gt 0 ]; then
+    apt-get install -y -qq "${have[@]}" || die "failed to install: ${have[*]}"
+  fi
   return 0
 }
 
@@ -127,6 +132,19 @@ systemctl enable --now lxc     >/dev/null 2>&1 || true
 # so routing "just works" on a fresh host (configured + enabled further below).
 say "Routing stack (FRR: OSPF / BGP / static)"
 apt_opt frr frr-pythontools
+
+# lldpd: link-layer discovery. Receives BOTH LLDP and Cisco CDP so the network
+# topology diagram can show the upstream switch each uplink is wired to (switch
+# name, port, VLAN, mgmt IP). Enabled now; the diagram reads `lldpctl`.
+say "Link-layer discovery (lldpd: LLDP + CDP neighbors)"
+apt_opt lldpd
+if command -v lldpd >/dev/null 2>&1; then
+  # Enable CDP + LLDP reception/advertisement on all ports.
+  if [ -d /etc/lldpd.d ]; then
+    printf 'configure lldp portidsubtype ifname\nconfigure system interface pattern *\n' >/etc/lldpd.d/vdxd.conf 2>/dev/null || true
+  fi
+  systemctl enable --now lldpd >/dev/null 2>&1 || true
+fi
 
 # guacd (browser-desktop gateway) is NOT in the Ubuntu archive on current
 # releases, and even where it is, it lacks the FreeRDP-3 RDP plugin we need. Build
@@ -451,8 +469,13 @@ fi
 # ---- systemd -------------------------------------------------------------
 say "Installing systemd unit"
 install -o root -g root -m 0644 "$SRC_DIR/vdxd.service" /etc/systemd/system/vdxd.service
+# Shutdown hook: gracefully powers down guest VMs at host poweroff/reboot (its
+# ExecStop does NOT fire on a plain `systemctl restart vdxd`, so a control-plane
+# restart leaves guests running for re-adoption).
+install -o root -g root -m 0644 "$SRC_DIR/vdxd-shutdown.service" /etc/systemd/system/vdxd-shutdown.service
 systemctl daemon-reload
 systemctl enable vdxd >/dev/null 2>&1 || true
+systemctl enable --now vdxd-shutdown >/dev/null 2>&1 || true
 
 # ---- first admin ---------------------------------------------------------
 if [ "$MAKE_ADMIN" = 1 ] && [ ! -f /var/lib/vdxclone/.admin-created ]; then

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"vdxclone/internal/hostinfo"
+	"vdxclone/internal/lldp"
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
 )
@@ -27,6 +28,74 @@ func (s *Service) HostInterfaces(p *Principal) ([]hostinfo.Iface, error) {
 			continue // per-VM tap — hidden from the admin interface lists
 		}
 		out = append(out, i)
+	}
+	return out, nil
+}
+
+// EnsurePhysicalLinksUp administratively brings every physical NIC up, even ones
+// carrying no configured network. A NIC left admin-down keeps its PHY powered off
+// and never reports carrier, so the UI can't tell a plugged port from an empty
+// one. Bringing them all up at boot makes "is a cable in this port?" visible in
+// the GUI (the interface then shows carrier/link once a live cable is present).
+// Idempotent and safe: bond/bridge members are already up, and an empty port just
+// sits up with NO-CARRIER. One-shot at boot — it does NOT fight an admin who later
+// downs a port by hand (there's no re-up loop).
+func (s *Service) EnsurePhysicalLinksUp() {
+	ifaces, err := hostinfo.Interfaces()
+	if err != nil {
+		return
+	}
+	for _, it := range ifaces {
+		if it.Type != "physical" || it.State == "up" {
+			continue
+		}
+		if err := netdrv.LinkUp(it.Name); err != nil {
+			// Best effort: a NIC that refuses to come up is logged by the caller's
+			// context, not fatal to boot.
+			continue
+		}
+	}
+}
+
+// TransitIface is a candidate interface for a directly-addressed routed link
+// (e.g. a point-to-point transit to another router), as the L3 page lists them.
+type TransitIface struct {
+	Name      string   `json:"name"`
+	State     string   `json:"state"`     // up | down | unknown
+	Carrier   bool     `json:"carrier"`   // a live cable is present
+	SpeedMbps int      `json:"speed_mbps"`
+	Addrs     []string `json:"addrs"`     // IPs already on it (e.g. a transit IP already assigned)
+	Neighbor  string   `json:"neighbor"`  // LLDP/CDP: "<switch> <port>" on the other end, if heard
+}
+
+// TransitCandidates returns the "free" interfaces usable for a routed/transit
+// link: physical NICs (or bonds) that are NOT the management interface and are
+// NOT enslaved to a bridge/bond. Enriched with link state, carrier, speed, any IPs
+// already assigned, and the LLDP/CDP neighbor so the admin can see which ports are
+// up, unused, and what they're wired to before assigning an IP.
+func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
+	if !p.IsAdmin {
+		return nil, ErrUnauthorized
+	}
+	ifaces, err := hostinfo.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	mgmt := s.mgmtIface()
+	nbrs := lldp.Neighbors()
+	var out []TransitIface
+	for _, it := range ifaces {
+		if it.Type != "physical" && it.Type != "bond" {
+			continue
+		}
+		if it.Name == mgmt || it.Master != "" {
+			continue // mgmt NIC or already enslaved to a vSwitch/bond — not free
+		}
+		ti := TransitIface{Name: it.Name, State: it.State, Carrier: it.Carrier, SpeedMbps: it.SpeedMbps, Addrs: it.Addrs}
+		if n, ok := nbrs[it.Name]; ok {
+			ti.Neighbor = strings.TrimSpace(n.SwitchName + " " + n.PortID)
+		}
+		out = append(out, ti)
 	}
 	return out, nil
 }
@@ -129,6 +198,7 @@ type TopoVM struct {
 	Tap   string `json:"tap"`
 	State string `json:"state"` // running | stopped | ""
 	Kind  string `json:"kind"`  // "" = VM, "container" = LXC container
+	Veth  string `json:"veth"`  // container only: its host-side veth (drawn as an inline node)
 }
 
 // TopoPortGroup is a VMware-style port group (a network/VLAN) on a vSwitch.
@@ -142,12 +212,13 @@ type TopoPortGroup struct {
 // TopoUplink is a physical adapter attached to a vSwitch. When it is a bond it
 // carries its link-aggregation members so the diagram can draw it as a LAG.
 type TopoUplink struct {
-	Name    string   `json:"name"`
-	Kind    string   `json:"kind"`    // nic | bond
-	Mode    string   `json:"mode"`    // bond mode (lacp/etherchannel/active-backup) when kind=bond
-	Members []string `json:"members"` // bond member NICs
-	State   string   `json:"state"`   // up | down
-	Speed   int      `json:"speed"`   // Mbps (0 = unknown)
+	Name      string          `json:"name"`
+	Kind      string          `json:"kind"`      // nic | bond
+	Mode      string          `json:"mode"`      // bond mode (lacp/etherchannel/active-backup) when kind=bond
+	Members   []string        `json:"members"`   // bond member NICs
+	State     string          `json:"state"`     // up | down
+	Speed     int             `json:"speed"`     // Mbps (0 = unknown)
+	Neighbors []lldp.Neighbor `json:"neighbors"` // upstream switch(es) learned via LLDP/CDP on this port (or its members)
 }
 
 // TopoVMK is a host IP endpoint on a vSwitch — a host-adapter box (e.g. the
@@ -258,7 +329,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 					st = "running"
 				}
 			}
-			bridgeToCts[brdg] = append(bridgeToCts[brdg], TopoVM{Name: name, Kind: "container", State: st})
+			bridgeToCts[brdg] = append(bridgeToCts[brdg], TopoVM{Name: name, Kind: "container", State: st, Veth: lxc.VethName(name)})
 		}
 		rows.Close()
 	}
@@ -280,6 +351,14 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			bonds[b.Name] = bondRec{mode: b.Mode, members: b.Members}
 		}
 	}
+	// LLDP/CDP neighbors per local port — so each uplink can show the upstream
+	// switch it's wired to. Best effort (empty if lldpd absent / nothing heard).
+	nbrs := lldp.Neighbors()
+	addNbr := func(u *TopoUplink, port string) {
+		if n, ok := nbrs[port]; ok {
+			u.Neighbors = append(u.Neighbors, n)
+		}
+	}
 	mkUplink := func(name string) TopoUplink {
 		u := TopoUplink{Name: name, Kind: "nic"}
 		if it, ok := ifByName[name]; ok {
@@ -290,6 +369,11 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			u.Kind = "bond"
 			u.Mode = b.mode
 			u.Members = b.members
+			for _, m := range b.members { // a LAG's neighbors live on its member ports
+				addNbr(&u, m)
+			}
+		} else {
+			addNbr(&u, name)
 		}
 		return u
 	}
@@ -351,6 +435,12 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 				sw.Uplinks = append(sw.Uplinks, mkUplink(m.Name))
 				sw.VXLAN = true
 				sw.Kind = "overlay"
+			case "veth":
+				// A veth enslaved to the bridge is the host end of a container's
+				// NIC (its peer is eth0 inside the container netns) — an ENDPOINT,
+				// not an uplink. The container itself is drawn under this bridge via
+				// bridgeToCts; the veth is recorded against it below, not here. Never
+				// render it as an uplink (that mislabels a container cable as a NIC).
 			default:
 				sw.Uplinks = append(sw.Uplinks, mkUplink(m.Name))
 			}
@@ -394,9 +484,11 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			sw.PortGroups[0].VMs = append(sw.PortGroups[0].VMs, cts...)
 			renderedBridges[br.Name] = true
 		}
-		// Skip an empty orphan bridge — no uplink, no host IP, no VMs/containers,
-		// no management endpoint (e.g. a stale/down default bridge). We only draw
-		// what is real and in use.
+		// Only draw a bridge that is actually in use: it has an uplink assigned OR
+		// it has VMs/containers attached. An idle default bridge like lxcbr0 — no
+		// uplink, no guests, just its auto NAT gateway IP — is noise and is hidden.
+		// The management bridge is ALWAYS shown (it carries the admin IP and is the
+		// anchor of the whole diagram), even with nothing attached.
 		hasVMs := false
 		for _, pg := range sw.PortGroups {
 			if len(pg.VMs) > 0 {
@@ -404,14 +496,8 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 				break
 			}
 		}
-		realAddr := false
-		for _, a := range sw.Addrs {
-			if !strings.HasPrefix(strings.ToLower(a), "fe80:") {
-				realAddr = true
-				break
-			}
-		}
-		if len(sw.Uplinks) == 0 && len(sw.VMKs) == 0 && !realAddr && !hasVMs {
+		isMgmt := br.Name == mgmtIf
+		if !isMgmt && len(sw.Uplinks) == 0 && !hasVMs {
 			continue
 		}
 		topo.Switches = append(topo.Switches, sw)

@@ -609,6 +609,26 @@ func (s *Service) StopSession(p *Principal, id, ip string) error {
 	return nil
 }
 
+// SetAutostart toggles a VM's "start at boot" flag (powered on automatically
+// after a host reboot).
+func (s *Service) SetAutostart(p *Principal, id string, on bool, ip string) error {
+	if !p.atLeast("member") {
+		return ErrUnauthorized
+	}
+	if _, err := s.sessionInOrg(p, id); err != nil {
+		return err
+	}
+	if err := s.mgr.SetAutostart(id, on); err != nil {
+		return err
+	}
+	action := "session.autostart.off"
+	if on {
+		action = "session.autostart.on"
+	}
+	s.audit(p, p.OrgID, action, "session", id, ip, nil)
+	return nil
+}
+
 func (s *Service) DeleteSession(p *Principal, id, ip string) error {
 	if !p.atLeast("member") {
 		return ErrUnauthorized

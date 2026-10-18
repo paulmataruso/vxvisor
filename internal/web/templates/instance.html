@@ -106,6 +106,11 @@
         <label class="feat"><input type="checkbox" data-feat="perf_hugepages"{{if $s.HugePages}} checked{{end}}> hugepages</label>
       </div>
     </div>
+    <div class="si wide"><span class="si-l">Start at boot <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— power on automatically after a host reboot (applies immediately)</span></span>
+      <div class="si-v" style="font-weight:400;margin-top:2px">
+        <label class="feat"><input type="checkbox" id="autostart-cb"{{if $s.Autostart}} checked{{end}}> start this instance when the host powers on</label>
+      </div>
+    </div>
   </div>
   <p class="muted" style="font-size:11px;margin:10px 2px 0">CPU, memory, disk and hardware changes apply when the instance is next started{{if .Running}} (it's running now, so you'll be asked to stop it){{end}}. Network moves live.</p>
 </div>
@@ -144,6 +149,14 @@
    document.querySelectorAll('#spec-grid input[data-feat]').forEach(function(cb){
      cb.addEventListener('change', function(){ post(cb.dataset.feat, cb.checked?'1':'0'); });
    });
+   // "Start at boot" posts to its own endpoint and takes effect immediately.
+   var ascb=document.getElementById('autostart-cb');
+   if(ascb){ ascb.addEventListener('change', function(){
+     var f=document.createElement('form'); f.method='post'; f.action='/sessions/{{$s.ID}}/autostart';
+     [["csrf",CSRF],["on",ascb.checked?'1':'0']].forEach(function(kv){
+       var i=document.createElement('input'); i.type='hidden'; i.name=kv[0]; i.value=kv[1]; f.appendChild(i); });
+     document.body.appendChild(f); f.submit();
+   }); }
  })();
 </script>
 

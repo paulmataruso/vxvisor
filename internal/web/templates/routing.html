@@ -23,15 +23,34 @@
   <p class="muted" style="margin:8px 0 0;font-size:12px">NAT target networks are taken automatically from Port Groups flagged for NAT; masqueraded out this uplink.</p>
 </div>
 
-<!-- Interface prefixes -->
+<!-- Routed interfaces / transit links -->
 <div class="card">
-  <div class="card-head"><h2>Interface prefixes</h2><button class="btn primary" data-modal="m-prefix">+ Add prefix</button></div>
+  <div class="card-head"><h2>Routed interfaces <span class="muted" style="font-weight:400;font-size:12px">— transit links</span></h2><button class="btn primary" data-modal="m-prefix">+ Assign IP to interface</button></div>
+  <p class="muted" style="margin:0 0 12px">Assign an IP directly to an unused interface — e.g. a point-to-point <strong>transit link</strong> to another router. The address is bound straight to the NIC (via zebra) and survives reboots. The management interface and any NIC already in a vSwitch/bond are excluded.</p>
   {{if .Cfg.Prefixes}}
-  <table><tr><th>Interface</th><th>Prefix (CIDR)</th><th></th></tr>
+  <table><tr><th>Interface</th><th>IP / prefix (CIDR)</th><th></th></tr>
     {{range $i, $x := .Cfg.Prefixes}}<tr><td class="mono">{{$x.Iface}}</td><td class="mono">{{$x.CIDR}}</td>
-      <td style="text-align:right"><form method="post" action="/routing/prefix/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
+      <td style="text-align:right"><form method="post" action="/routing/prefix/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form></td></tr>{{end}}
   </table>
-  {{else}}<div class="empty">No interface prefixes. Add one to assign an IP to a host interface (managed by zebra).</div>{{end}}
+  {{else}}<div class="empty">No routed interfaces yet. Assign an IP to a free interface below to create a transit link.</div>{{end}}
+
+  <h3 style="margin:16px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Available interfaces</h3>
+  {{if .Transit}}
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px">
+    {{range .Transit}}
+    <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:5px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="mono" style="font-weight:600">{{.Name}}</span>
+        {{if .Carrier}}<span class="pill running" style="font-size:10px">up{{if .SpeedMbps}} · {{.SpeedMbps}} Mb/s{{end}}</span>
+        {{else}}<span class="pill" style="font-size:10px">down · no cable</span>{{end}}
+      </div>
+      {{if .Neighbor}}<div class="muted" style="font-size:11px">↔ {{.Neighbor}}</div>{{end}}
+      {{if .Addrs}}<div class="mono" style="font-size:11px;color:var(--ok)">{{range .Addrs}}{{.}} {{end}}</div>{{end}}
+      <button type="button" class="btn sm" style="align-self:flex-start;margin-top:2px" onclick="assignTo('{{.Name}}')">Assign IP…</button>
+    </div>
+    {{end}}
+  </div>
+  {{else}}<div class="empty">No free interfaces. Every physical NIC is either the management interface or already in a vSwitch/bond.</div>{{end}}
 </div>
 
 <!-- Static routes -->
@@ -131,12 +150,15 @@
 
 <!-- ===================== modals ===================== -->
 <div class="modal" id="m-prefix"><div class="modal-card">
-  <div class="modal-head"><h3>Add interface prefix</h3><button class="modal-x" data-close>&times;</button></div>
+  <div class="modal-head"><h3>Assign IP to interface (transit link)</h3><button class="modal-x" data-close>&times;</button></div>
   <form class="mform" method="post" action="/routing/prefix">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Interface<select name="iface">{{range .Interfaces}}{{if or (eq .Type "physical") (eq .Type "bridge") (eq .Type "bond")}}<option value="{{.Name}}">{{.Name}} ({{.Type}})</option>{{end}}{{end}}</select></label>
-    <label class="fld">Prefix (CIDR)<input name="cidr" placeholder="10.50.0.1/24" required></label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
+    <label class="fld">Interface<select name="iface" id="prefix-iface">
+      {{if .Transit}}{{range .Transit}}<option value="{{.Name}}">{{.Name}}{{if .Carrier}} · up{{else}} · down{{end}}{{if .Neighbor}} · ↔ {{.Neighbor}}{{end}}</option>{{end}}
+      {{else}}<option value="" disabled>(no free interfaces)</option>{{end}}
+    </select></label>
+    <label class="fld">IP / prefix (CIDR)<input name="cidr" placeholder="10.50.0.1/30" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Assign</button></div>
   </form>
 </div></div>
 
@@ -220,4 +242,15 @@
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add</button></div>
   </form>
 </div></div>
+
+<script>
+ // "Assign IP…" on an available-interface card: preselect that NIC and open the modal.
+ function assignTo(name){
+   var sel=document.getElementById('prefix-iface');
+   if(sel){ for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===name){ sel.selectedIndex=i; break; } } }
+   var m=document.getElementById('m-prefix');
+   if(m){ m.classList.add('open'); document.body.style.overflow='hidden';
+     var c=m.querySelector('input[name=cidr]'); if(c) setTimeout(function(){c.focus();},50); }
+ }
+</script>
 {{template "foot" .}}{{end}}

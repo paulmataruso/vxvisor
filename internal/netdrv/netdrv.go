@@ -55,6 +55,11 @@ func SetupTap(tap, bridge string) error {
 // TeardownTap removes a tap device (best effort).
 func TeardownTap(tap string) { _ = run("ip", "link", "del", tap) }
 
+// LinkUp administratively brings an interface up. Idempotent. Used at boot to
+// power on every physical NIC so the UI can show which ports have a live cable
+// (carrier), even for ports that carry no configured network.
+func LinkUp(name string) error { return run("ip", "link", "set", name, "up") }
+
 func ifaceExists(name string) bool {
 	return exec.Command("ip", "link", "show", name).Run() == nil
 }

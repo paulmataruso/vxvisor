@@ -119,6 +119,8 @@ func classifyIface(l ipLink) string {
 		return "bond"
 	case l.LinkInfo.InfoKind == "vlan":
 		return "vlan"
+	case l.LinkInfo.InfoKind == "veth":
+		return "veth" // one half of a veth pair — a container's NIC, never an uplink
 	case l.LinkInfo.InfoKind == "":
 		return "physical"
 	default:

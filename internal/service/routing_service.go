@@ -2,7 +2,11 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 
+	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/routing"
 )
 
@@ -129,6 +133,27 @@ func (s *Service) DeleteFirewallRule(p *Principal, idx int, ip string) error {
 }
 
 func (s *Service) AddIfPrefix(p *Principal, iface, cidr, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	if iface == "" || cidr == "" {
+		return errors.New("interface and CIDR are required")
+	}
+	if _, _, err := net.ParseCIDR(cidr); err != nil {
+		return fmt.Errorf("invalid CIDR %q (use e.g. 10.50.0.1/30)", cidr)
+	}
+	// Never assign onto the management NIC (would cut host access) or an interface
+	// already enslaved to a vSwitch/bond (its IPs belong to the bridge, not here).
+	if err := s.guardMgmt(iface); err != nil {
+		return err
+	}
+	if ifs, err := hostinfo.Interfaces(); err == nil {
+		for _, it := range ifs {
+			if it.Name == iface && it.Master != "" {
+				return fmt.Errorf("%s is enslaved to %s — detach it first, or pick a free interface", iface, it.Master)
+			}
+		}
+	}
 	return s.mutateRouting(p, ip, "prefix.add", func(c *routing.Config) {
 		c.Prefixes = append(c.Prefixes, routing.IfPrefix{Iface: iface, CIDR: cidr})
 	})

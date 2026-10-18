@@ -82,6 +82,7 @@ type Session struct {
 	TPM          bool   // swtpm TPM 2.0 device
 	SecureBoot   bool   // UEFI Secure Boot (MS-keyed OVMF)
 	OSType       string // linux | windows
+	Autostart    bool   // start automatically after a host reboot ("start at boot")
 	CreatedAt    string
 }
 
@@ -89,16 +90,16 @@ type Session struct {
 const sessionCols = `id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,
 	COALESCE(boot_iso_id,0),mac,cpus,memory_mb,disk_gb,state,pid,vnc_port,ws_port,vnc_password,qmp_socket,
 	cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,COALESCE(pool_id,0),COALESCE(network_id,0),COALESCE(display,'vnc'),COALESCE(spice_port,0),COALESCE(disk_backend,'qcow2'),
-	COALESCE(machine_type,'q35'),COALESCE(disk_bus,'virtio-blk'),COALESCE(nic_model,'virtio'),COALESCE(vga,'qxl'),COALESCE(guest_agent,0),COALESCE(tpm,0),COALESCE(secureboot,0),COALESCE(os_type,'linux'),COALESCE(guest_os,''),COALESCE(perf_pin,0),COALESCE(perf_hugepages,0),COALESCE(eject_virtio,0),created_at`
+	COALESCE(machine_type,'q35'),COALESCE(disk_bus,'virtio-blk'),COALESCE(nic_model,'virtio'),COALESCE(vga,'qxl'),COALESCE(guest_agent,0),COALESCE(tpm,0),COALESCE(secureboot,0),COALESCE(os_type,'linux'),COALESCE(guest_os,''),COALESCE(perf_pin,0),COALESCE(perf_hugepages,0),COALESCE(eject_virtio,0),COALESCE(autostart,1),created_at`
 
 func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	var s Session
-	var ci, ga, tpmI, sbI, pin, hp, ejv int
+	var ci, ga, tpmI, sbI, pin, hp, ejv, as int
 	err := sc.Scan(&s.ID, &s.Name, &s.OrgID, &s.OwnerID, &s.ImageName, &s.DiskPath, &s.Kind,
 		&s.Firmware, &s.OVMFVarsPath, &s.BootISOID, &s.MAC, &s.CPUs, &s.MemoryMB, &s.DiskGB, &s.State, &s.PID,
 		&s.VNCPort, &s.WSPort, &s.VNCPassword, &s.QMPSocket,
 		&ci, &s.CIUsername, &s.CIPassword, &s.CISSHKey, &s.SeedPath, &s.Passthrough, &s.PoolID, &s.NetworkID, &s.Display, &s.SPICEPort, &s.DiskBackend,
-		&s.MachineType, &s.DiskBus, &s.NICModel, &s.VGA, &ga, &tpmI, &sbI, &s.OSType, &s.GuestOS, &pin, &hp, &ejv, &s.CreatedAt)
+		&s.MachineType, &s.DiskBus, &s.NICModel, &s.VGA, &ga, &tpmI, &sbI, &s.OSType, &s.GuestOS, &pin, &hp, &ejv, &as, &s.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +109,7 @@ func scanSession(sc interface{ Scan(...any) error }) (*Session, error) {
 	s.SecureBoot = sbI != 0
 	s.PinCPUs = pin != 0
 	s.HugePages = hp != 0
+	s.Autostart = as != 0
 	s.EjectVirtio = ejv != 0
 	return &s, nil
 }
@@ -1037,6 +1039,75 @@ func (m *Manager) List(orgID int64) ([]*Session, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// SetAutostart sets the "start at boot" flag for a VM.
+func (m *Manager) SetAutostart(id string, on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	_, err := m.db.Exec(`UPDATE sessions SET autostart=? WHERE id=? AND deleted_at IS NULL`, v, id)
+	return err
+}
+
+// idSet runs a single-column (id) query and returns the ids. Used by the boot
+// autostart and shutdown-all paths, which operate across all orgs on this host.
+func (m *Manager) idSet(q string) ([]string, error) {
+	rows, err := m.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// AutostartIDs returns every autostart-flagged VM on this host that is NOT
+// currently marked running — the set to power on after a host reboot.
+func (m *Manager) AutostartIDs() ([]string, error) {
+	return m.idSet(`SELECT id FROM sessions
+		WHERE COALESCE(autostart,1)=1 AND state!='running' AND deleted_at IS NULL`)
+}
+
+// RunningIDs returns every VM marked running on this host — the set to power
+// down gracefully when the host is shutting down.
+func (m *Manager) RunningIDs() ([]string, error) {
+	return m.idSet(`SELECT id FROM sessions WHERE state='running' AND deleted_at IS NULL`)
+}
+
+// ShutdownAll gracefully powers down every running VM on this host, in parallel,
+// bounded by timeout. Used by `vdxd shutdown-vms` at host poweroff so guests get
+// a clean ACPI shutdown (flushed disks) instead of being SIGKILLed when the host
+// goes down. Each VM follows the normal ACPI→SIGTERM→SIGKILL fallback; the final
+// SIGKILL guarantees we return within the budget even if a guest ignores ACPI.
+func (m *Manager) ShutdownAll(timeout time.Duration) int {
+	ids, err := m.RunningIDs()
+	if err != nil {
+		return 0
+	}
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_ = m.Stop(id) // ACPI powerdown, then SIGTERM, then SIGKILL
+		}(id)
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+	return len(ids)
 }
 
 // Delete soft-deletes a session (moves it to Trash) after stopping it. The

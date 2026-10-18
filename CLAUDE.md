@@ -19,6 +19,13 @@ runtime benefit). Repo: `github.com/paulmataruso/vxvisor` (name ≠ module path,
   unless a dedicated storage interface (≠ mgmt) is set and the target is on its subnet.
 - **Disk safety:** `service.deviceInUse()` refuses to wipe any in-use disk (mounted / PV /
   has mounted children) — this is what stops someone wiping the OS/boot disk.
+- **`deploy/install.sh` MUST install EVERY tool any UI feature can configure.** If the UI
+  exposes it, the host must have the software for it — no "optional" gaps. Current coverage:
+  qemu/ovmf/swtpm (VMs/TPM), lvm2+zfsutils (ZFS/LVM pools), nfs-common/cifs-utils/ceph-common/
+  open-iscsi (shared storage), **frr+frr-pythontools (routing — OSPF/BGP/static)**, lxc stack
+  (containers), guacd-from-source (desktops), chrony (time), tuned (perf), bridge/nft/ethtool
+  (networking). `apt_opt` skips only packages with NO install candidate on the release; an
+  available package that fails to install is a **hard error** (never `|| true`-swallowed).
 
 ## Build / deploy / verify
 ```bash
@@ -59,8 +66,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **35**
-  (`vdi-desktops`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **36**
+  (`vm-autostart`). Add `{N, "name", "SQL"}`.
 - `ALTER TABLE sessions ADD COLUMN ...` is the pattern for new VM fields.
 
 ### `sessions` column discipline (`internal/session/manager.go`)
