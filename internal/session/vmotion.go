@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"vdxclone/internal/ceph"
+	"vdxclone/internal/lvm"
 	"vdxclone/internal/qemu"
+	"vdxclone/internal/zfs"
 )
 
 // Storage vMotion — move a VM's disk between storage backends (local↔shared),
@@ -112,94 +115,239 @@ func (m *Manager) MoveStorage(id string, targetPoolID int64) error {
 	if err != nil {
 		return err
 	}
-	targetDir, err := m.poolDir(targetPoolID)
+	tgt, err := m.resolveMoveTarget(id, targetPoolID)
 	if err != nil {
 		return err
 	}
-	srcPath := s.DiskPath
-	srcDir := filepath.Dir(srcPath)
-	if filepath.Clean(targetDir) == filepath.Clean(srcDir) {
+	if s.DiskBackend == tgt.backend && sameLocation(s.DiskPath, tgt) {
 		return fmt.Errorf("instance disk is already on that storage")
-	}
-	if err := os.MkdirAll(targetDir, 0o750); err != nil {
-		return fmt.Errorf("target pool dir: %w", err)
-	}
-	target := filepath.Join(targetDir, id+".qcow2")
-	if _, err := os.Stat(target); err == nil {
-		return fmt.Errorf("a disk already exists at the target (%s) — refusing to overwrite", target)
-	}
-	// Preflight free space: need at least the source's virtual size.
-	if vsz, err := qemu.VirtualSizeBytes(srcPath); err == nil && vsz > 0 {
-		if free, err := freeBytes(targetDir); err == nil && free < vsz {
-			return fmt.Errorf("not enough free space on target (%d MB free, need %d MB)", free>>20, vsz>>20)
-		}
 	}
 
 	if m.Running(s) {
-		return m.moveStorageLive(s, targetPoolID, srcPath, target)
+		// Live move pivots a running guest's writes; today that dance is only wired
+		// for file (qcow2) source AND target. Moving to/from a block backend
+		// (RBD/LVM/ZFS) requires the instance to be stopped so the disk can be
+		// converted cold — refuse clearly rather than silently landing a qcow2.
+		if s.DiskBackend != "qcow2" || tgt.backend != "qcow2" {
+			return fmt.Errorf("stop the instance to move its disk to or from block storage (Ceph RBD / LVM / ZFS); live storage move is currently supported only between file (qcow2) pools")
+		}
+		if err := os.MkdirAll(tgt.dir, 0o750); err != nil {
+			return fmt.Errorf("target pool dir: %w", err)
+		}
+		if _, err := os.Stat(tgt.disk); err == nil {
+			return fmt.Errorf("a disk already exists at the target (%s) — refusing to overwrite", tgt.disk)
+		}
+		return m.moveStorageLive(s, targetPoolID, s.DiskPath, tgt.disk)
 	}
-	return m.moveStorageOffline(s, targetPoolID, srcPath, target)
+	return m.moveStorageOffline(s, targetPoolID, tgt)
 }
 
-// moveStorageOffline copies disk + firmware vars + seed to the target pool, then
-// commits atomically. Source files are retained (renamed) for rollback.
-func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, srcPath, target string) error {
-	targetDir := filepath.Dir(target)
-	if err := m.setMigState(s.ID, "offline", target, srcPath); err != nil {
+// moveTarget describes where a storage move will land, resolved from the target
+// storage pool's kind. The disk field is the disk_path to persist; backend is the
+// disk_backend to persist (qcow2 | rbd | lvm | zvol).
+type moveTarget struct {
+	backend  string
+	disk     string
+	dir      string // qcow2 colocation dir for the disk + vars/seed ("" for block)
+	rbdPool  string
+	rbdImage string
+	lvmVG    string
+	lvmPool  string
+	lvDev    string // /dev/<vg>/<lv>
+	zvolDS   string // ZFS dataset name (its device is /dev/zvol/<ds>)
+}
+
+// resolveMoveTarget maps a target storage pool to the backend + volume identity a
+// move should create. A block pool (rbd/lvm/zfs) has no filesystem directory, so
+// the disk becomes a provisioned volume rather than a qcow2 file in a dir.
+func (m *Manager) resolveMoveTarget(id string, targetPoolID int64) (moveTarget, error) {
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	if targetPoolID <= 0 {
+		d := m.cfg.Paths.DiskDir
+		return moveTarget{backend: "qcow2", dir: d, disk: filepath.Join(d, id+".qcow2")}, nil
+	}
+	var kind, name, path string
+	if err := m.db.QueryRow(`SELECT kind, COALESCE(name,''), COALESCE(path,'') FROM storage_pools WHERE id=?`, targetPoolID).Scan(&kind, &name, &path); err != nil {
+		return moveTarget{}, fmt.Errorf("storage pool %d not found", targetPoolID)
+	}
+	switch kind {
+	case "rbd":
+		img := "vdx-" + short
+		_, _ = ceph.EnsureClientKeyring(path) // QEMU keyring (idempotent)
+		return moveTarget{backend: "rbd", rbdPool: path, rbdImage: img, disk: ceph.RBDPath(path, img)}, nil
+	case "lvm":
+		vg, tp, ok := strings.Cut(name, "/") // pool name is "<vg>/<thinpool>"
+		if !ok {
+			vg = name
+		}
+		dev := "/dev/" + vg + "/vdx-" + short
+		return moveTarget{backend: "lvm", lvmVG: vg, lvmPool: tp, lvDev: dev, disk: dev}, nil
+	case "zfs":
+		ds := name + "/vdx-" + short
+		return moveTarget{backend: "zvol", zvolDS: ds, disk: "/dev/zvol/" + ds}, nil
+	default: // dir
+		return moveTarget{backend: "qcow2", dir: path, disk: filepath.Join(path, id+".qcow2")}, nil
+	}
+}
+
+// sameLocation reports whether a disk already lives at the move target (so the
+// move is a no-op). For qcow2 it compares directories; for a block backend the
+// deterministic volume name means the full device path matches.
+func sameLocation(srcPath string, t moveTarget) bool {
+	if t.backend == "qcow2" {
+		return filepath.Clean(filepath.Dir(srcPath)) == filepath.Clean(t.dir)
+	}
+	return filepath.Clean(srcPath) == filepath.Clean(t.disk)
+}
+
+// moveStorageOffline converts a stopped VM's disk onto the target backend
+// (qcow2 file / RBD image / LVM thin LV / ZFS zvol), verifies it, then commits
+// atomically. The source is read-only throughout and is only reclaimed AFTER the
+// target is durable and the DB is committed (files retained aside for the admin;
+// block volumes removed, since they can't be renamed aside).
+func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTarget) error {
+	src := s.DiskPath
+	vsz, err := qemu.VirtualSizeBytes(src)
+	if err != nil || vsz <= 0 {
+		return fmt.Errorf("source virtual size: %w", err)
+	}
+	if err := m.setMigState(s.ID, "offline", tgt.disk, src); err != nil {
 		return err
 	}
-	cleanup := func() { _ = os.Remove(target) }
+	fail := func(e error) error { _ = m.setMigState(s.ID, "idle", "", ""); return e }
 
-	// 1. Copy the disk (source read-only) and verify the result.
-	if err := qemu.ConvertToQcow2(srcPath, target); err != nil {
-		cleanup()
-		_ = m.setMigState(s.ID, "idle", "", "")
-		return fmt.Errorf("copy disk: %w", err)
-	}
-	if err := qemu.ImageOK(target); err != nil {
-		cleanup()
-		_ = m.setMigState(s.ID, "idle", "", "")
-		return fmt.Errorf("target failed verification: %w", err)
-	}
-
-	// 2. Relocate per-VM OVMF vars + seed ISO (small; copy+verify-by-presence).
-	newVars := s.OVMFVarsPath
-	if s.OVMFVarsPath != "" {
-		nv := filepath.Join(targetDir, s.ID+".ovmf_vars.fd")
-		if err := copyRegular(s.OVMFVarsPath, nv); err != nil {
-			cleanup()
-			_ = m.setMigState(s.ID, "idle", "", "")
-			return fmt.Errorf("copy firmware vars: %w", err)
+	// 1. Provision the target volume and copy the source onto it (source read-only).
+	var cleanupTarget func()
+	switch tgt.backend {
+	case "qcow2":
+		if err := os.MkdirAll(tgt.dir, 0o750); err != nil {
+			return fail(fmt.Errorf("target pool dir: %w", err))
 		}
-		newVars = nv
-	}
-	newSeed := s.SeedPath
-	if s.SeedPath != "" {
-		ns := filepath.Join(targetDir, s.ID+".seed.iso")
-		if err := copyRegular(s.SeedPath, ns); err == nil {
-			newSeed = ns
+		if _, err := os.Stat(tgt.disk); err == nil {
+			return fail(fmt.Errorf("a disk already exists at the target (%s) — refusing to overwrite", tgt.disk))
 		}
+		if free, err := freeBytes(tgt.dir); err == nil && free < vsz {
+			return fail(fmt.Errorf("not enough free space on target (%d MB free, need %d MB)", free>>20, vsz>>20))
+		}
+		cleanupTarget = func() { _ = os.Remove(tgt.disk) }
+		if err := qemu.ConvertToQcow2(src, tgt.disk); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("copy disk: %w", err))
+		}
+	case "rbd":
+		if !ceph.Bootstrapped() {
+			return fail(fmt.Errorf("the target Ceph cluster is not available"))
+		}
+		cleanupTarget = func() { _ = ceph.RemoveImage(tgt.rbdPool, tgt.rbdImage) }
+		if err := ceph.ImportImage(tgt.rbdPool, tgt.rbdImage, src); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("copy disk to Ceph RBD: %w", err))
+		}
+	case "lvm":
+		if !lvm.Available() {
+			return fail(fmt.Errorf("LVM2 is not available on the host"))
+		}
+		if err := lvm.CreateThinVolume(tgt.lvmVG, tgt.lvmPool, filepath.Base(tgt.lvDev), vsz); err != nil {
+			return fail(fmt.Errorf("create LVM volume: %w", err))
+		}
+		cleanupTarget = func() { _ = lvm.RemoveLV(tgt.lvDev) }
+		if err := qemu.ConvertToRaw(src, tgt.disk); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("copy disk to LVM: %w", err))
+		}
+	case "zvol":
+		if !zfs.Available() {
+			return fail(fmt.Errorf("ZFS is not available on the host"))
+		}
+		if err := zfs.CreateZvol(tgt.zvolDS, vsz, false); err != nil {
+			return fail(fmt.Errorf("create zvol: %w", err))
+		}
+		cleanupTarget = func() { _ = zfs.DestroyDataset(tgt.zvolDS) }
+		if err := qemu.ConvertToRaw(src, tgt.disk); err != nil {
+			cleanupTarget()
+			return fail(fmt.Errorf("copy disk to zvol: %w", err))
+		}
+	default:
+		return fail(fmt.Errorf("unsupported target storage backend %q", tgt.backend))
 	}
 
-	// Hand the copied files to the RunAs user (convert/copy ran as root) so the
-	// VM can open them on next start.
-	m.chownRunAs(target, newVars, newSeed)
+	// 2. Verify the target. qcow2 gets a full consistency check; raw block targets
+	//    (rbd/lvm/zvol) have no check metadata, so confirm qemu-img can read them.
+	verify := qemu.ProbeReadable
+	if tgt.backend == "qcow2" {
+		verify = qemu.ImageOK
+	}
+	if err := verify(tgt.disk); err != nil {
+		cleanupTarget()
+		return fail(fmt.Errorf("target failed verification: %w", err))
+	}
 
-	// 3. Durable, ordered commit: fsync target, THEN the DB txn, THEN source-aside.
-	fsyncFile(target)
-	if _, err := m.db.Exec(`UPDATE sessions SET disk_path=?, ovmf_vars_path=?, seed_path=?, disk_backend='qcow2',
+	// 3. Per-VM OVMF vars + seed: relocate alongside a qcow2 target; for a block
+	//    backend they stay in the disk dir (always reachable), as at create time.
+	newVars, newSeed := s.OVMFVarsPath, s.SeedPath
+	if tgt.backend == "qcow2" {
+		if s.OVMFVarsPath != "" {
+			nv := filepath.Join(tgt.dir, s.ID+".ovmf_vars.fd")
+			if err := copyRegular(s.OVMFVarsPath, nv); err != nil {
+				cleanupTarget()
+				return fail(fmt.Errorf("copy firmware vars: %w", err))
+			}
+			newVars = nv
+		}
+		if s.SeedPath != "" {
+			ns := filepath.Join(tgt.dir, s.ID+".seed.iso")
+			if err := copyRegular(s.SeedPath, ns); err == nil {
+				newSeed = ns
+			}
+		}
+		m.chownRunAs(tgt.disk, newVars, newSeed)
+		fsyncFile(tgt.disk)
+	}
+
+	// 4. Durable, ordered commit.
+	if _, err := m.db.Exec(`UPDATE sessions SET disk_path=?, disk_backend=?, ovmf_vars_path=?, seed_path=?,
 		storage_pool_id=?, migration_state='idle', mig_target_path='', mig_source_path='' WHERE id=?`,
-		target, newVars, newSeed, targetPoolID, s.ID); err != nil {
-		cleanup()
+		tgt.disk, tgt.backend, newVars, newSeed, targetPoolID, s.ID); err != nil {
+		cleanupTarget()
 		return fmt.Errorf("commit: %w", err)
 	}
-	// 4. Retain the source (NEVER deleted inline — reclaimed by admin later).
-	retainAside(srcPath)
-	if s.OVMFVarsPath != "" && newVars != s.OVMFVarsPath {
+
+	// 5. Reclaim the source now that the target is committed and durable.
+	m.reclaimMovedSource(s.DiskBackend, src)
+	if tgt.backend == "qcow2" && s.OVMFVarsPath != "" && newVars != s.OVMFVarsPath {
 		retainAside(s.OVMFVarsPath)
 	}
-	log.Printf("vmotion: offline-moved %s disk to %s (source retained as %s.pre-vmotion)", s.ID, target, srcPath)
+	log.Printf("vmotion: offline-moved %s disk to %s (backend %s→%s)", s.ID, tgt.disk, s.DiskBackend, tgt.backend)
 	return nil
+}
+
+// reclaimMovedSource releases the OLD disk after a successful move. A qcow2 file
+// is retained aside (renamed) for admin reclaim; a block volume (rbd/lvm/zvol)
+// can't be renamed aside, so it is removed best-effort (an orphan is logged, not
+// fatal — the move already succeeded).
+func (m *Manager) reclaimMovedSource(backend, src string) {
+	switch backend {
+	case "rbd":
+		if pool, img, ok := ceph.ParseRBD(src); ok {
+			if err := ceph.RemoveImage(pool, img); err != nil {
+				log.Printf("vmotion: source rbd image %s/%s not reclaimed: %v", pool, img, err)
+			}
+		}
+	case "lvm":
+		if err := lvm.RemoveLV(src); err != nil {
+			log.Printf("vmotion: source LV %s not reclaimed: %v", src, err)
+		}
+	case "zvol":
+		ds := strings.TrimPrefix(src, "/dev/zvol/")
+		if err := zfs.DestroyDataset(ds); err != nil {
+			log.Printf("vmotion: source zvol %s not reclaimed: %v", ds, err)
+		}
+	default:
+		retainAside(src)
+	}
 }
 
 // moveStorageLive mirrors the running VM's active disk to the target, then
