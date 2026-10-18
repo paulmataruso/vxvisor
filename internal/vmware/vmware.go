@@ -211,9 +211,13 @@ type ExportProgress struct {
 	BytesPerSec int64 // instantaneous transfer rate
 }
 
-func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(ExportProgress)) ([]string, error) {
+func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(string, ...any), prog func(ExportProgress)) ([]string, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	ref := types.ManagedObjectReference{Type: "VirtualMachine", Value: moid}
 	vm := object.NewVirtualMachine(c.gc.Client, ref)
+	logf("opening read-only export lease on moid=%s", moid)
 	lease, err := vm.Export(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open export lease: %w", err)
@@ -227,12 +231,16 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(E
 	updater := lease.StartUpdater(ctx, info)
 	defer updater.Done()
 
+	logf("export lease granted: %d item(s) in manifest", len(info.Items))
 	var totalBytes int64
 	for _, item := range info.Items {
-		if strings.HasSuffix(strings.ToLower(item.Path), ".vmdk") {
+		isDisk := strings.HasSuffix(strings.ToLower(item.Path), ".vmdk")
+		logf("  lease item: %s (%d MiB)%s", item.Path, item.Size/(1<<20), map[bool]string{true: "", false: " — skipped (non-disk)"}[isDisk])
+		if isDisk {
 			totalBytes += item.Size
 		}
 	}
+	logf("will download %d MiB of disk data", totalBytes/(1<<20))
 	var files []string
 	cleanup := func() {
 		for _, f := range files {
@@ -245,6 +253,8 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(E
 			continue // skip .ovf / .mf / .nvram — we only want the disks
 		}
 		local := filepath.Join(destDir, "."+sanitizeName(item.Path))
+		logf("downloading disk %q (%d MiB) → %s", item.Path, item.Size/(1<<20), filepath.Base(local))
+		diskStart := time.Now()
 
 		// Download in a goroutine; poll the output file for bytes + rate so the UI
 		// can show "X / Y GB @ Z MB/s".
@@ -261,6 +271,7 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(E
 					_ = os.Remove(local)
 					cleanup()
 					_ = lease.Abort(ctx, nil)
+					logf("download of %q FAILED after %s: %v", item.Path, time.Since(diskStart).Round(time.Second), derr)
 					return nil, fmt.Errorf("download %s: %w", item.Path, derr)
 				}
 				break poll
@@ -280,14 +291,23 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(E
 				}
 			}
 		}
+		var wrote int64
 		if fi, e := os.Stat(local); e == nil {
-			completedBytes += fi.Size()
+			wrote = fi.Size()
+			completedBytes += wrote
 		}
+		elapsed := time.Since(diskStart)
+		var avg int64
+		if s := elapsed.Seconds(); s > 0 {
+			avg = int64(float64(wrote) / s)
+		}
+		logf("downloaded %q: %d MiB in %s (avg %d MiB/s)", item.Path, wrote/(1<<20), elapsed.Round(time.Second), avg/(1<<20))
 		files = append(files, local)
 		if prog != nil {
 			prog(ExportProgress{DoneBytes: completedBytes, TotalBytes: totalBytes})
 		}
 	}
+	logf("finalizing export lease")
 	if err := lease.Complete(ctx); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("complete export lease: %w", err)
@@ -295,6 +315,7 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, prog func(E
 	if len(files) == 0 {
 		return nil, fmt.Errorf("export produced no disk files")
 	}
+	logf("export finished: %d disk file(s), %d MiB total", len(files), completedBytes/(1<<20))
 	return files, nil
 }
 

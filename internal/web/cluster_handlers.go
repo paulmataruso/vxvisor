@@ -164,6 +164,19 @@ func (s *Server) apiVmwareImport(w http.ResponseWriter, r *http.Request, p *serv
 	writeJSON(w, map[string]any{"imports": s.svc.VMwareImportStates(p)})
 }
 
+// apiVmwareImportLog serves the full durable log for one import as plain text so
+// a failed import can be diagnosed after the fact (even once the live tracker row
+// has aged out).
+func (s *Server) apiVmwareImportLog(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	txt, err := s.svc.VMwareImportLog(p, r.PathValue("id"))
+	if err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(txt))
+}
+
 func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)

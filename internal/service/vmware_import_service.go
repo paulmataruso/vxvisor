@@ -46,6 +46,11 @@ type VMwareImportState struct {
 	Err        string `json:"err,omitempty"`
 	StartedAt  int64  `json:"started"`
 	FinishedAt int64  `json:"finished,omitempty"`
+	// HasLog is true once a durable per-import log file exists; the UI can then
+	// offer a link to GET /api/vmware-import/{id}/log for the full detail. The log
+	// outlives this in-memory tracker entry (which is pruned 10 min after finish).
+	HasLog  bool     `json:"has_log,omitempty"`
+	LogTail []string `json:"log_tail,omitempty"` // last lines, populated on failure
 }
 
 type vmwImportTracker struct {
@@ -82,6 +87,116 @@ func (t *vmwImportTracker) snapshot() []VMwareImportState {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt > out[j].StartedAt })
 	return out
+}
+
+// importLogDir is where durable per-import logs live (one file per import). They
+// outlive the in-memory tracker so a failed import left overnight can still be
+// diagnosed — by the admin via the UI/API, or over SSH in the journal mirror.
+func (s *Service) importLogDir() string { return filepath.Join(s.cfg.Paths.DataDir, "import-logs") }
+
+// importLogger mirrors every line to (a) the systemd journal via log.Printf and
+// (b) a durable file, and keeps the recent tail in memory for the UI.
+type importLogger struct {
+	id   string
+	mu   sync.Mutex
+	f    *os.File
+	tail []string
+}
+
+func (s *Service) newImportLogger(id string) *importLogger {
+	lg := &importLogger{id: id}
+	dir := s.importLogDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		log.Printf("vmware-import %s: cannot create log dir %s: %v (journal-only)", id, dir, err)
+		return lg
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "vmware-"+id+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		log.Printf("vmware-import %s: cannot open log file: %v (journal-only)", id, err)
+		return lg
+	}
+	lg.f = f
+	return lg
+}
+
+// logf records one timestamped line to the journal, the durable file, and the
+// in-memory tail. Safe for concurrent use (the export progress callback runs on
+// its own goroutine).
+func (lg *importLogger) logf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	log.Printf("vmware-import %s: %s", lg.id, msg)
+	line := time.Now().Format("2006-01-02 15:04:05") + "  " + msg
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if lg.f != nil {
+		fmt.Fprintln(lg.f, line)
+	}
+	lg.tail = append(lg.tail, line)
+	if len(lg.tail) > 400 {
+		lg.tail = lg.tail[len(lg.tail)-400:]
+	}
+}
+
+func (lg *importLogger) tailLines(n int) []string {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if n > len(lg.tail) {
+		n = len(lg.tail)
+	}
+	out := make([]string, n)
+	copy(out, lg.tail[len(lg.tail)-n:])
+	return out
+}
+
+func (lg *importLogger) close() {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if lg.f != nil {
+		_ = lg.f.Close()
+		lg.f = nil
+	}
+}
+
+// VMwareImportLog returns the full durable log for one import (admin only).
+func (s *Service) VMwareImportLog(p *Principal, id string) (string, error) {
+	if !p.IsAdmin {
+		return "", ErrUnauthorized
+	}
+	// Guard against path traversal — ids are uuids, but be strict.
+	if id == "" || strings.ContainsAny(id, "/\\.") {
+		return "", fmt.Errorf("invalid import id")
+	}
+	b, err := os.ReadFile(filepath.Join(s.importLogDir(), "vmware-"+id+".log"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no log for import %s (it may have been pruned)", id)
+		}
+		return "", err
+	}
+	return string(b), nil
+}
+
+// pruneImportLogs removes import log files older than 14 days. Called at boot
+// alongside SweepImportTemps — cheap bookkeeping, never touches a live import.
+func (s *Service) pruneImportLogs() {
+	dir := s.importLogDir()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-14 * 24 * time.Hour)
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "vmware-") {
+			continue
+		}
+		fi, serr := e.Info()
+		if serr != nil || fi.ModTime().After(cutoff) {
+			continue
+		}
+		if rerr := os.Remove(filepath.Join(dir, e.Name())); rerr == nil {
+			log.Printf("vmware-import: pruned old log %s", e.Name())
+		}
+	}
 }
 
 // VMwareImportStates returns in-flight + recent imports (admin only).
@@ -129,26 +244,35 @@ func (s *Service) VMwareImport(p *Principal, c vmware.Creds, moid, osType string
 }
 
 func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string, p *Principal, ip string) {
+	lg := s.newImportLogger(id)
+	defer lg.close()
+	hasLog := lg.f != nil
+	s.vmwimp.set(id, func(st *VMwareImportState) { st.HasLog = hasLog })
+
 	fail := func(step, msg string) {
-		log.Printf("vmware-import %s: FAILED at %s: %s", id, step, msg)
+		lg.logf("FAILED at %s: %s", step, msg)
 		s.vmwimp.set(id, func(st *VMwareImportState) {
 			st.Status = "failed"
 			st.Step = step
 			st.Err = msg
 			st.FinishedAt = time.Now().UnixMilli()
+			st.LogTail = lg.tailLines(30)
 		})
 		s.audit(p, p.OrgID, "vmware.import_failed", "vmware", moid, ip, map[string]any{"step": step, "error": msg})
 	}
-	log.Printf("vmware-import %s: start moid=%s host=%s os=%s", id, moid, vcHost(c.URL), osType)
+	lg.logf("import %s starting: moid=%s host=%s user=%s insecure=%v os_hint=%s",
+		id, moid, vcHost(c.URL), c.User, c.Insecure, osType)
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 
+	lg.logf("connecting to vSphere (read-only)…")
 	cli, err := vmware.Connect(ctx, c)
 	if err != nil {
 		fail("connect", err.Error())
 		return
 	}
 	defer cli.Close(ctx)
+	lg.logf("connected; inspecting source VM %s", moid)
 
 	vm, err := cli.GetVM(ctx, moid)
 	if err != nil {
@@ -156,6 +280,11 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		return
 	}
 	s.vmwimp.set(id, func(st *VMwareImportState) { st.VMName = vm.Name })
+	lg.logf("source: name=%q power=%s firmware=%s guest=%q cpu=%d memMB=%d disks=%d snapshots=%v importable=%v",
+		vm.Name, vm.PowerState, vm.Firmware, vm.GuestFullName, vm.NumCPU, vm.MemMB, len(vm.Disks), vm.HasSnapshots, vm.Importable)
+	for i, d := range vm.Disks {
+		lg.logf("  disk[%d]: %q %d GiB thin=%v backing=%s", i, d.Label, d.CapacityGB, d.Thin, d.Backing)
+	}
 	// SOURCE SAFETY: cold only. We never change the source's power — refuse if on.
 	if vm.PowerState != "poweredOff" {
 		fail("precheck", "source VM is "+vm.PowerState+" — power it OFF on vCenter first (VXVisor never changes the source)")
@@ -176,15 +305,17 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 	for _, d := range vm.Disks {
 		need += d.CapacityGB * 1024 * 1024 * 1024
 	}
-	if free := s.stg.FreeBytes(destDir); free > 0 && free < need*2 {
+	free := s.stg.FreeBytes(destDir)
+	lg.logf("target image dir %s: free=%d GiB, need ~%d GiB (incl. transient copy)", destDir, free/(1<<30), need*2/(1<<30))
+	if free > 0 && free < need*2 {
 		fail("precheck", fmt.Sprintf("not enough free space in image storage (need ~%d GiB incl. transient, have %d GiB)", need*2/(1<<30), free/(1<<30)))
 		return
 	}
 
-	log.Printf("vmware-import %s: exporting %q (%d disk(s), ~%d GiB) read-only", id, vm.Name, len(vm.Disks), need/(1<<30))
+	lg.logf("exporting %q (%d disk(s), ~%d GiB) read-only", vm.Name, len(vm.Disks), need/(1<<30))
 	s.vmwimp.set(id, func(st *VMwareImportState) { st.Status = "exporting"; st.Step = "downloading disks (read-only)" })
 	var lastLog time.Time
-	vmdks, err := cli.ExportVM(ctx, moid, destDir, func(ep vmware.ExportProgress) {
+	vmdks, err := cli.ExportVM(ctx, moid, destDir, lg.logf, func(ep vmware.ExportProgress) {
 		s.vmwimp.set(id, func(st *VMwareImportState) {
 			st.DoneBytes = ep.DoneBytes
 			st.TotalBytes = ep.TotalBytes
@@ -193,18 +324,18 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 				st.Pct = int(ep.DoneBytes * 100 / ep.TotalBytes)
 			}
 		})
-		// Throttle progress to the journal: one line every ~15s.
+		// Throttle periodic progress to one line every ~15s (per-disk start/finish
+		// lines come from ExportVM itself).
 		if time.Since(lastLog) >= 15*time.Second {
 			lastLog = time.Now()
-			log.Printf("vmware-import %s: export %d/%d MiB @ %d MiB/s", id,
-				ep.DoneBytes/(1<<20), ep.TotalBytes/(1<<20), ep.BytesPerSec/(1<<20))
+			lg.logf("export progress %d/%d MiB @ %d MiB/s", ep.DoneBytes/(1<<20), ep.TotalBytes/(1<<20), ep.BytesPerSec/(1<<20))
 		}
 	})
 	if err != nil {
 		fail("export", err.Error())
 		return
 	}
-	log.Printf("vmware-import %s: export complete, %d disk file(s)", id, len(vmdks))
+	lg.logf("export complete, %d disk file(s)", len(vmdks))
 	// Cleanup helper for the transient vmdks.
 	defer func() {
 		for _, f := range vmdks {
@@ -231,13 +362,14 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 			name = fmt.Sprintf("%s-disk%d", base, i)
 		}
 		dst := filepath.Join(destDir, name+".qcow2")
-		log.Printf("vmware-import %s: converting disk %d/%d → %s.qcow2", id, i+1, len(vmdks), name)
+		lg.logf("converting disk %d/%d (%s) → %s.qcow2 via qemu-img", i+1, len(vmdks), filepath.Base(vmdk), name)
 		if err := qemu.ConvertToQcow2(vmdk, dst); err != nil {
 			_ = os.Remove(dst)
 			s.rollbackImages(registered)
 			fail("convert", err.Error())
 			return
 		}
+		lg.logf("registering base image %q", name)
 		if err := s.stg.RegisterImage(name, dst, "vmware:"+vm.Name); err != nil {
 			_ = os.Remove(dst)
 			s.rollbackImages(registered)
@@ -265,7 +397,7 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		st.Pct = 100
 		st.FinishedAt = time.Now().UnixMilli()
 	})
-	log.Printf("vmware-import %s: DONE → image %q (%d disk(s))", id, firstImage, len(vmdks))
+	lg.logf("DONE → image %q (%d disk(s))", firstImage, len(vmdks))
 	s.audit(p, p.OrgID, "vmware.import", "image", firstImage, ip, map[string]any{
 		"vm": vm.Name, "disks": len(vmdks), "firmware": vm.Firmware, "guest": vm.GuestFullName, "os_type": osType,
 	})
@@ -278,6 +410,7 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 // tracker is in-memory), so on startup any such file is dead weight — we log and
 // remove it. Called once at boot, when no import can possibly own these files.
 func (s *Service) SweepImportTemps() {
+	s.pruneImportLogs()
 	if s.stg == nil {
 		return
 	}

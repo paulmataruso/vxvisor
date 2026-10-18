@@ -247,6 +247,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /import/vmware/connect", s.auth(s.vmwareConnect))
 	mux.HandleFunc("POST /import/vmware/start", s.auth(s.vmwareImport))
 	mux.HandleFunc("GET /api/vmware-import", s.auth(s.apiVmwareImport))
+	mux.HandleFunc("GET /api/vmware-import/{id}/log", s.auth(s.apiVmwareImportLog))
 	mux.HandleFunc("POST /cluster/nodes/{id}/probe", s.auth(s.probeNode))
 	mux.HandleFunc("POST /cluster/nodes/{id}/delete", s.auth(s.deleteNode))
 	mux.HandleFunc("POST /cluster/vms/{node}/{id}/{action}", s.auth(s.clusterVMAction))

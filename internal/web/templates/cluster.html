@@ -162,13 +162,18 @@
       var l=(d&&d.imports)||[]; if(!l.length){box.innerHTML='';return;}
       function gb(b){b=b||0; if(b>=1073741824)return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB';}
       function rate(b){b=b||0; return b>=1048576?(b/1048576).toFixed(1)+' MB/s':(b/1024).toFixed(0)+' KB/s';}
-      var h='<table style="margin:8px 0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th></tr>';
+      function esc(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+      var h='<table style="margin:8px 0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th><th>Log</th></tr>';
       l.forEach(function(j){
         var xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
         var spd=(j.status==='exporting'&&j.rate)?rate(j.rate):'—';
-        h+='<tr><td><strong>'+(j.vm||'')+'</strong></td><td>'+badge(j.status)+'</td>'+
-        '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+j.err+'</span>'):(j.step||''))+'</td>'+
-        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+(j.pct||0)+'%</td></tr>';});
+        var logcell=j.has_log?('<a href="/api/vmware-import/'+encodeURIComponent(j.id)+'/log" target="_blank" rel="noopener">view</a>'):'—';
+        h+='<tr><td><strong>'+esc(j.vm)+'</strong></td><td>'+badge(j.status)+'</td>'+
+        '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+esc(j.err)+'</span>'):esc(j.step))+'</td>'+
+        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+(j.pct||0)+'%</td><td>'+logcell+'</td></tr>';
+        if(j.status==='failed'&&j.log_tail&&j.log_tail.length){
+          h+='<tr><td colspan="7" style="padding:0 0 10px"><pre style="margin:4px 0;max-height:180px;overflow:auto;background:var(--panel2,#1a1a1a);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap">'+esc(j.log_tail.join('\n'))+'</pre></td></tr>';
+        }});
       box.innerHTML=h+'</table>';
     }).catch(function(){});
   }
