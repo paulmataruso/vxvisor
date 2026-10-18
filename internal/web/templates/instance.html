@@ -386,7 +386,7 @@
   </form>
 </div></div>
 
-{{if and .IsAdmin .Running}}
+{{if .IsAdmin}}
 <div class="modal" id="m-migrate"><div class="modal-card">
   <div class="modal-head"><h3>Migrate / move storage</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/sessions/{{$s.ID}}/migrate" onsubmit="return confirm('Relocate this instance as selected?')">
