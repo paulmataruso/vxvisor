@@ -154,7 +154,7 @@ func (s *Server) vmwareImport(w http.ResponseWriter, r *http.Request, p *service
 	if _, err := s.svc.VMwareImport(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Import started — the source VM is only read, never changed. Watch progress below; the disk lands as a base image.")
+		setFlashOK(w, "Import started — the source VM is only read, never changed. Watch progress below; when it finishes it creates a ready-to-run instance (same CPU/memory/firmware) you'll find on the Instances page.")
 	}
 	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
 }

@@ -388,23 +388,91 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		s.vmwimp.set(id, func(st *VMwareImportState) { st.Pct = (i + 1) * 100 / len(vmdks) })
 	}
 
-	note := ""
+	s.vmwimp.set(id, func(st *VMwareImportState) {
+		st.Status = "registering"
+		st.Step = "creating instance from imported disk"
+		st.Image = firstImage
+		st.Pct = 100
+	})
+	s.audit(p, p.OrgID, "vmware.import", "image", firstImage, ip, map[string]any{
+		"vm": vm.Name, "disks": len(vmdks), "firmware": vm.Firmware, "guest": vm.GuestFullName, "os_type": osType,
+	})
+
+	// Auto-create a ready-to-run instance from the imported boot disk, mirroring
+	// the source VM's shape (firmware/CPU/memory/disk-bus), so the user doesn't
+	// have to build one by hand. This is the whole point of a direct import.
+	//
+	// Best-effort: the base image is already registered, so if instance creation
+	// fails (quota, licensing, a host constraint) we still finish "done" with the
+	// image and tell the user exactly why no instance was made and how to add one.
+	firmware := "bios"
 	if vm.Firmware == "efi" {
-		note = " (UEFI — launch with UEFI firmware; boot entries may need a one-time fixup)"
+		firmware = "uefi"
 	}
+	cpus := int(vm.NumCPU)
+	if cpus < 1 {
+		cpus = 1
+	}
+	mem := int(vm.MemMB)
+	if mem < 512 {
+		mem = 1024
+	}
+	diskBus := "" // default (virtio-blk)
+	busNote := ""
 	if osType == "windows" {
-		note += " — Windows: launch with a SATA disk bus for first boot, then install virtio drivers"
+		// Windows won't boot off virtio without drivers; SATA for first boot,
+		// then the user installs virtio-win and can switch the bus.
+		diskBus = "sata"
+		busNote = " Disk bus set to SATA for first boot — install virtio-win drivers, then switch to virtio."
+	}
+	in := CreateInput{
+		Name:     vm.Name,
+		Image:    firstImage,
+		Kind:     "server",
+		Firmware: firmware,
+		CPUs:     cpus,
+		MemoryMB: mem,
+		DiskGB:   0, // inherit the image's virtual size (the source disk capacity)
+		OSType:   osType,
+		DiskBus:  diskBus,
+		Display:  "vnc",
+	}
+	busLog := diskBus
+	if busLog == "" {
+		busLog = "virtio-blk (default)"
+	}
+	lg.logf("creating instance %q from image %q (kind=server firmware=%s cpu=%d memMB=%d disk-bus=%s net=default/NAT, stopped)",
+		vm.Name, firstImage, firmware, cpus, mem, busLog)
+
+	extra := ""
+	if len(vmdks) > 1 {
+		extra = fmt.Sprintf(" The other %d disk(s) were imported as base images (%s-disk1…) — attach them to the instance if needed.", len(vmdks)-1, base)
+	}
+	efiNote := ""
+	if firmware == "uefi" {
+		efiNote = " UEFI boot entries may need a one-time fixup on first boot."
+	}
+
+	sess, cerr := s.CreateSession(p, in, ip)
+	if cerr != nil {
+		lg.logf("instance creation FAILED: %v (the base image %q is registered and ready; create an instance from it manually)", cerr, firstImage)
+		s.vmwimp.set(id, func(st *VMwareImportState) {
+			st.Status = "done"
+			st.Step = fmt.Sprintf("image %q ready, but auto-creating the instance failed: %v — create one from this image on the Instances page.", firstImage, cerr)
+			st.FinishedAt = time.Now().UnixMilli()
+			st.LogTail = lg.tailLines(30)
+		})
+		return
 	}
 	s.vmwimp.set(id, func(st *VMwareImportState) {
 		st.Status = "done"
-		st.Step = "registered image " + firstImage + note
-		st.Image = firstImage
-		st.Pct = 100
+		st.Step = fmt.Sprintf("instance %q created (%d vCPU, %d MiB, %s) from image %q — stopped, ready to start.%s%s",
+			vm.Name, cpus, mem, firmware, firstImage, efiNote, busNote) + extra
 		st.FinishedAt = time.Now().UnixMilli()
 	})
-	lg.logf("DONE → image %q (%d disk(s))", firstImage, len(vmdks))
-	s.audit(p, p.OrgID, "vmware.import", "image", firstImage, ip, map[string]any{
-		"vm": vm.Name, "disks": len(vmdks), "firmware": vm.Firmware, "guest": vm.GuestFullName, "os_type": osType,
+	lg.logf("DONE → instance %q (id=%s) created from image %q (%d disk(s))", vm.Name, sess.ID, firstImage, len(vmdks))
+	s.audit(p, p.OrgID, "vmware.import_instance", "session", sess.ID, ip, map[string]any{
+		"vm": vm.Name, "image": firstImage, "cpus": cpus, "memory_mb": mem, "firmware": firmware,
 	})
 }
 

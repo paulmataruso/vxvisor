@@ -97,7 +97,7 @@
     {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-vmware">+ Connect &amp; import</button>{{end}}
   </div>
   <div id="vmwprog"></div>
-  <p class="muted" style="margin:8px 0 0">Imports a VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source VM is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong> (for a consistent copy). Each disk is streamed in and registered as a base image you can launch. Use a read-only vSphere account.</p>
+  <p class="muted" style="margin:8px 0 0">Imports a VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source VM is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong> (for a consistent copy). Each disk is streamed in, and VXVisor <strong>creates a ready-to-run instance</strong> (matching the source CPU, memory, and firmware) on the Instances page — plus a reusable base image. Use a read-only vSphere account.</p>
   <p class="muted" style="margin:4px 0 0;font-size:12px">Disks arrive as a <strong>compressed stream</strong>: a thin 25 GiB disk may only pull a few GiB and still be complete — the amount downloaded is normally well below the disk's size, and that is <strong>not</strong> a truncated transfer. Watch for the status to reach <strong>done</strong>.</p>
 </div>
 
