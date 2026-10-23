@@ -152,8 +152,5 @@ automatically. Database migrations run automatically on start.
 
 ## Related docs
 
+- [`../OVERVIEW.md`](../OVERVIEW.md) — technical overview of how VXVisor works.
 - [`TUNING.md`](TUNING.md) — performance tuning (automatic and host-level).
-- [`CLUSTERING.md`](CLUSTERING.md) — multi-node clustering and the floating
-  management address.
-- [`CLUSTER-NETWORKING.md`](CLUSTER-NETWORKING.md) — overlay networking and live
-  migration.

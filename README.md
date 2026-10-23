@@ -125,7 +125,7 @@ the UI itself.
   authenticated proxy, and destructive operations guard the management interface
   and in-use disks.
 
-See [`CLAUDE.md`](CLAUDE.md) for the detailed architecture and conventions.
+See [`OVERVIEW.md`](OVERVIEW.md) for a module-by-module technical breakdown.
 
 ---
 
@@ -154,10 +154,8 @@ VXVisor bundles third-party components under their own permissive licenses
 ## Docs
 
 - [`docs/INSTALL.md`](docs/INSTALL.md) — installation guide.
+- [`OVERVIEW.md`](OVERVIEW.md) — technical overview: how each module works.
 - [`docs/TUNING.md`](docs/TUNING.md) — performance tuning.
-- [`docs/CLUSTERING.md`](docs/CLUSTERING.md) — multi-node clustering.
-- [`docs/CLUSTER-NETWORKING.md`](docs/CLUSTER-NETWORKING.md) — overlay networking & live migration.
-- [`CLAUDE.md`](CLAUDE.md) — architecture & engineering notes.
 
 > Note: the Go module is named `vdxclone` for historical reasons; the product is
 > **VXVisor**. The repository name and module path differ, which is fine.

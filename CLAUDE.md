@@ -125,7 +125,7 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   `/var/lib/vdxclone/` (host) — **never commit them.** No host IPs/passwords/tokens in the repo.
 
 ## Current state (migrate when the new host is ready)
-- Feature set complete through M22 (see the session memory / `PLAN.md`). The VDI feature
+- Feature set complete through M22 (see the session memory). The VDI feature
   (desktop portal + pool/app broker + guacd gateway) was removed — VXVisor is now a pure
   VM/host control plane.
 - The old test host was an **Intel Atom C2758** (weak; fine for servers/LXC/light desktops).

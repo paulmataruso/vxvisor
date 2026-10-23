@@ -2,7 +2,7 @@
 // signed license file that caps seats / server VMs / running VMs / storage, with
 // an optional operator-opt-in heartbeat.
 //
-// Design stance (deliberate, see PLAN.md M9): this replicates the *shape* of the
+// Design stance (deliberate): this replicates the *shape* of the
 // decompiled vendor licensing — an HMAC-SHA256-signed payload and a /heartbeat
 // envelope — but inverts its control. The license is verified **offline** with a
 // key the operator holds; enforcement is OFF unless the operator turns it on;
