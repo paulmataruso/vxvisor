@@ -45,7 +45,7 @@
     </tr>
     {{end}}
   </table>
-  <p class="muted" style="margin:12px 0 0">Unified view via the management VIP — every node's VMs, fully manageable from here. Details, console, lifecycle, resize, snapshots and migration are transparently proxied to the owning node (the same management is also available on each host's own IP).</p>
+  <p class="muted" style="margin:12px 0 0">You're seeing every node's VMs in one place, and you can fully manage any of them from here — each action is carried out on whichever node owns the VM.</p>
   {{else}}<div class="empty">No instances across the cluster yet.</div>{{end}}
   {{else}}
   {{if .Sessions}}
@@ -64,6 +64,7 @@
         <a class="btn sm" href="/instances/{{.ID}}">Details</a>
         {{if eq .State "running"}}
           <a class="btn sm" href="/console/{{.ID}}" target="_blank" rel="noopener">Console</a>
+          <form method="post" action="/sessions/{{.ID}}/restart" style="display:inline" onsubmit="return confirm('Restart {{.Name}}? The VM will shut down and start again.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm" title="Shut the VM down and start it again">Restart</button></form>
           <form method="post" action="/sessions/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
         {{else}}
           <form method="post" action="/sessions/{{.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>
@@ -95,7 +96,7 @@
     <label class="fld">vCPUs<input type="number" name="cpus" value="2" min="1" max="32"></label>
     <label class="fld">Memory (MB)<input type="number" name="memory_mb" value="2048" min="256" step="256"></label>
     <label class="fld">Disk (GB)<input type="number" name="disk_gb" value="10" min="0" max="2048"></label>
-    <label class="fld">PCI passthrough<input type="text" name="passthrough" placeholder="0000:01:00.0" title="host PCI address(es), comma-separated; requires IOMMU"></label>
+    <label class="fld">PCI passthrough<input type="text" name="passthrough" placeholder="0000:01:00.0" title="physical device address(es) to pass through, separated by commas"></label>
     <label class="fld linux-only">Login user<input type="text" name="ci_username" value="vdx" placeholder="vdx"></label>
     <label class="fld linux-only">Password<input type="text" name="ci_password" placeholder="(auto-generated)"></label>
     <label class="fld full linux-only">SSH public key (optional)<input type="text" name="ci_ssh_key" placeholder="ssh-ed25519 AAAA…"></label>

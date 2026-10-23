@@ -31,8 +31,9 @@
     {{if .Clustered}}<span class="host-tag" title="This instance runs on cluster node {{.NodeName}}">{{.NodeName}}</span>{{end}}
     <div class="spacer" style="flex:1"></div>
     {{if .Running}}
-      <a class="btn sm primary" href="/console/{{$s.ID}}" target="_blank" rel="noopener" title="Graphical VNC console (noVNC). Best for GUI guests; cloud images/cirros put their shell on the serial console instead.">VNC console</a>
-      <a class="btn sm" href="/console/{{$s.ID}}/serial" target="_blank" rel="noopener" title="Text serial console (xterm.js) → guest ttyS0. The console that accepts input for cloud images/cirros/headless servers. Needs the VM (re)started since serial was enabled.">Serial console</a>
+      <a class="btn sm primary" href="/console/{{$s.ID}}" target="_blank" rel="noopener" title="Graphical console for the VM's screen. Best for desktop/GUI guests; text-only servers use the serial console instead.">VNC console</a>
+      <a class="btn sm" href="/console/{{$s.ID}}/serial" target="_blank" rel="noopener" title="Text console for command-line and server guests. If it's blank, restart the VM so the serial console is enabled.">Serial console</a>
+      <form method="post" action="/sessions/{{$s.ID}}/restart" style="display:inline" onsubmit="return confirm('Restart {{$s.Name}}? The VM will shut down and start again.')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm" title="Shut the VM down and start it again">Restart</button></form>
       <form method="post" action="/sessions/{{$s.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
     {{else}}
       <form method="post" action="/sessions/{{$s.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>
@@ -54,11 +55,11 @@
       {{if eq $s.OSType "windows"}}
         {{if and $.VirtioAvail (not $s.EjectVirtio)}}
         <form method="post" action="/sessions/{{$s.ID}}/eject-virtio" style="display:inline" onsubmit="return confirm('Detach the virtio-win driver CD? Do this after the drivers are installed. Takes effect on next start.')">
-          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" title="Detach the virtio-win driver ISO (after installing the drivers; takes effect next start)"><svg class="ic"><use href="#i-disc"/></svg>Eject virtio drivers</button>
+          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" title="Remove the Windows driver disc after installing the drivers (applies on next start)"><svg class="ic"><use href="#i-disc"/></svg>Eject virtio drivers</button>
         </form>
         {{end}}
         <form method="post" action="/sessions/{{$s.ID}}/mount-virtio" style="display:inline">
-          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" {{if not $.VirtioAvail}}disabled title="virtio-win ISO not found in the ISO library"{{else}}title="Attach the virtio-win driver ISO (to install/repair drivers or the guest agent; takes effect next start)"{{end}}><svg class="ic"><use href="#i-disc"/></svg>Mount virtio drivers</button>
+          <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn" {{if not $.VirtioAvail}}disabled title="Windows driver disc not found in the ISO library"{{else}}title="Attach the Windows driver disc to install or repair drivers (applies on next start)"{{end}}><svg class="ic"><use href="#i-disc"/></svg>Mount virtio drivers</button>
         </form>
       {{end}}
       <span class="muted" style="font-size:12px;align-self:center">click a value to edit</span>
@@ -173,7 +174,7 @@
 {{if $s.CloudInit}}
 <div class="card">
   <h2>First-boot credentials (cloud-init)</h2>
-  <p class="muted" style="margin:4px 0 0">Injected on first boot. Usable at the console and over SSH once the guest finishes cloud-init.</p>
+  <p class="muted" style="margin:4px 0 0">Set on the VM's first boot. You can sign in at the console or over SSH once first-boot setup finishes.</p>
   <div class="spec">
     <div class="si"><span class="si-l">Username</span><span class="si-v mono">{{$s.CIUsername}}</span></div>
     <div class="si"><span class="si-l">Password</span><span class="si-v mono">{{$s.CIPassword}}</span></div>
@@ -244,7 +245,7 @@
     <h2>Migrate / move storage</h2>
     <button class="btn primary" data-modal="m-migrate">Migrate</button>
   </div>
-  <p class="muted" style="margin:0">Move this instance to another <strong>host</strong> (live migration — the guest keeps its IP over the VXLAN overlay; needs shared storage, auto-detected) or move its disk to different <strong>storage</strong> (live via drive-mirror or while stopped). Storage moves are fail-safe: the original disk is only read and is kept until the move is verified, so the instance is always recoverable.</p>
+  <p class="muted" style="margin:0">Move this instance to another <strong>host</strong> (it keeps running and keeps its IP; needs shared storage, detected automatically) or move its disk to different <strong>storage</strong> (while running or stopped). Storage moves are safe: the original disk is only read and kept until the move is verified, so the instance is always recoverable.</p>
 </div>
 {{end}}
 
@@ -320,7 +321,7 @@
     <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="secure_boot"{{if $s.SecureBoot}} checked{{end}}> Secure Boot (UEFI only)</label>
     <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="perf_pin"{{if $s.PinCPUs}} checked{{end}}> Pin vCPUs to host cores (lower latency/jitter)</label>
     <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="perf_hugepages"{{if $s.HugePages}} checked{{end}}> Back RAM with hugepages (needs a host pool; falls back if none)</label>
-    <p class="muted" style="margin:0">Applies on next start. Raw (LVM/ZFS) disks always use virtio-blk. Secure Boot requires UEFI and re-provisions the UEFI NVRAM; the data disk is never touched.</p>
+    <p class="muted" style="margin:0">Applies on next start. Secure Boot requires UEFI firmware; your data disk is never touched.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save hardware</button></div>
   </form>
 </div></div>

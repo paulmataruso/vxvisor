@@ -6,7 +6,7 @@
   #topo svg{display:inline-block;margin:0 auto}
 </style>
 <div class="card">
-  <p class="muted" style="margin:0">VMware-style data plane: build it bottom-up — <b>Uplink</b> (a single NIC, or a team of NICs) → <b>vSwitch</b> (VLAN trunk) → <b>Port Group</b> (a VLAN) → VMs. Teaming supports both active with adaptive load balancing (no LACP / no switch config), hash-based LAGs (MAC / IP), or active-standby failover. The management NIC is protected and can't be used as an uplink.</p>
+  <p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
 </div>
 
 {{if .P.IsAdmin}}
@@ -72,7 +72,7 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No port groups. The built-in user-mode NAT is always available; add a VLAN port group to place VMs on your LAN.</div>{{end}}
-  <p class="muted" style="margin:12px 0 0">A <strong>Port Group</strong> is a VLAN on a vSwitch — VM taps join it as untagged access ports (PVID), and the VLAN is carried tagged on the vSwitch uplink. <strong>user</strong> mode needs no vSwitch.</p>
+  <p class="muted" style="margin:12px 0 0">A <strong>Port Group</strong> is a VLAN on a vSwitch that VMs connect to. (<strong>user</strong> mode needs no vSwitch.)</p>
 </div>
 
 {{if .P.IsAdmin}}
@@ -122,7 +122,7 @@
         <option value="layer2+3">IP + MAC (L2+L3)</option>
         <option value="layer2">Source MAC hash</option>
       </select>
-      <span class="muted" style="font-size:11px">Only LACP / etherchannel hash on a policy; the adaptive/failover modes balance on their own.</span>
+      <span class="muted" style="font-size:11px">Only link-aggregation modes use a hashing policy; the automatic and failover modes balance on their own.</span>
     </label>
     <label class="fld">Member NICs
       <div id="bondmembers" class="muted" style="display:flex;flex-wrap:wrap;gap:12px;padding:6px 0">loading…</div>
@@ -167,7 +167,7 @@
   <div class="modal-head"><h3>Add teaming to <span id="vsb-name"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" id="vsbondform" action="/networks/vswitches">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="muted" style="margin:0">Teams the current uplink <b><span id="vsb-cur"></span></b> with the NIC(s) you pick below, then moves this vSwitch onto the team — in one step. For the management vSwitch this is applied via netplan with an automatic rollback, so the admin IP can never be lost.</p>
+    <p class="muted" style="margin:0">Teams the current uplink <b><span id="vsb-cur"></span></b> with the ports you pick below and moves this vSwitch onto the team, in one step. On the management vSwitch it's applied with an automatic rollback, so the admin connection can never be lost.</p>
     <label class="fld">Bond name<input name="bond_name" placeholder="bond0" required></label>
     <label class="fld">Teaming mode
       <select name="mode" id="vsbmode">
@@ -240,11 +240,11 @@
   <form class="mform row2" method="post" action="/networks">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="mode" value="vxlan">
-    <p class="muted full" style="margin:0;font-size:12px">A standalone L2 overlay segment with its own VNI, riding as UDP over any underlay NIC — VMs on it share one broadcast domain across hosts. Give every node the same VNI and list the <em>other</em> nodes' underlay IPs as peers. This is independent of the single cluster overlay.</p>
+    <p class="muted full" style="margin:0;font-size:12px">A private network segment that spans multiple hosts, so VMs on different hosts share one network. Give every host the same network ID (VNI) and list the <em>other</em> hosts' IPs as peers.</p>
     <label class="fld">Name<input type="text" name="name" placeholder="vxlan-tenant-100" required></label>
     <label class="fld">VNI<input type="number" name="vni" min="1" max="16777215" placeholder="100" required></label>
     <label class="fld">Underlay NIC<input type="text" name="underlay" placeholder="e.g. eth0 / bond0" required></label>
-    <label class="fld">Underlay local IP<input type="text" name="vxlan_local" placeholder="(optional) this node's underlay IP"></label>
+    <label class="fld">Underlay local IP<input type="text" name="vxlan_local" placeholder="(optional) this host's IP for the overlay"></label>
     <label class="fld full">Peer underlay IPs<input type="text" id="vxlan-peers" name="vxlan_peers" placeholder="comma-separated other-node IPs, e.g. 10.10.2.160"></label>
     {{if .ClusterPeers}}
     <label class="fld full" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="vxlan_autopeer" value="1" style="width:auto" checked> Auto-peer with cluster members <span class="muted mono" style="font-size:11px">({{range $i,$ip := .ClusterPeers}}{{if $i}}, {{end}}{{$ip}}{{end}})</span></label>
@@ -252,12 +252,12 @@
     <p class="muted full" style="margin:0;font-size:11px">No other cluster members detected — add peers manually above, or join nodes to the cluster and they can be auto-peered.</p>
     {{end}}
     <label class="fld">UDP port<input type="number" name="vxlan_dstport" value="4789"></label>
-    <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" title="underlay MTU minus ~50"></label>
+    <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" title="usually the network's MTU minus about 50"></label>
     <label class="fld">Guest CIDR<input type="text" name="cidr" placeholder="(optional) 10.100.0.0/24"></label>
     <label class="fld">Gateway on bridge<input type="text" name="gateway" placeholder="(optional) 10.100.0.1"></label>
     <label class="fld">Pool start<input type="text" name="pool_start" placeholder="(optional) 10.100.0.10"></label>
     <label class="fld">Pool end<input type="text" name="pool_end" placeholder="(optional) 10.100.0.200"></label>
-    <p class="muted full" style="margin:0;font-size:11px">A per-network bridge (<span class="mono">vdxubr&lt;id&gt;</span>) + VXLAN device is created and made reboot-persistent via systemd. VMs attach to it by selecting this network at launch.</p>
+    <p class="muted full" style="margin:0;font-size:11px">This network is created and kept across reboots automatically. VMs join it by selecting it when you launch them.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create VXLAN network</button></div>
   </form>
 </div></div>

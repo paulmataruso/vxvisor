@@ -72,7 +72,7 @@
     </tr>
     {{end}}
   </table>
-  <p class="muted" style="margin:12px 0 0">A target is where backups are written — independent of storage pools. Add a local directory or an NFS / CIFS / CephFS share; network shares are mounted automatically and remounted on boot. Credentials are encrypted at rest.</p>
+  <p class="muted" style="margin:12px 0 0">A target is where backups are written. Add a local folder or a network share (NFS, CIFS or CephFS); network shares are mounted automatically and remounted after a reboot. Any password you enter is stored encrypted.</p>
 </div>
 
 <!-- Add backup target modal -->
@@ -109,7 +109,7 @@
     <div class="tf tf-nfs tf-cifs tf-cephfs" style="display:none">
       <label class="fld">Extra mount options (optional)<input type="text" name="options" placeholder="rw,soft"></label>
     </div>
-    <p class="muted" style="margin:0;font-size:12px">Network shares are test-mounted on save; a bad target is rejected rather than stored. For CephFS, <em>Server</em> is the mon list and <em>Username</em>/<em>Password</em> are the client name + key.</p>
+    <p class="muted" style="margin:0;font-size:12px">Network shares are test-mounted when you save, so a target that doesn't work is rejected instead of saved.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add target</button></div>
   </form>
 </div></div>
@@ -149,7 +149,7 @@
         {{range .Targets}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
       </select>
     </label>
-    <p class="muted" style="margin:0;font-size:12px">The instance must be <strong>stopped</strong> — its disk is quiesced before copying. Targets include local storage and any registered NFS/CIFS/CephFS/ZFS pool.</p>
+    <p class="muted" style="margin:0;font-size:12px">The instance must be <strong>stopped</strong> so the backup is a clean, consistent copy. You can back up to local storage or any registered network/ZFS pool.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Back up now</button></div>
   </form>
 </div></div>

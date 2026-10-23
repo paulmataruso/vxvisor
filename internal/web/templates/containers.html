@@ -1,8 +1,8 @@
 {{define "containers.html"}}{{template "head" .}}
 <div class="card">
   <div class="card-head">
-    <h2>Containers <span class="muted" style="font-weight:400;font-size:12px">— LXC system containers</span></h2>
-    <button class="btn primary" data-modal="m-ct" {{if not .LXCReady}}disabled title="LXC not installed on this host"{{end}}>+ New container</button>
+    <h2>Containers <span class="muted" style="font-weight:400;font-size:12px">— lightweight Linux containers</span></h2>
+    <button class="btn primary" data-modal="m-ct" {{if not .LXCReady}}disabled title="Container support isn't installed on this host"{{end}}>+ New container</button>
   </div>
   {{if not .LXCReady}}<div class="empty">LXC tools not installed on this host (<span class="mono">lxc</span>).</div>
   {{else if .Containers}}
@@ -50,12 +50,12 @@
         <label class="fld">vCPUs<input type="number" name="cpus" value="{{.CPUs}}" min="1" max="64" style="width:90px"></label>
         <label class="fld">Memory (MB)<input type="number" name="mem_mb" value="{{.MemoryMB}}" min="64" step="64" style="width:120px"></label>
       </div>
-      <p class="muted" style="margin:0">Changing the network re-attaches the container's NIC to the chosen bridge live (no restart) — e.g. a vRouter's internal port-group bridge. CPU/RAM apply immediately.</p>
+      <p class="muted" style="margin:0">Changing the network moves the container to the chosen network right away, with no restart. CPU and memory changes also apply immediately.</p>
       <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
     </form>
   </div></div>
   {{end}}{{end}}
-  <p class="muted" style="margin:10px 0 0;font-size:12px">Attach a console with <span class="mono">lxc-attach -n &lt;name&gt;</span> on the host. Containers share the host kernel and start in well under a second.</p>
+  <p class="muted" style="margin:10px 0 0;font-size:12px">Containers are very lightweight and start in well under a second. Use the shell button on a container to open a root shell.</p>
   {{else}}<div class="empty">No containers yet. Create one — the rootfs downloads in the background (shows “creating”, then “stopped”).</div>{{end}}
 </div>
 

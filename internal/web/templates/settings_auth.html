@@ -8,10 +8,10 @@
     <span class="pill {{if .AD.Enabled}}running{{end}}">{{if .AD.Enabled}}enabled{{else}}disabled{{end}}</span>
   </div>
   <p class="muted" style="margin:4px 0 0">
-    Let users sign in with their AD credentials. Accounts are created automatically on first login (JIT).
-    The minimum is a <b>directory URL</b> + <b>domain</b> — that alone enables UPN login. Add a service
-    account only if you want to map an AD group to the admin role.
-    {{if not .FromDB}}<br><span style="color:var(--warn)">These values currently come from the config file <span class="mono">[ad]</span> block; saving here takes over and persists in the database.</span>{{end}}
+    Let users sign in with their Active Directory username and password. Accounts are created automatically
+    the first time someone signs in. At minimum you need the <b>directory URL</b> and <b>domain</b>. Add a
+    service account only if you want to make members of an AD group admins.
+    {{if not .FromDB}}<br><span style="color:var(--warn)">These settings currently come from the config file; saving here takes over and keeps them in the database.</span>{{end}}
   </p>
 </div>
 
@@ -52,7 +52,7 @@
       <input name="base_dn" value="{{.AD.BaseDN}}" placeholder="DC=corp,DC=example,DC=com">
     </label>
     <label class="fld">Admin group
-      <input name="admin_group" value="{{.AD.AdminGroup}}" placeholder="VXVisor-Admins (CN or full DN)">
+      <input name="admin_group" value="{{.AD.AdminGroup}}" placeholder="e.g. VXVisor-Admins">
     </label>
     <label class="fld full">User search filter <span class="muted">(advanced — leave blank for the default)</span>
       <input name="user_filter" value="{{.AD.UserFilter}}" placeholder="(&(objectClass=user)(sAMAccountName=%s))">

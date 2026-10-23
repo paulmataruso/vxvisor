@@ -12,14 +12,14 @@
     <button class="btn primary" data-modal="m-plan">+ Plan a migration</button>
   </div>
   <p class="muted" style="margin:0">Select several VMs, order them, and set each one's name, CPU/RAM, firmware, transfer method, target storage, and <strong>network port group</strong> — pre-filled from VMware, override any cell. Imports run one at a time in your order; each becomes a ready-to-run instance as it finishes.</p>
-  {{if .VDDKReady}}<p class="muted" style="margin:6px 0 0;font-size:12px"><span class="pill running">VDDK ready</span> The fastest transfer method (VDDK over NBD) is the default for each VM.</p>
-  {{else}}<p class="muted" style="margin:6px 0 0;font-size:12px"><strong>Tip:</strong> install VMware VDDK below for the fastest imports — it's the quickest transfer method for large, sparse disks. Datastore-direct is the default until then.</p>{{end}}
+  {{if .VDDKReady}}<p class="muted" style="margin:6px 0 0;font-size:12px"><span class="pill running">VDDK ready</span> The fastest transfer method is selected by default for each VM.</p>
+  {{else}}<p class="muted" style="margin:6px 0 0;font-size:12px"><strong>Tip:</strong> install VMware VDDK below for the fastest imports. Until then, Datastore-direct is used.</p>{{end}}
 </div>
 
 <!-- ===================== QUICK IMPORT (single VM) ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Quick Import <span class="pill" title="Validated for connect+list; export needs a real vCenter">experimental</span></h2>
+    <h2>Quick Import <span class="pill" title="Early feature — tested for connecting to and listing VMs">experimental</span></h2>
     <button class="btn primary" data-modal="m-vmware">+ Connect &amp; import one VM</button>
   </div>
   <p class="muted" style="margin:0">Import a single VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong>. Creates a ready-to-run instance (matching CPU/memory/firmware) plus a reusable base image.</p>
@@ -31,7 +31,7 @@
     <h2>Import a VM disk</h2>
     <button class="btn primary" data-modal="m-import">+ Import disk</button>
   </div>
-  <p class="muted" style="margin:0">Converts a foreign disk (VMDK/VHD/raw/qcow2) to qcow2 and registers it as a base image. Also available as <span class="mono">vdxd import &lt;name&gt; &lt;file&gt;</span>.</p>
+  <p class="muted" style="margin:0">Converts a disk from another platform (VMDK, VHD, raw, qcow2) into a reusable base image.</p>
 </div>
 
 <!-- ===================== VDDK ACCELERATOR ===================== -->
@@ -41,11 +41,11 @@
     {{if .VDDKInstalled}}<button class="btn primary" data-modal="m-vddk">{{if .VDDKReady}}Replace VDDK{{else}}+ Install VDDK{{end}}</button>{{end}}
   </div>
   {{if .VDDKReady}}
-    <p class="muted" style="margin:0"><span class="pill running">installed</span> VDDK library in use at <span class="mono">{{.VDDKLibDir}}</span>. <strong>VDDK over NBD</strong> is available as a transfer method — the fastest way to import large, sparse disks (reads only allocated blocks).</p>
+    <p class="muted" style="margin:0"><span class="pill running">installed</span> VDDK is set up at <span class="mono">{{.VDDKLibDir}}</span>. The fastest import method is now available.</p>
   {{else if .VDDKInstalled}}
-    <p class="muted" style="margin:0">nbdkit + VDDK plugin are installed, but the VMware VDDK library itself is <strong>not</strong> loaded yet (it's proprietary — we can't bundle it). Download the <strong>Virtual Disk Development Kit</strong> (<span class="mono">vmware-vix-disklib-*.tar.gz</span>) matching your vSphere version from the Broadcom/VMware portal, then upload it here — no SSH needed. <strong>VDDK is the fastest import method.</strong></p>
+    <p class="muted" style="margin:0">VDDK support is ready, but VMware's VDDK library isn't installed yet (it's proprietary, so we can't include it). Download it from the Broadcom/VMware portal for your vSphere version and upload it here — no SSH needed. <strong>It's the fastest import method.</strong></p>
   {{else}}
-    <p class="muted" style="margin:0">nbdkit's VDDK plugin isn't present on this host, so the VDDK transport can't be enabled. The NFC and Datastore-direct transfer methods still work without it.</p>
+    <p class="muted" style="margin:0">VDDK isn't available on this host. The NFC and Datastore-direct transfer methods still work without it.</p>
   {{end}}
 </div>
 
@@ -57,7 +57,7 @@
   </div>
   <div id="vmexpprog"></div>
   <p class="muted" style="margin:8px 0 0">Export a <strong>stopped</strong> VXVisor VM as a downloadable <strong>disk image</strong> (qcow2/raw/VMDK) or <strong>OVA</strong>, or <strong>push</strong> it into a target vCenter/ESXi. The source VM is only read, never changed.</p>
-  <p class="muted" style="margin:4px 0 0;font-size:12px"><strong>Note:</strong> an exported disk is faithful at the block level, but guest <em>bootability</em> on another hypervisor depends on drivers (e.g. virtio vs VMware). It may need a driver fixup to boot elsewhere.</p>
+  <p class="muted" style="margin:4px 0 0;font-size:12px"><strong>Note:</strong> the exported disk is an exact copy, but whether it <em>boots</em> on another platform depends on the guest's drivers. It may need a driver fix to boot elsewhere.</p>
 </div>
 
 <!-- ===================== IMPORT PROGRESS ===================== -->
@@ -144,7 +144,7 @@
           <option value="nfc">NFC export — compressed stream, any power state (slowest)</option>
         </select>
       </label>
-      <p class="muted" style="margin:-2px 0 8px;font-size:11px">VDDK is the fastest; Datastore direct is fast but moves full logical size; NFC is CPU-throttled on the host (~single-digit MB/s) but works on any VM.{{if not .VDDKReady}} (Install VDDK above to unlock the fastest method.){{end}}</p>
+      <p class="muted" style="margin:-2px 0 8px;font-size:11px">VDDK is the fastest. Datastore-direct is fast. NFC is the slowest but works with any VM.{{if not .VDDKReady}} (Install VDDK above to unlock the fastest method.){{end}}</p>
       <label class="fld">Target storage (where the imported disk lands)
         <select name="target_pool_id">
           <option value="0">— default disk directory (qcow2) —</option>
@@ -173,7 +173,7 @@
   <div class="modal-head"><h3>Install VMware VDDK</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/cluster/vddk-upload" enctype="multipart/form-data">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="muted" style="margin:0 0 4px">Upload the VMware <strong>Virtual Disk Development Kit</strong> archive (<span class="mono">vmware-vix-disklib-8.x.y-*.tar.gz</span>) matching your ESXi/vCenter. VXVisor unpacks it and wires up the library automatically.</p>
+    <p class="muted" style="margin:0 0 4px">Upload the VMware <strong>VDDK</strong> download that matches your ESXi/vCenter. VXVisor sets it up automatically.</p>
     <label class="fld">VDDK archive<input type="file" name="vddk" accept=".gz,.tgz,.tar,.bz2,.xz" required></label>
     <p class="muted" style="margin:0;font-size:11px">Proprietary (VMware/Broadcom EULA); stored only on this host — never uploaded anywhere else.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Upload &amp; install</button></div>

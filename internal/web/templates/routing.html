@@ -4,7 +4,7 @@
     <h2>L3 Routing</h2>
     <form method="post" action="/routing/apply" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn primary">Apply / refresh</button></form>
   </div>
-  <p class="muted" style="margin:0">vdxd owns a single managed FRR config + nftables table. Build routing with the buttons below — each change is applied to the host immediately.{{if not .FRRReady}} <strong style="color:var(--danger)">FRR is not installed — OSPF/BGP/static won't apply.</strong>{{end}}</p>
+  <p class="muted" style="margin:0">Set up routing and NAT with the buttons below — each change is applied to the host immediately.{{if not .FRRReady}} <strong style="color:var(--danger)">Routing tools aren't installed — OSPF/BGP/static routes won't apply.</strong>{{end}}</p>
 </div>
 
 <!-- Edge NAT uplink -->
@@ -20,13 +20,13 @@
     </label>
     <button class="btn">Set uplink</button>
   </form>
-  <p class="muted" style="margin:8px 0 0;font-size:12px">NAT target networks are taken automatically from Port Groups flagged for NAT; masqueraded out this uplink.</p>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">Networks are taken automatically from the Port Groups you've marked for NAT, and sent out through this uplink.</p>
 </div>
 
 <!-- Routed interfaces / transit links -->
 <div class="card">
   <div class="card-head"><h2>Routed interfaces <span class="muted" style="font-weight:400;font-size:12px">— transit links</span></h2><button class="btn primary" data-modal="m-prefix">+ Assign IP to interface</button></div>
-  <p class="muted" style="margin:0 0 12px">Assign an IP directly to an unused interface — e.g. a point-to-point <strong>transit link</strong> to another router. The address is bound straight to the NIC (via zebra) and survives reboots. The management interface and any NIC already in a vSwitch/bond are excluded.</p>
+  <p class="muted" style="margin:0 0 12px">Assign an IP directly to an unused network port — for example a <strong>transit link</strong> to another router. The address stays across reboots. The management port and any port already in a vSwitch or team are excluded.</p>
   {{if .Cfg.Prefixes}}
   <table><tr><th>Interface</th><th>IP / prefix (CIDR)</th><th></th></tr>
     {{range $i, $x := .Cfg.Prefixes}}<tr><td class="mono">{{$x.Iface}}</td><td class="mono">{{$x.CIDR}}</td>
@@ -152,7 +152,7 @@
     <label class="fld">Router ID<input name="router_id" value="{{.Cfg.EIGRP.RouterID}}" placeholder="1.1.1.1"></label>
     <button class="btn">Save EIGRP</button>
   </form>
-  <p class="muted" style="margin:6px 0 0;font-size:12px">All routers in the EIGRP domain must share the same AS number. Each added network runs EIGRP on the matching interface(s) and advertises it.</p>
+  <p class="muted" style="margin:6px 0 0;font-size:12px">All routers in the same EIGRP group must use the same AS number. Each network you add is advertised to the others.</p>
   {{if .Cfg.EIGRP.Networks}}
   <h3 style="margin:14px 0 6px;font-size:13px">Networks</h3>
   <table><tr><th>Network</th><th></th></tr>

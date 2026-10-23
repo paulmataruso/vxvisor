@@ -247,8 +247,8 @@
   <div class="topbar">
     <h1>{{if .Title}}{{.Title}}{{else}}VXVisor{{end}}</h1>
     {{if .Clustered}}
-      {{if .Unified}}<span class="pill running" title="Unified cluster view — managing the whole cluster via the management VIP">⬡ Cluster{{if .VIP}} · {{.VIP}}{{end}}</span>
-      {{else}}<span class="pill" title="Standalone host view — this node only. Use the cluster VIP for the unified view.">▣ Host{{if .NodeName}} · {{.NodeName}}{{end}}</span>{{end}}
+      {{if .Unified}}<span class="pill running" title="Managing the whole cluster from the cluster address">⬡ Cluster{{if .VIP}} · {{.VIP}}{{end}}</span>
+      {{else}}<span class="pill" title="Viewing this host only. Use the cluster address to manage the whole cluster.">▣ Host{{if .NodeName}} · {{.NodeName}}{{end}}</span>{{end}}
     {{end}}
     <div class="spacer"></div>
     {{if .P.Orgs}}

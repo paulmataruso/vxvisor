@@ -443,6 +443,18 @@ func (s *Server) stopSession(w http.ResponseWriter, r *http.Request, p *service.
 	redirectBack(w, r)
 }
 
+func (s *Server) restartSession(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if _, err := s.svc.RestartSession(p, r.PathValue("id"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	redirectBack(w, r)
+}
+
 // autostartSession toggles a VM's "start at boot" flag. The form posts
 // on=1 (enable) or on=0 (disable).
 func (s *Server) autostartSession(w http.ResponseWriter, r *http.Request, p *service.Principal) {

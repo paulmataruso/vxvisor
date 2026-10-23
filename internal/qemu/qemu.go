@@ -456,17 +456,28 @@ func (s Spec) Args() []string {
 		"-device", "virtio-rng-pci",
 		"-device", "virtio-balloon-pci,free-page-reporting=on",
 	)
-	// A SINGLE virtio-serial controller carries both the SPICE vdagent channel
-	// (clipboard/resolution) and the qemu-guest-agent channel. Emitting two
+	// A SINGLE virtio-serial controller carries the vdagent channel (clipboard,
+	// and resolution under SPICE) and the qemu-guest-agent channel. Emitting two
 	// controllers is wrong, so build one and attach whichever ports are enabled.
+	// We always add it now: the plain noVNC console needs vdagent for clipboard.
 	spiceOn := s.Display == "spice" && s.SPICEPort > 0
-	if spiceOn || s.GuestAgent {
-		a = append(a, "-device", "virtio-serial-pci,id=vserial0")
-	}
+	a = append(a, "-device", "virtio-serial-pci,id=vserial0")
 	if spiceOn {
+		// SPICE display: the SPICE client provides clipboard via spicevmc.
 		a = append(a,
 			"-spice", fmt.Sprintf("port=%d,addr=127.0.0.1,disable-ticketing=on", s.SPICEPort),
 			"-chardev", "spicevmc,id=vdagent,name=vdagent",
+			"-device", "virtserialport,bus=vserial0.0,chardev=vdagent,name=com.redhat.spice.0",
+		)
+	} else {
+		// Plain VNC console: QEMU's BUILT-IN vdagent bridges the -vnc server's
+		// clipboard to the guest's spice-vdagent (Linux: spice-vdagent package;
+		// Windows: spice-guest-tools / vdservice). Without this chardev the VNC
+		// server has no clipboard channel at all, so copy/paste between the browser
+		// console and the guest silently does nothing. mouse=off keeps the absolute
+		// pointer on the usb-tablet (no competing vdagent pointer).
+		a = append(a,
+			"-chardev", "qemu-vdagent,id=vdagent,name=vdagent,clipboard=on,mouse=off",
 			"-device", "virtserialport,bus=vserial0.0,chardev=vdagent,name=com.redhat.spice.0",
 		)
 	}

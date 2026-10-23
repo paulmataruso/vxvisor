@@ -2,24 +2,57 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Console — {{.Session.Name}}</title>
 <style>
- html,body{margin:0;height:100%;background:#000;color:#e7e9ee;font:14px system-ui,sans-serif}
- #bar{height:46px;display:flex;align-items:center;gap:8px;padding:0 12px;background:#161922;border-bottom:1px solid #2a2f3c;flex-wrap:nowrap;overflow-x:auto}
- #bar a{color:#5b8cff;text-decoration:none;white-space:nowrap}
- #bar b{font-size:14px;white-space:nowrap}
- #status{color:#8b93a3;font-size:13px;white-space:nowrap;margin-left:auto}
- .cbtn{background:#222736;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;font-size:12px;white-space:nowrap}
- .cbtn:hover{border-color:#5b8cff}
- .cbtn:active{background:#2f3545}
- select.cbtn,input.cpaste{height:30px}
- .cpaste{background:#0e121a;border:1px solid #2f3545;color:#e7e9ee;border-radius:7px;padding:4px 8px;font:inherit;font-size:12px;width:150px}
- .sep{width:1px;height:24px;background:#2a2f3c;margin:0 2px}
+ :root{--accent:#4f8cff;--accent-soft:rgba(79,140,255,.16)}
+ *{box-sizing:border-box}
+ html,body{margin:0;height:100%;background:#000;color:#e7e9ee;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+ /* Toolbar: soft top-lit gradient with depth, not a flat square bar. */
+ #bar{height:54px;display:flex;align-items:center;gap:8px;padding:0 14px;
+   background:linear-gradient(180deg,#1b2130 0%,#12151e 100%);
+   border-bottom:1px solid rgba(255,255,255,.07);
+   box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px -10px rgba(0,0,0,.65);
+   flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+ #bar::-webkit-scrollbar{height:0}
+ .back{display:inline-flex;align-items:center;justify-content:center;flex:none;
+   width:32px;height:32px;border-radius:10px;color:#c7cdd9;font-size:17px;text-decoration:none;
+   background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);transition:.15s}
+ .back:hover{background:var(--accent-soft);border-color:rgba(79,140,255,.5);color:#fff}
+ .title{display:flex;align-items:center;gap:9px;margin-right:2px;white-space:nowrap}
+ .title .glyph{width:26px;height:26px;border-radius:8px;flex:none;display:inline-flex;align-items:center;justify-content:center;
+   background:linear-gradient(135deg,#2563eb,#5b8cff);color:#fff;box-shadow:0 2px 10px -2px rgba(79,140,255,.65)}
+ #bar b{font-size:14px;font-weight:600;letter-spacing:.2px;color:#f3f5f9;white-space:nowrap}
+ /* Pill controls: translucent fills, soft borders, accent-glow on hover. */
+ .cbtn{height:32px;display:inline-flex;align-items:center;gap:6px;flex:none;
+   background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);color:#dfe3ec;
+   border-radius:9px;padding:0 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:500;white-space:nowrap;
+   transition:background .15s,border-color .15s,transform .05s}
+ .cbtn:hover{background:rgba(255,255,255,.09);border-color:rgba(79,140,255,.55);color:#fff}
+ .cbtn:active{transform:translateY(1px);background:var(--accent-soft)}
+ select.cbtn{appearance:none;-webkit-appearance:none;padding-right:30px;
+   background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="%239aa3b2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>');
+   background-repeat:no-repeat;background-position:right 10px center}
+ select.cbtn option,select.cbtn optgroup{background:#161b26;color:#e7e9ee}
+ .cpaste{height:32px;flex:none;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.08);color:#e7e9ee;
+   border-radius:9px;padding:0 11px;font:inherit;font-size:12px;width:160px;transition:border-color .15s,box-shadow .15s}
+ .cpaste::placeholder{color:#6b7382}
+ .cpaste:focus{outline:none;border-color:rgba(79,140,255,.6);box-shadow:0 0 0 3px rgba(79,140,255,.16)}
+ .sep{width:1px;height:20px;flex:none;background:linear-gradient(180deg,transparent,rgba(255,255,255,.16),transparent);margin:0 4px}
+ /* Status chip with a live state dot. */
+ .sgroup{margin-left:auto;display:inline-flex;align-items:center;gap:8px;flex:none;padding:5px 12px 5px 10px;
+   border-radius:999px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07)}
+ .dot{width:8px;height:8px;border-radius:50%;flex:none;background:#f0b429;box-shadow:0 0 0 3px rgba(240,180,41,.16);transition:.2s}
+ .sgroup[data-state=ok] .dot{background:#30d158;box-shadow:0 0 0 3px rgba(48,209,88,.16)}
+ .sgroup[data-state=bad] .dot{background:#ff453a;box-shadow:0 0 0 3px rgba(255,69,58,.16)}
+ .sgroup[data-state=wait] .dot{animation:pulse 1.3s ease-in-out infinite}
+ @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+ #status{color:#9aa3b2;font-size:12.5px;white-space:nowrap}
  /* #wrap is the scroll area below the toolbar; #screen is the noVNC target and
     is sized by the display-mode logic (100% to fill, or an exact WxH). */
- #wrap{position:absolute;top:46px;left:0;right:0;bottom:0;overflow:auto;background:#000}
+ #wrap{position:absolute;top:54px;left:0;right:0;bottom:0;overflow:auto;background:#000}
  #screen{width:100%;height:100%}
 </style></head><body>
 <div id="bar">
-  <a href="/instances">←</a><b>{{.Session.Name}}</b>
+  <a href="/instances" class="back" title="Back to Instances">←</a>
+  <span class="title"><span class="glyph"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><b>{{.Session.Name}}</b></span>
   <span class="sep"></span>
   <select class="cbtn" id="k-tech" title="Switch console technology">
     <option value="/console/{{.Session.ID}}" selected>VNC (noVNC)</option>
@@ -43,8 +76,10 @@
     <option value="caf7">Ctrl+Alt+F7</option>
   </select>
   <span class="sep"></span>
-  <input class="cpaste" id="k-paste" placeholder="paste text → guest">
-  <button class="cbtn" id="k-send">Send</button>
+  <button class="cbtn" id="k-pastepc" title="Copy your computer's clipboard to the guest, then press Ctrl+V inside the guest">Paste from PC</button>
+  <input class="cpaste" id="k-paste" placeholder="or paste here, then Ctrl+V in the guest">
+  <button class="cbtn" id="k-send" title="Send the box text to the guest clipboard">Send</button>
+  <button class="cbtn" id="k-getclip" title="Show what the guest last copied and copy it to your computer's clipboard">Get clipboard</button>
   <span class="sep"></span>
   <select class="cbtn" id="k-disp" title="Display mode / resolution">
     <optgroup label="Mode">
@@ -68,12 +103,20 @@
     <option value="bandwidth">Quality: Bandwidth-saver</option>
   </select>
   <button class="cbtn" id="k-full" title="Fullscreen">⛶ Full</button>
-  <span id="status">connecting…</span>
+  <div class="sgroup" id="sgroup" data-state="wait"><span class="dot"></span><span id="status">connecting…</span></div>
 </div>
 <div id="wrap"><div id="screen"></div></div>
 <script type="module">
  import RFB from "/static/novnc/core/rfb.js";
  const status = document.getElementById("status");
+ // Color the status dot from the status text, without touching the many places
+ // that set it: watch #status and map keywords → ok (green) / bad (red) / wait.
+ (function(){ const sg=document.getElementById("sgroup"); if(!sg||!status) return;
+   const upd=()=>{ const t=(status.textContent||"").toLowerCase();
+     sg.setAttribute("data-state", /connected|sent|requested|copied/.test(t) ? "ok"
+       : /disconnect|error|fail|closed/.test(t) ? "bad" : "wait"); };
+   new MutationObserver(upd).observe(status,{childList:true,characterData:true,subtree:true}); upd();
+ })();
  const scheme = location.protocol === "https:" ? "wss" : "ws";
  const url = `${scheme}://${location.host}/console/{{.Session.ID}}/ws`;
  // X keysyms
@@ -81,6 +124,7 @@
    bksp:0xff08, del:0xffff, f1:0xffbe, f2:0xffbf, f3:0xffc0, f7:0xffc4,
    c:0x0063, v:0x0076, z:0x007a };
  let rfb;
+ let lastGuestClip = "";   // most recent text the guest put on its clipboard
  const screen = document.getElementById("screen");
  // Keyboard capture needs the noVNC canvas to hold focus. A programmatic focus()
  // right after connect is often ignored by the browser (no user gesture), and
@@ -200,7 +244,11 @@
        // so the console doesn't just go black until a manual refresh.
        scheduleReconnect();
      });
-     myRfb.addEventListener("clipboard", e => { /* guest copied; available if needed */ });
+     myRfb.addEventListener("clipboard", e => {
+       // The guest copied something — RFB pushes it here (there is no "pull"
+       // request in the protocol). Stash the latest so "Get clipboard" can show it.
+       try { lastGuestClip = (e && e.detail && e.detail.text) || ""; } catch(_){}
+     });
    } catch (err) { connecting = false; status.textContent = "noVNC failed to load: " + err; scheduleReconnect(); }
  }
  connect();
@@ -240,9 +288,46 @@
      case "caf7": combo(K.ctrl,K.alt,K.f7); break;
    }
  };
- document.getElementById("k-send").onclick = () => {
-   const inp = document.getElementById("k-paste");
-   if(rfb && inp.value){ rfb.clipboardPasteFrom(inp.value); status.textContent = "sent to guest clipboard — paste in the guest"; }
+ const pasteBox = document.getElementById("k-paste");
+ // Push text onto the guest clipboard. (noVNC swallows Ctrl+V on the canvas and
+ // forwards it to the guest, so the guest pastes ITS clipboard — we have to put
+ // the viewer's text onto the guest clipboard first, then the user Ctrl+V's.)
+ function sendToGuest(text, okMsg){
+   if(!rfb || !text) return false;
+   rfb.clipboardPasteFrom(text);
+   status.textContent = okMsg || "copied to the guest clipboard — now press Ctrl+V in the guest";
+   return true;
+ }
+ document.getElementById("k-send").onclick = () => { sendToGuest(pasteBox.value); grab(); };
+ // Pasting into the box auto-syncs it to the guest, so no Send click is needed.
+ pasteBox.addEventListener("paste", () => { setTimeout(() => sendToGuest(pasteBox.value), 0); });
+ // Paste from PC: read the computer's own clipboard and put it on the guest's, so
+ // the next Ctrl+V inside the guest pastes YOUR text. If the browser blocks reading
+ // the clipboard (common over plain http://), fall back to the manual paste box.
+ document.getElementById("k-pastepc").onclick = async () => {
+   if(!rfb){ status.textContent = "not connected"; return; }
+   if(navigator.clipboard && navigator.clipboard.readText){
+     try {
+       const text = await navigator.clipboard.readText();
+       if(text){ pasteBox.value = text; sendToGuest(text, "sent your clipboard → guest — now press Ctrl+V in the guest"); grab(); return; }
+       status.textContent = "your clipboard is empty"; return;
+     } catch(e){ /* blocked — fall through to the manual box */ }
+   }
+   pasteBox.focus(); pasteBox.select();
+   status.textContent = "your browser blocked reading the clipboard — press Ctrl+V in this box, then Ctrl+V in the guest";
+ };
+ // Get clipboard: show what the guest most recently copied (captured from the RFB
+ // clipboard event) and mirror it into the viewer's own browser clipboard.
+ document.getElementById("k-getclip").onclick = () => {
+   if(!lastGuestClip){ status.textContent = "no guest clipboard yet — copy something in the guest first"; return; }
+   const inp = document.getElementById("k-paste"); if(inp) inp.value = lastGuestClip;
+   if(navigator.clipboard && navigator.clipboard.writeText){
+     navigator.clipboard.writeText(lastGuestClip)
+       .then(() => { status.textContent = "copied guest clipboard → your browser clipboard"; })
+       .catch(() => { status.textContent = "guest clipboard shown in the box (browser copy blocked — select & copy it)"; });
+   } else {
+     status.textContent = "guest clipboard shown in the box (select & copy it)";
+   }
  };
  document.getElementById("k-disp").onchange = (e) => { saveMode(e.target.value); applyDisplay(e.target.value); };
  (function(){ var q=document.getElementById("k-qual"); if(!q) return; q.value=savedQual();

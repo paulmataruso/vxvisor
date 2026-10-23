@@ -7,7 +7,7 @@
     &nbsp;·&nbsp; Leader: <span class="pill running">{{if .LeaderName}}{{.LeaderName}}{{else}}—{{end}}</span>
     {{if .IsLeaderHere}}<span class="pill">this node</span>{{end}}
   </p>
-  <p class="muted" style="margin:8px 0 0">Manage the whole cluster from the VIP — it always points at the current leader. Account changes must be made here (on the leader); followers sync automatically.</p>
+  <p class="muted" style="margin:8px 0 0">Manage the whole cluster from the cluster address — it always points at the node currently in charge. Make account changes here; the other nodes sync automatically.</p>
 </div>
 
 <div class="card">
@@ -36,7 +36,7 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No instances across the cluster yet.</div>{{end}}
-  <p class="muted" style="margin:12px 0 0">Every node's VMs, from one pane. Actions on a remote node's VM are proxied to it over the authenticated cluster API.</p>
+  <p class="muted" style="margin:12px 0 0">Every node's VMs in one place. Actions on a VM running on another node are carried out on that node for you.</p>
 </div>
 {{end}}
 <div class="card">
@@ -70,7 +70,7 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No worker nodes. A single-node install always schedules locally.</div>{{end}}
-  <p class="muted" style="margin:12px 0 0">The scheduler places new instances on the ready node with the most free memory. Live migration additionally needs shared storage (an NFS pool) and matching CPU/QEMU versions.</p>
+  <p class="muted" style="margin:12px 0 0">New instances are placed on the node with the most free memory. Moving a running VM between nodes also needs shared storage and similar hardware on both nodes.</p>
 </div>
 
 <div class="card">
@@ -80,7 +80,7 @@
     <tr><th>VFIO</th><td>{{if .Capability.VFIO}}<span class="pill running">loaded</span>{{else}}<span class="pill">not loaded</span>{{end}}</td></tr>
     <tr><th>Status</th><td class="muted">{{.Capability.Note}}</td></tr>
   </table>
-  <p class="muted" style="margin:10px 0 0">When enabled, add host PCI addresses in the instance launch form to pass a GPU/NIC through with vfio-pci.</p>
+  <p class="muted" style="margin:10px 0 0">When enabled, you can pass a physical GPU or network card straight through to a VM from the instance launch form.</p>
 </div>
 
 <div class="card">
@@ -88,7 +88,7 @@
     <h2>Import &amp; Export</h2>
     <a class="btn primary" href="/migrate">Open Import / Export →</a>
   </div>
-  <p class="muted" style="margin:0">VM import (vCenter/ESXi), the batch migration wizard, VDDK acceleration, and VM export now live on the dedicated <a href="/migrate">Import / Export</a> page.</p>
+  <p class="muted" style="margin:0">VM import from vCenter/ESXi, the batch migration wizard, and VM export now live on the dedicated <a href="/migrate">Import / Export</a> page.</p>
 </div>
 
 <div class="modal" id="m-node"><div class="modal-card">
@@ -98,7 +98,7 @@
     <label class="fld">Name<input type="text" name="name" placeholder="node-2" required></label>
     <label class="fld">SSH address<input type="text" name="address" placeholder="10.0.0.12:22" required></label>
     <label class="fld">SSH user<input type="text" name="ssh_user" value="root"></label>
-    <p class="muted" style="margin:0">The control node drives workers over SSH (key-based auth; QEMU/qemu-img/QMP tunneled).</p>
+    <p class="muted" style="margin:0">The control node manages the other nodes securely over SSH.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add node</button></div>
   </form>
 </div></div>

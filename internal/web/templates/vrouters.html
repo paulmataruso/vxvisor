@@ -1,12 +1,12 @@
 {{define "vrouters.html"}}{{template "head" .}}
 <div class="card">
   <div class="card-head">
-    <h2>Virtual Routers <span class="muted" style="font-weight:400;font-size:12px">— NSX-lite</span></h2>
+    <h2>Virtual Routers <span class="muted" style="font-weight:400;font-size:12px">— route between your networks</span></h2>
     {{if .Available}}<button class="btn primary" data-modal="m-vr">+ New vRouter</button>{{end}}
   </div>
-  <p class="muted" style="margin:0">A vRouter is a dedicated routing instance (an LXC container or a network namespace running its own FRR). Bind a <strong>transit link</strong> to a free NIC, attach <strong>internal port groups</strong> for your VMs, and it routes between them with OSPF / BGP / static / EIGRP.
-  {{if not .Available}}<strong style="color:var(--danger)"> No vRouter runtime is available on this host (needs LXC and/or FRR).</strong>{{end}}</p>
-  {{if .UserMode}}<p class="muted" style="margin:8px 0 0;color:var(--danger)">VXVisor is in <strong>user-mode networking</strong> — VMs on an internal port group won't attach to a vRouter. Switch to bridge/overlay networking to route guest traffic (the vRouter itself still runs).</p>{{end}}
+  <p class="muted" style="margin:0">A vRouter is a software router that connects your internal networks. Give it a <strong>transit link</strong> on a spare network port, attach the <strong>internal port groups</strong> your VMs use, and it routes traffic between them — with static routes or dynamic routing.
+  {{if not .Available}}<strong style="color:var(--danger)"> This host can't run a vRouter yet (it needs the container or routing tools installed).</strong>{{end}}</p>
+  {{if .UserMode}}<p class="muted" style="margin:8px 0 0;color:var(--danger)">This host uses <strong>simple (user-mode) networking</strong>, so VMs on an internal port group can't connect to a vRouter. Switch to bridged networking to route VM traffic (the vRouter still runs).</p>{{end}}
 </div>
 
 {{range .VRouters}}{{$vrid := .ID}}
@@ -80,7 +80,7 @@
         <label class="fld">Name<input type="text" name="name" value="{{.NetworkName}}" required></label>
         <label class="fld">Subnet (CIDR)<input type="text" name="cidr" value="{{.NetworkCIDR}}" placeholder="10.60.0.0/24"></label>
         <label class="fld">vRouter gateway IP / CIDR<input type="text" name="gateway" value="{{.CIDR}}" placeholder="10.60.0.1/24" required></label>
-        <p class="muted" style="margin:0">Changing the gateway re-assigns the vRouter's address on this segment (via FRR) and re-applies DHCP.</p>
+        <p class="muted" style="margin:0">Changing the gateway updates the vRouter's address on this network and re-applies DHCP.</p>
         <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
       </form>
     </div></div>
@@ -225,7 +225,7 @@
           </select>
         </label>
         <label class="fld">Transit IP / CIDR<input type="text" name="cidr" placeholder="10.50.0.1/30" required></label>
-        <p class="muted" style="margin:0">The upstream router sits on this link. The vRouter peers over it (static/OSPF/BGP). The mgmt + enslaved NICs are excluded.</p>
+        <p class="muted" style="margin:0">The upstream router sits on this link; the vRouter connects to the rest of your network through it. The management port and ports already in use are excluded.</p>
         <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add transit</button></div>
       </form>
     </div></div>
@@ -280,7 +280,7 @@
       <form class="mform" method="post" action="/vrouters/{{$vrid}}/bgp/network">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <label class="fld">Prefix (CIDR)<input type="text" name="cidr" placeholder="203.0.113.0/24" required></label>
-        <p class="muted" style="margin:0">Injects <code>network &lt;prefix&gt;</code> into BGP so it's advertised to your neighbors. The prefix must be in the routing table (e.g. a connected internal port group carrying that subnet).</p>
+        <p class="muted" style="margin:0">Advertises this network to your BGP neighbors. The network must be one the vRouter already reaches (for example an internal port group that carries it).</p>
         <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Advertise</button></div>
       </form>
     </div></div>
@@ -307,7 +307,7 @@
       <label class="fld">vCPUs<input type="number" name="cpus" value="1" min="1" max="8" style="width:90px"></label>
       <label class="fld">Memory (MB)<input type="number" name="mem_mb" value="512" min="128" style="width:120px"></label>
     </div>
-    <p class="muted" style="margin:0">The runtime provisions FRR in the background. Add a transit link and internal port groups once it's ready.</p>
+    <p class="muted" style="margin:0">The vRouter is being set up in the background. Add a transit link and internal port groups once it's ready.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create</button></div>
   </form>
 </div></div>

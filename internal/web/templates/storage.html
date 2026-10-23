@@ -1,7 +1,7 @@
 {{define "storage.html"}}{{template "head" .}}
 <div class="card">
   <h2>Storage pools</h2>
-  <p class="muted" style="margin:4px 0 0">Register a directory/NFS/CIFS pool, or build and manage <b>ZFS</b> and <b>LVM thin</b> pools directly on the host.</p>
+  <p class="muted" style="margin:4px 0 0">Add storage for your VMs — point to a folder or a network share, or build <b>ZFS</b> and <b>LVM</b> pools directly on this host's disks.</p>
 </div>
 
 <div class="card">
@@ -114,7 +114,7 @@
   <div class="card-head"><h2>Software RAID (mdraid)</h2>
     <button class="btn primary" data-modal="m-md-create">+ Create array</button>
   </div>
-  <p class="muted" style="margin:0 0 10px;font-size:12px">A software-RAID array is a plain block device — once created it appears in the LVM, ZFS and filesystem-pool pickers below, so you can place any of them on top of it.</p>
+  <p class="muted" style="margin:0 0 10px;font-size:12px">Once you create a software-RAID array it shows up in the pool pickers below, so you can build a ZFS, LVM or filesystem pool on top of it.</p>
   {{if .MDArrays}}
   <table style="font-size:13px">
     <tr><th>Array</th><th>Level</th><th>Size</th><th>State</th><th>Members</th><th>In use</th><th></th></tr>
@@ -156,7 +156,7 @@
   <div class="card-head"><h2>Filesystem pool</h2>
     <button class="btn primary" data-modal="m-fs-create">+ Create filesystem pool</button>
   </div>
-  <p class="muted" style="margin:0;font-size:12px">Put a plain <strong>ext4 / xfs / ext3</strong> filesystem on a disk or a RAID array, mount it, and register it as a VM storage pool. (LVM, LVM-thin and ZFS pools are created from their cards above / the pool form.)</p>
+  <p class="muted" style="margin:0;font-size:12px">Format a disk or RAID array with a standard filesystem, mount it, and use it as a storage pool for VMs. (ZFS and LVM pools are created from the cards above.)</p>
 </div>
 
 <div class="modal" id="m-fs-create"><div class="modal-card">
@@ -168,7 +168,7 @@
       <label class="fld">Device<select name="device" required>{{range .Disks}}{{if not .InUse}}<option value="{{.Path}}">{{.Path}} — {{.Size}}{{if .Model}} ({{.Model}}){{end}}</option>{{end}}{{end}}</select></label>
       <label class="fld">Filesystem<select name="fstype">{{range .FSTypes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
     </div>
-    <p class="muted" style="font-size:12px;margin:2px 0">Mounts at <span class="mono">/var/lib/vdxclone/pools/&lt;name&gt;</span> and adds a by-UUID <span class="mono">/etc/fstab</span> entry so it remounts on boot.</p>
+    <p class="muted" style="font-size:12px;margin:2px 0">Mounts under the VXVisor pools folder and remounts automatically on reboot.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create pool</button></div>
   </form>
 </div></div>
@@ -198,7 +198,7 @@
     </tr>
     {{end}}
   </table>
-  <p class="muted" style="margin:8px 0 0;font-size:12px">SMART health needs <span class="mono">smartmontools</span>; devices without SMART show “unknown”/“n/a”. A disk left behind by a removed Ceph OSD shows <strong>Clear for reuse</strong> — it wipes the disk's LVM volume group and all signatures (works even when Ceph is stopped) so it becomes a free disk again. Mounted disks are never offered.</p>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">Health comes from each disk's SMART data; disks that don't report it show “unknown”. A disk left behind by Ceph shows <strong>Clear for reuse</strong>, which erases it completely so it's a free disk again. Mounted disks are never shown here.</p>
   <script>
   function confirmClear(form, disk){
     if(!confirm('CLEAR '+disk+' ?\n\nThis ERASES ALL DATA on the disk — it removes the disk\'s LVM volume group and wipes the partition table so it can be reused. This CANNOT be undone.')) return false;
@@ -215,7 +215,7 @@
 {{if or .RAIDCtrls .CtrlHints}}
 <div class="card">
   <h2>RAID controller drives</h2>
-  <p class="muted" style="margin:-4px 0 12px;font-size:12px">Physical disks behind a hardware RAID controller. The kernel only sees each <strong>virtual disk</strong> (the <span class="mono">/dev/sdX</span> your pools bind to, shown in Disk status) — these member drives are health-only and can't be selected or wiped here. A failed member flashes red and raises a toast.</p>
+  <p class="muted" style="margin:-4px 0 12px;font-size:12px">The physical drives inside a hardware RAID controller. The system only sees the finished RAID volumes (listed under Disk status) — these member drives are shown for health only and can't be selected or wiped here. A failed drive flashes red.</p>
   {{range .RAIDCtrls}}
   <div style="margin-bottom:14px">
     <div style="font-weight:600;font-size:13px;margin-bottom:6px">{{.Name}} <span class="muted" style="font-weight:400">· {{.Vendor}}{{if .Tool}} · via {{.Tool}}{{end}}</span></div>
@@ -344,7 +344,7 @@
       <div style="display:flex;flex-direction:column;gap:6px">{{range .Disks}}{{if and (eq .Type "disk") (not .InUse)}}<label style="display:flex;gap:7px;align-items:center;font-weight:400"><input type="checkbox" name="devices" value="{{.Path}}" style="width:auto"> <span class="mono">{{.Path}}</span> <span class="muted">{{.Size}}</span></label>{{end}}{{end}}</div>
     </label>
     <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f)</label>
-    <p class="muted" style="margin:0;font-size:12px">L2ARC is a read cache — a fast SSD/NVMe. Safe to lose (no mirror needed).</p>
+    <p class="muted" style="margin:0;font-size:12px">A read cache on a fast SSD/NVMe that speeds up reads. Safe to lose — no mirror needed.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add cache</button></div>
   </form>
 </div></div>
@@ -359,7 +359,7 @@
     </label>
     <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="mirror" value="1" style="width:auto"> mirror (pick 2 devices — recommended for a SLOG)</label>
     <label class="fld" style="flex-direction:row;align-items:center;gap:7px"><input type="checkbox" name="force" value="1" style="width:auto"> force (-f)</label>
-    <p class="muted" style="margin:0;font-size:12px">SLOG accelerates sync writes. Mirror it so a log-device failure can't lose in-flight writes.</p>
+    <p class="muted" style="margin:0;font-size:12px">A fast log device that speeds up safe (synchronous) writes. Mirror it so a failure can't lose recent writes.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add log</button></div>
   </form>
 </div></div>
@@ -432,8 +432,8 @@
 {{if .P.IsAdmin}}
 <div class="card">
   <div class="card-head"><h2>VMware VDDK (fastest import transport)</h2></div>
-  <p class="muted" style="margin:0 0 8px">Optional. The fastest vCenter/ESXi import path (VDDK over NBD — reads only used blocks) needs VMware's <strong>VDDK</strong> library, which is proprietary and can't be shipped with VXVisor. Install the wrapper (<span class="mono">apt install nbdkit nbdkit-plugin-vddk</span>), download VDDK from Broadcom, unpack it, and set its path below. The VDDK transfer option then appears in the import dialog.</p>
-  <p class="muted" style="margin:0 0 8px">nbdkit + VDDK plugin: {{if .VDDKInstalled}}<span class="pill running">installed</span>{{else}}<span class="pill error">not installed</span>{{end}}</p>
+  <p class="muted" style="margin:0 0 8px">Optional. VMware's <strong>VDDK</strong> library enables the fastest way to import VMs from vCenter/ESXi. It's proprietary, so we can't include it — download it from Broadcom, then set its path below. Once it's in place, the fast import option appears in the import dialog.</p>
+  <p class="muted" style="margin:0 0 8px">VDDK support: {{if .VDDKInstalled}}<span class="pill running">installed</span>{{else}}<span class="pill error">not installed</span>{{end}}</p>
   <form class="mform" method="post" action="/storage/vddk-libdir" style="max-width:640px">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">VDDK library path (libdir)<input type="text" name="vddk_libdir" value="{{.VDDKLibDir}}" placeholder="/opt/vmware-vix-disklib-distrib" class="mono"></label>
@@ -445,7 +445,7 @@
 <div class="modal" id="m-browse"><div class="modal-card lg">
   <div class="modal-head"><h3>Browse storage &mdash; <span id="browse-title"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <div class="mform">
-    <p class="muted" style="margin:0 0 6px">Read-only view of this pool's contents (files, volumes, or RBD images).</p>
+    <p class="muted" style="margin:0 0 6px">A read-only view of what's stored in this pool.</p>
     <div id="browse-body" style="max-height:60vh;overflow:auto"></div>
     <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
   </div>

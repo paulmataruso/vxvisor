@@ -591,6 +591,32 @@ func (s *Service) StopSession(p *Principal, id, ip string) error {
 	return nil
 }
 
+// RestartSession power-cycles a VM: a graceful stop (ACPI, then force if the
+// guest ignores it) followed by a fresh start. It launches a new QEMU process,
+// so any updated VM settings take effect. Quota/placement are not re-checked —
+// a running VM already passed those and its resource use is unchanged.
+func (s *Service) RestartSession(p *Principal, id, ip string) (*session.Session, error) {
+	if !p.atLeast("member") {
+		return nil, ErrUnauthorized
+	}
+	sess, err := s.sessionInOrg(p, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.mgr.Stop(id); err != nil {
+		return nil, err
+	}
+	if s.cl != nil {
+		_, _ = s.cl.PlaceSession(id, sess.MemoryMB)
+	}
+	out, err := s.mgr.Start(id)
+	if err != nil {
+		return nil, err
+	}
+	s.audit(p, sess.OrgID, "session.restart", "session", id, ip, nil)
+	return out, nil
+}
+
 // SetAutostart toggles a VM's "start at boot" flag (powered on automatically
 // after a host reboot).
 func (s *Service) SetAutostart(p *Principal, id string, on bool, ip string) error {

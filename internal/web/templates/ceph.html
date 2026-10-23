@@ -1,7 +1,7 @@
 {{define "ceph.html"}}{{template "head" .}}
 <div class="card">
   <h2>Hyperconverged storage — Ceph / RBD</h2>
-  <p class="muted" style="margin:0">Turn this node's local disks into a distributed <strong>Ceph</strong> cluster and run VM disks on <strong>RBD</strong>. Compute and storage live on the same box. <strong>Hard rule:</strong> Ceph's network rides the dedicated <em>storage interface</em>, never the management NIC.</p>
+  <p class="muted" style="margin:0">Turn this host's spare disks into shared <strong>Ceph</strong> storage that your VMs run on, with storage and compute on the same machine. Ceph must use the dedicated <em>storage network</em>, never the management network.</p>
 </div>
 
 {{if not .Avail}}
@@ -32,10 +32,10 @@
     </div>
     {{if .Pool}}<div><div class="muted" style="font-size:12px">RBD pool</div><div class="mono" style="font-size:20px">{{.Pool}}</div></div>{{end}}
   </div>
-  {{if lt .Status.NumOSDs 3}}<p style="margin:12px 0 0;font-size:12px;color:var(--warn)"><strong>Single-node / low redundancy.</strong> This pool replicates at size 1 until more nodes/OSDs join — a disk or host loss can lose data. Add OSDs and cluster nodes to gain redundancy.</p>{{end}}
+  {{if lt .Status.NumOSDs 3}}<p style="margin:12px 0 0;font-size:12px;color:var(--warn)"><strong>Single host — low redundancy.</strong> Your data is kept in one copy until more disks and hosts join, so a disk or host failure can lose data. Add more disks and hosts to gain redundancy.</p>{{end}}
   {{else}}
   <!-- Not yet bootstrapped -->
-  <p class="muted" style="margin:0 0 10px">No Ceph cluster is running on this host yet. Bootstrap one to create the first monitor, consume a disk as the first OSD, and create an RBD pool for VM disks.</p>
+  <p class="muted" style="margin:0 0 10px">No Ceph storage is set up on this host yet. Set it up to turn a spare disk into shared storage your VMs can use.</p>
   {{if .StorageIface}}
   <button class="btn primary" data-modal="m-bootstrap">Bootstrap Ceph cluster…</button>
   <p class="muted" style="margin:8px 0 0;font-size:12px">Ceph will bind the storage interface <span class="mono">{{.StorageIface}}</span> and its subnet.</p>
@@ -49,7 +49,7 @@
 {{if .Status.Configured}}
 <div class="card">
   <h2>Using Ceph for VM disks</h2>
-  <p class="muted" style="margin:0">When creating an instance, pick the <span class="mono">{{if .Pool}}{{.Pool}}{{else}}rbd{{end}}</span> pool and the <strong>Ceph RBD</strong> disk backend. The VM's disk becomes an RBD image, shared across the cluster — so it can live-migrate between nodes without copying the disk.</p>
+  <p class="muted" style="margin:0">When you create an instance, choose the <span class="mono">{{if .Pool}}{{.Pool}}{{else}}rbd{{end}}</span> pool and the <strong>Ceph</strong> disk type. The VM's disk then lives on shared storage, so it can move between hosts without copying the disk.</p>
 </div>
 {{end}}
 
@@ -70,7 +70,7 @@
     </tr>
     {{end}}
   </table>
-  <p class="muted" style="margin:8px 0 0;font-size:12px">After an OSD is removed (or Ceph is stopped), its disk still carries Ceph's LVM volume group and reads as <em>in use</em>. <strong>Clear for reuse</strong> wipes that VG and all signatures so the disk is free again — it works without the cluster running, with a double confirmation. Mounted disks and the OS/boot disk are never offered.</p>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">A disk that Ceph used still shows as <em>in use</em> after it's removed from Ceph. <strong>Clear for reuse</strong> erases it completely so it's a free disk again (you'll be asked to confirm twice). Mounted disks and the system disk are never shown here.</p>
   {{else}}<div class="empty">No physical disks detected.</div>{{end}}
   <script>
   function confirmClear(form, disk){
@@ -95,7 +95,7 @@
         {{range .Disks}}{{if not .InUse}}<option value="{{.Path}}">{{.Path}}{{if .Model}} · {{.Model}}{{end}}{{if .Size}} · {{.Size}}{{end}}</option>{{end}}{{end}}
       </select>
     </label>
-    <p class="muted" style="font-size:12px;margin:0">In-use disks (the OS/boot disk, pool members) are hidden and refused server-side. On a single node the pool replicates at size 1 — not redundant until more OSDs/nodes join.</p>
+    <p class="muted" style="font-size:12px;margin:0">Disks already in use (the system disk, pool members) are hidden and can't be selected. On a single host your data is kept in one copy — add more disks and hosts for redundancy.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Bootstrap</button></div>
   </form>
 </div></div>
