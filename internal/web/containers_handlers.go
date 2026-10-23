@@ -67,6 +67,12 @@ func (s *Server) ctDo(w http.ResponseWriter, r *http.Request, p *service.Princip
 func (s *Server) startContainer(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	s.ctDo(w, r, p, func(id int64) error { return s.svc.StartContainer(p, id, clientIP(r)) })
 }
+
+func (s *Server) updateContainer(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.ctDo(w, r, p, func(id int64) error {
+		return s.svc.UpdateContainer(p, id, r.FormValue("bridge"), int(atoi(r.FormValue("cpus"))), int(atoi(r.FormValue("mem_mb"))), clientIP(r))
+	})
+}
 func (s *Server) stopContainer(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	s.ctDo(w, r, p, func(id int64) error { return s.svc.StopContainer(p, id, clientIP(r)) })
 }

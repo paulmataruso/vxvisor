@@ -114,6 +114,48 @@ func (s *Service) BootstrapCeph(p *Principal, poolName, osdDisk, ip string) erro
 	return nil
 }
 
+// CephDiskReclaimable reports whether a disk can be cleared for reuse via the UI:
+// it carries Ceph OSD remnants AND is not currently mounted. Returns a short note
+// for the button tooltip. Works with the cluster stopped.
+func (s *Service) CephDiskReclaimable(disk string) (bool, string) {
+	taint, note := ceph.CephDiskRemnant(disk)
+	if !taint {
+		return false, ""
+	}
+	if m := diskMountNote(disk); m != "" {
+		return false, "" // active/mounted → never offer a wipe
+	}
+	return true, note
+}
+
+// ClearCephDisk wipes a disk left behind by a removed Ceph OSD so it can be reused
+// (tear down its LVM + wipe signatures + zap the partition table). It works even
+// when Ceph is stopped, so a user is never stuck with an unusable disk. DESTRUCTIVE
+// — the UI double-confirms. It refuses a mounted disk or one with no Ceph remnants,
+// so it can never nuke a live pool member or the boot disk.
+func (s *Service) ClearCephDisk(p *Principal, disk, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	if disk == "" {
+		return fmt.Errorf("choose a disk to clear")
+	}
+	if !validDiskPath(disk) {
+		return fmt.Errorf("unknown disk %q", disk)
+	}
+	if m := diskMountNote(disk); m != "" {
+		return fmt.Errorf("disk %s is %s — unmount/stop it before clearing", disk, m)
+	}
+	if taint, _ := ceph.CephDiskRemnant(disk); !taint {
+		return fmt.Errorf("disk %s has no Ceph remnants to clear", disk)
+	}
+	if err := ceph.ZapDisk(disk); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "ceph.disk.clear", "disk", disk, ip, nil)
+	return nil
+}
+
 // AddCephOSD consumes another whole disk as an OSD (grow raw capacity). Same
 // deviceInUse guard as bootstrap. DESTRUCTIVE; the UI confirms first.
 func (s *Service) AddCephOSD(p *Principal, disk, ip string) error {

@@ -1,15 +1,14 @@
 # VXVisor
 
-A single-binary **VM + VDI control plane** for Linux — an original, from-scratch
-platform (inspired by VDX Cloud Desktop / Proxmox) written in Go with no CGO.
+A single-binary **VM control plane** for Linux — an original, from-scratch
+platform (inspired by Proxmox / vSphere) written in Go with no CGO.
 
 - **Compute:** QEMU/KVM virtual machines + **LXC** system containers
 - **Storage:** directory / NFS / CIFS / Ceph / iSCSI pools, **ZFS** (pools, datasets,
   zvols, replace/L2ARC/SLOG), **LVM-thin**; qcow2 or **raw zvol** VM disks
 - **Networking:** VMware-style **vSwitches → port groups (VLANs) → uplinks/LAG**,
   **L3 routing** (FRR static/OSPF/BGP + nftables NAT/firewall), all button-driven
-- **VDI:** desktop pools (pooled/persistent, warm pre-provisioning) + a public
-  **web portal**; browser consoles via **noVNC** and the **guacd** gateway (VNC/RDP/SPICE)
+- **Consoles:** in-browser **noVNC** graphical console + serial text console per VM
 - **Observability:** live + historical metrics (CPU, RAM, disk/net throughput,
   IOWAIT, PSI pressure), alerts, audit log, quotas, billing/usage
 - **Multi-tenant:** orgs, members, roles, API keys, OIDC SSO
@@ -36,12 +35,11 @@ sudo systemctl enable --now vdxd
 ```
 
 - **Admin UI:** `http://<host>:8766` (front with TLS in production)
-- **Public VDI portal:** `http://<host>:8768` (enable `[public]` in the config)
 - Config: `/etc/vdxclone/config.toml` · data: `/var/lib/vdxclone/`
 
 Host packages used (installed by `deploy/install.sh` or as needed): `qemu-system-x86`,
 `qemu-utils`, `ovmf`, `zfsutils-linux`, `lvm2`, `lxc`, `frr`, `nftables`, `smartmontools`,
-`open-iscsi`, and `guacd` (built from source — see `deploy/guacd-from-source.sh`).
+and `open-iscsi`.
 
 ## Docs
 - `CLAUDE.md` — detailed architecture, conventions, and gotchas (read this first when hacking).

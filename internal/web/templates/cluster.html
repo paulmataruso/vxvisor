@@ -58,7 +58,7 @@
       <td class="mono" style="font-size:12px">{{if .Address}}{{.Address}}{{else}}—{{end}}</td>
       <td><span class="pill {{if eq .Status "ready"}}running{{else if eq .Status "unreachable"}}error{{end}}">{{.Status}}</span></td>
       <td>{{.CPUs}}</td>
-      <td class="muted">{{if .MemTotal}}{{.MemFree}} / {{.MemTotal}} B{{else}}—{{end}}</td>
+      <td class="muted">{{if .MemTotal}}{{humanBytes .MemFree}} / {{humanBytes .MemTotal}}{{else}}—{{end}}</td>
       <td class="muted" style="font-size:12px">{{if .LastSeen}}{{.LastSeen}}{{else}}never{{end}}</td>
       <td style="text-align:right;white-space:nowrap">
         {{if ne .Role "local"}}
@@ -85,110 +85,11 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Import a VM disk</h2>
-    <button class="btn primary" data-modal="m-import">+ Import disk</button>
+    <h2>Import &amp; Export</h2>
+    <a class="btn primary" href="/migrate">Open Import / Export →</a>
   </div>
-  <p class="muted" style="margin:0">Converts a foreign disk to qcow2 (qemu-img) and registers it as a base image. ESXi: extract the .vmdk from the OVA first. Proxmox: export the volume. Also available as <span class="mono">vdxd import &lt;name&gt; &lt;file&gt;</span>.</p>
+  <p class="muted" style="margin:0">VM import (vCenter/ESXi), the batch migration wizard, VDDK acceleration, and VM export now live on the dedicated <a href="/migrate">Import / Export</a> page.</p>
 </div>
-
-<div class="card">
-  <div class="card-head">
-    <h2>Import from vCenter / ESXi <span class="pill" title="Validated for connect+list; export needs a real vCenter">experimental</span></h2>
-    {{if .P.IsAdmin}}<button class="btn primary" data-modal="m-vmware">+ Connect &amp; import</button>{{end}}
-  </div>
-  <div id="vmwprog"></div>
-  <p class="muted" style="margin:8px 0 0">Imports a VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source VM is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong> (for a consistent copy). Each disk is streamed in, and VXVisor <strong>creates a ready-to-run instance</strong> (matching the source CPU, memory, and firmware) on the Instances page — plus a reusable base image. Use a read-only vSphere account.</p>
-  <p class="muted" style="margin:4px 0 0;font-size:12px">Disks arrive as a <strong>compressed stream</strong>: a thin 25 GiB disk may only pull a few GiB and still be complete — the amount downloaded is normally well below the disk's size, and that is <strong>not</strong> a truncated transfer. Watch for the status to reach <strong>done</strong>.</p>
-</div>
-
-<div class="modal" id="m-vmware"><div class="modal-card lg">
-  <div class="modal-head"><h3>Import from vCenter / ESXi</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
-  <form class="mform" id="vmwform" method="post" action="/import/vmware/start">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">vCenter / ESXi host or URL<input type="text" name="vc_url" placeholder="vcenter.example.com or https://host/sdk" required></label>
-    <label class="fld">Username (read-only role)<input type="text" name="vc_user" autocomplete="off" placeholder="readonly@vsphere.local" required></label>
-    <label class="fld">Password<input type="password" name="vc_pass" autocomplete="new-password" required></label>
-    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="vc_insecure" value="1"> Trust self-signed TLS certificate (LAN only)</label>
-    <div class="modal-actions">
-      <button type="button" class="btn" id="vmwconnect">Connect &amp; list VMs</button>
-    </div>
-    <div id="vmwlist" style="display:none">
-      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
-      <p class="muted" style="margin:0 0 6px">Pick a <strong>powered-off</strong> VM to import:</p>
-      <div id="vmwtable" style="max-height:260px;overflow:auto"></div>
-      <label class="fld">OS type (for launch defaults)
-        <select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option></select>
-      </label>
-      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="vmwgo" disabled>Import selected VM</button></div>
-    </div>
-  </form>
-</div></div>
-<script>
-(function(){
-  var form=document.getElementById('vmwform'); if(!form) return;
-  var btn=document.getElementById('vmwconnect'), list=document.getElementById('vmwlist'),
-      tbl=document.getElementById('vmwtable'), go=document.getElementById('vmwgo');
-  btn.addEventListener('click',function(){
-    btn.disabled=true; btn.textContent='Connecting…';
-    var fd=new FormData(form);
-    fetch('/import/vmware/connect',{method:'POST',body:fd,credentials:'same-origin'})
-      .then(function(r){return r.json();})
-      .then(function(d){
-        btn.disabled=false; btn.textContent='Connect & list VMs';
-        if(d.error){ tbl.innerHTML='<p style="color:var(--bad,#e55)">'+d.error+'</p>'; list.style.display=''; return; }
-        var vms=d.vms||[];
-        if(!vms.length){ tbl.innerHTML='<p class="muted">No VMs visible to this account.</p>'; list.style.display=''; return; }
-        var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th><th>Disks</th></tr>';
-        vms.forEach(function(v){
-          var ok=v.Importable && v.PowerState==='poweredOff';
-          var disks=(v.Disks||[]).length, cap=(v.Disks||[]).reduce(function(a,x){return a+(x.CapacityGB||0);},0);
-          h+='<tr>'+
-            '<td>'+(ok?'<input type="radio" name="moid" value="'+v.MOID+'">':'<span title="'+(v.ImportNote||'')+'">—</span>')+'</td>'+
-            '<td><strong>'+v.Name+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+v.ImportNote+'</span>':'')+'</td>'+
-            '<td><span class="pill '+(v.PowerState==='poweredOff'?'':'error')+'">'+v.PowerState+'</span></td>'+
-            '<td class="muted" style="font-size:12px">'+(v.GuestFullName||'')+'</td>'+
-            '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td>'+
-            '<td class="muted">'+disks+' · '+cap+'G</td></tr>';
-        });
-        tbl.innerHTML=h+'</table>'; list.style.display='';
-        tbl.addEventListener('change',function(){ go.disabled=!form.querySelector('input[name=moid]:checked'); });
-      })
-      .catch(function(e){ btn.disabled=false; btn.textContent='Connect & list VMs'; tbl.innerHTML='<p style="color:var(--bad,#e55)">'+e+'</p>'; list.style.display=''; });
-  });
-  // progress poller
-  var box=document.getElementById('vmwprog');
-  function badge(s){var c=s==='done'?'running':(s==='failed'?'error':'');return '<span class="pill '+c+'">'+s+'</span>';}
-  function poll(){
-    fetch('/api/vmware-import',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
-      var l=(d&&d.imports)||[]; if(!l.length){box.innerHTML='';return;}
-      function gb(b){b=b||0; if(b>=1073741824)return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB';}
-      function rate(b){b=b||0; return b>=1048576?(b/1048576).toFixed(1)+' MB/s':(b/1024).toFixed(0)+' KB/s';}
-      function esc(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
-      var h='<table style="margin:8px 0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th><th>Log</th></tr>';
-      l.forEach(function(j){
-        var xfer,pctcell;
-        if(j.status==='exporting'){
-          // Compressed stream — show bytes pulled, not a fraction of a total we never reach.
-          xfer=gb(j.done_bytes)+' pulled'+(j.nominal?(' <span class="muted" style="font-size:11px">(src up to '+gb(j.nominal)+', thin)</span>'):'');
-          pctcell='—';
-        }else{
-          xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
-          pctcell=(j.pct||0)+'%';
-        }
-        var spd=(j.status==='exporting'&&j.rate)?rate(j.rate):'—';
-        var logcell=j.has_log?('<a href="/api/vmware-import/'+encodeURIComponent(j.id)+'/log" target="_blank" rel="noopener">view</a>'):'—';
-        h+='<tr><td><strong>'+esc(j.vm)+'</strong></td><td>'+badge(j.status)+'</td>'+
-        '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+esc(j.err)+'</span>'):esc(j.step))+'</td>'+
-        '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+pctcell+'</td><td>'+logcell+'</td></tr>';
-        if(j.status==='failed'&&j.log_tail&&j.log_tail.length){
-          h+='<tr><td colspan="7" style="padding:0 0 10px"><pre style="margin:4px 0;max-height:180px;overflow:auto;background:var(--panel2,#1a1a1a);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap">'+esc(j.log_tail.join('\n'))+'</pre></td></tr>';
-        }});
-      box.innerHTML=h+'</table>';
-    }).catch(function(){});
-  }
-  poll(); setInterval(poll,3000);
-})();
-</script>
 
 <div class="modal" id="m-node"><div class="modal-card">
   <div class="modal-head"><h3>Add worker node</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
@@ -249,13 +150,4 @@
 })();
 </script>
 
-<div class="modal" id="m-import"><div class="modal-card">
-  <div class="modal-head"><h3>Import a VM disk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
-  <form class="mform" method="post" action="/cluster/import">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Image name<input type="text" name="name" placeholder="imported-esxi-vm" required></label>
-    <label class="fld">Disk URL (VMDK/VHD/raw/qcow2)<input type="text" name="url" placeholder="http://…/disk.vmdk" required></label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Import</button></div>
-  </form>
-</div></div>
 {{template "foot" .}}{{end}}

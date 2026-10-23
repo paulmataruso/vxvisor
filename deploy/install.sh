@@ -21,7 +21,6 @@ VSW_NAME="vSwitch0"
 TUNE_HOST=1           # apply safe host performance tuning (--no-tune to skip)
 HUGEPAGES_PCT=0       # reserve this %% of RAM as 2 MiB hugepages (--hugepages N)
 GET_VIRTIO_WIN=1      # download the virtio-win driver ISO (--no-virtio-win to skip)
-BUILD_GUACD=1         # build+install guacd (with RDP) from source (--no-guacd to skip)
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,7 +33,6 @@ while [ $# -gt 0 ]; do
     --no-tune)           TUNE_HOST=0; shift ;;
     --hugepages)         HUGEPAGES_PCT="$2"; shift 2 ;;
     --no-virtio-win)     GET_VIRTIO_WIN=0; shift ;;
-    --no-guacd)          BUILD_GUACD=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -113,8 +111,16 @@ apt-get install -y -qq \
 #                                   No ceph unit is enabled here; the cluster is created on
 #                                   demand from the UI (which enables ceph-mon@/ceph-mgr@/OSDs).
 say "Storage backend tools (LVM / ZFS / NFS / CIFS / Ceph / iSCSI / Ceph HCI)"
+apt_opt mdadm xfsprogs e2fsprogs
 apt_opt lvm2 thin-provisioning-tools zfsutils-linux \
   nfs-common cifs-utils ceph-common open-iscsi ceph
+
+# VMware import — fastest transport (VDDK over NBD). nbdkit + its VDDK plugin are
+# the apt-installable wrapper; the VDDK library itself is proprietary (Broadcom,
+# not redistributable) and is supplied by the operator via a libdir set in the UI.
+# Without these the import still works over the NFC and datastore-direct transports.
+say "VMware import VDDK transport wrapper (nbdkit; VDDK library is operator-supplied)"
+apt_opt nbdkit nbdkit-plugin-vddk
 
 # SPICE display modules: on newer Ubuntu, SPICE/QXL support for qemu is split into
 # a separate module package. Install it if present so display=spice works.
@@ -150,23 +156,94 @@ if command -v lldpd >/dev/null 2>&1; then
   systemctl enable --now lldpd >/dev/null 2>&1 || true
 fi
 
-# guacd (browser-desktop gateway) is NOT in the Ubuntu archive on current
-# releases, and even where it is, it lacks the FreeRDP-3 RDP plugin we need. Build
-# it from source (VNC + RDP) unless --no-guacd was given.
-if [ "$BUILD_GUACD" = 1 ]; then
-  if command -v guacd >/dev/null 2>&1 && [ -e /usr/local/lib/libguac-client-rdp.so ]; then
-    echo "  guacd already present with RDP: $(guacd -v 2>&1 | head -1)"
-  else
-    say "Building guacd (with RDP) from source — this takes a few minutes"
-    if [ -x "$SRC_DIR/guacd-from-source.sh" ]; then
-      bash "$SRC_DIR/guacd-from-source.sh" || echo "  WARNING: guacd build failed — browser desktops will be unavailable until it is fixed"
-    else
-      echo "  NOTE: guacd-from-source.sh not found beside install.sh — run it manually for browser desktops."
+# Disk & RAID health. smartmontools (smartctl) + pciutils (lspci) back the
+# "Disk status" card and drive-failure toasts — hard requirement, the UI reads
+# them directly.
+say "Disk health tools (smartmontools, pciutils)"
+apt-get install -y -qq smartmontools pciutils || die "failed to install smartmontools/pciutils"
+
+# Hardware-RAID controller CLIs. Disks behind a RAID controller never appear to
+# the kernel (lsblk shows only the virtual disk), so per-drive SMART/health needs
+# the vendor CLI plus smartctl's -d passthrough. These live in VENDOR repos, not
+# the Ubuntu archive, so this whole step is BEST-EFFORT: a flaky/unavailable
+# vendor repo must never brick a host install. We only touch a vendor's repo when
+# that controller is actually on the PCI bus. Proprietary CLIs with no apt repo
+# (Dell perccli, Broadcom storcli, Adaptec arcconf) install only when the operator
+# supplies a .deb URL via the matching *_DEB_URL env var.
+install_raid_tools(){
+  command -v lspci >/dev/null 2>&1 || return 0
+  local pci; pci="$(lspci 2>/dev/null)"
+  local keyring=/usr/share/keyrings updated=0
+  install -d "$keyring" 2>/dev/null || true
+  _try_deb_url(){ # $1=name $2=url
+    [ -n "$2" ] || return 0
+    say "Installing $1 from operator-supplied URL"
+    local t; t="$(mktemp --suffix=.deb)"
+    if curl -fsSL "$2" -o "$t"; then apt-get install -y -qq "$t" || echo "  WARN: $1 package failed to install"; else echo "  WARN: could not download $1 from $2"; fi
+    rm -f "$t"
+  }
+  _install_megacli(){
+    # megacli ships only in the community hwraid repo, and its newest (focal) build
+    # hard-links the EOL libncurses.so.5. Rather than trust that repo's Release
+    # signature (a rotated key) or install a conflicting old libncurses5 system-wide,
+    # we lay down the package's files plus just the two legacy .so's beside the
+    # binary — its wrapper sets LD_LIBRARY_PATH=/usr/lib/megacli, so nothing else on
+    # the host sees them. Package from the hwraid pool, libs from the official Ubuntu
+    # archive. All best-effort.
+    local base=https://hwraid.le-vert.net/ubuntu deb t f idx lib
+    deb="$(curl -fsSL "$base/dists/focal/main/binary-amd64/Packages" 2>/dev/null | awk '/^Package: megacli$/{p=1} p&&/^Filename:/{print $2; exit}')"
+    [ -n "$deb" ] || return 1
+    t="$(mktemp -d)"
+    curl -fsSL "$base/$deb" -o "$t/megacli.deb" || { rm -rf "$t"; return 1; }
+    dpkg-deb -x "$t/megacli.deb" "$t/mc" || { rm -rf "$t"; return 1; }
+    idx="$(curl -fsSL http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/ 2>/dev/null)"
+    for lib in libncurses5 libtinfo5; do
+      f="$(echo "$idx" | grep -oE "${lib}_[^\"]+_amd64.deb" | sort -V | tail -1)"
+      [ -n "$f" ] && curl -fsSL "http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses/$f" -o "$t/$lib.deb" \
+        && dpkg-deb -x "$t/$lib.deb" "$t/nc" || true
+    done
+    rm -rf /usr/lib/megacli
+    cp -a "$t/mc/usr/lib/megacli" /usr/lib/megacli
+    find "$t/nc" \( -name 'libncurses.so.5*' -o -name 'libtinfo.so.5*' \) -exec cp -a {} /usr/lib/megacli/ \; 2>/dev/null
+    install -m0755 "$t/mc/usr/sbin/megacli" /usr/sbin/megacli
+    rm -rf "$t"
+    megacli -v >/dev/null 2>&1
+  }
+  # --- Broadcom/LSI MegaRAID = Dell PERC / Lenovo / Supermicro ---
+  if echo "$pci" | grep -qiE 'megaraid|\bPERC\b|LSI.*(RAID|SAS)|Broadcom.*(RAID|SAS)|Avago'; then
+    if ! command -v megacli >/dev/null 2>&1 && ! command -v storcli >/dev/null 2>&1 && ! command -v perccli >/dev/null 2>&1; then
+      say "MegaRAID/PERC controller detected — installing megacli"
+      _install_megacli || echo "  WARN: could not install megacli (controller still detected; UI shows an install hint)"
+    fi
+    # Broadcom storcli / Dell perccli are self-contained (no legacy libs) and are
+    # the modern replacement — install them when the operator supplies a .deb URL.
+    _try_deb_url perccli "${PERCCLI_DEB_URL:-}"
+    _try_deb_url storcli "${STORCLI_DEB_URL:-}"
+  fi
+  # --- HPE Smart Array (ssacli via HPE Management Component Pack) ---
+  if echo "$pci" | grep -qiE 'smart array|hewlett.?packard.*(array|raid)'; then
+    if ! command -v ssacli >/dev/null 2>&1; then
+      say "HPE Smart Array detected — adding HPE MCP repo for ssacli"
+      local cn; cn="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-focal}")"
+      if curl -fsSL https://downloads.linux.hpe.com/SDR/hpePublicKey2048_key1.pub 2>/dev/null \
+           | gpg --dearmor -o "$keyring/hpe-mcp.gpg" 2>/dev/null; then
+        echo "deb [signed-by=$keyring/hpe-mcp.gpg] https://downloads.linux.hpe.com/SDR/repo/mcp $cn/current non-free" \
+          >/etc/apt/sources.list.d/hpe-mcp.list
+        apt-get update -qq || true; updated=1
+        apt-get install -y -qq ssacli || echo "  WARN: ssacli not installable for codename '$cn' (check the HPE MCP channel for your ProLiant generation)"
+      else
+        echo "  WARN: could not fetch the HPE signing key — skipping ssacli"
+      fi
     fi
   fi
-else
-  echo "  (--no-guacd) skipping guacd build; browser desktops need: sudo ./guacd-from-source.sh"
-fi
+  # --- Adaptec / Microchip (arcconf — no apt repo; operator-supplied only) ---
+  if echo "$pci" | grep -qiE 'adaptec|microsemi|pmc.?sierra'; then
+    command -v arcconf >/dev/null 2>&1 || _try_deb_url arcconf "${ARCCONF_DEB_URL:-}"
+  fi
+  [ "$updated" = 1 ] && apt-get update -qq || true
+  return 0
+}
+install_raid_tools
 
 # ---- time sync (chrony/NTP) ----------------------------------------------
 # Accurate host time is critical: log correlation, TLS, Kerberos/AD joins, and
@@ -260,7 +337,7 @@ if [ -f /etc/vdxclone/config.toml ]; then
 else
   sed "s/__BIND_IP__/${BIND_IP}/g" "$SRC_DIR/config.toml.tmpl" > /etc/vdxclone/config.toml
   chmod 0644 /etc/vdxclone/config.toml
-  echo "  wrote config bound to ${BIND_IP} (admin :8766, public :8768)"
+  echo "  wrote config bound to ${BIND_IP} (admin :8766)"
 fi
 
 # ---- default vSwitch (bridge the management interface) -------------------
@@ -505,17 +582,15 @@ systemctl --no-pager --full status vdxd | head -n 8 || true
 cat <<EOF
 
 ================================================================
-VDXClone installed.
+VXVisor installed.
 
   Admin UI :  http://${BIND_IP}:8766     (sign in as 'admin')
-  Portal   :  http://${BIND_IP}:8768     (My Desktops)
 
 Next steps:
   1. Pull a base image:
        sudo VDX_CONFIG=/etc/vdxclone/config.toml vdxd image pull ubuntu-24.04
-  2. Log in to the admin UI, create a VM, and open its desktop.
-  3. For internet exposure, bind [public] to loopback and front it with
-     Caddy/nginx (TLS) — see docs/VDI-GATEWAY.md.
+  2. Log in to the admin UI and create a VM; open its console from the
+     Instances page.
 
 Logs:   journalctl -u vdxd -f
 Config: /etc/vdxclone/config.toml

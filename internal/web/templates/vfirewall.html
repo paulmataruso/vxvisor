@@ -1,0 +1,334 @@
+{{define "vfirewall.html"}}{{template "head" .}}
+<style>
+ /* Unified firewall board */
+ .fw-board{display:grid;grid-template-columns:260px 1fr;gap:18px;align-items:start}
+ @media(max-width:900px){.fw-board{grid-template-columns:1fr}}
+ .fw-pal{position:sticky;top:12px}
+ .fw-pal h3{margin:0 0 8px;font-size:12.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+ .fw-pal .fw-pal-group{margin-bottom:16px}
+ .fw-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:4px 9px;margin:0 6px 6px 0;border:1px solid var(--line);
+   border-radius:999px;background:var(--panel2);font-size:12px;cursor:grab;user-select:none;white-space:nowrap}
+ .fw-chip:active{cursor:grabbing}
+ .fw-chip .fw-mac{font-family:'Fira Code',monospace;font-size:10.5px;color:var(--muted)}
+ .fw-chip[data-kind=net]{border-style:dashed;font-weight:600}
+ .fw-chip .fw-x{color:var(--muted);font-weight:700;margin-left:2px;cursor:pointer}
+ .fw-zones{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+ @media(max-width:700px){.fw-zones{grid-template-columns:1fr}}
+ .fw-zone{border:1.5px dashed var(--line);border-radius:12px;padding:12px;min-height:120px;background:color-mix(in srgb,var(--panel2) 50%,transparent)}
+ .fw-zone.int{border-color:color-mix(in srgb,#0ea5e9 45%,var(--line))}
+ .fw-zone.ext{border-color:color-mix(in srgb,#64748b 50%,var(--line))}
+ .fw-zone.drop{background:color-mix(in srgb,var(--primary) 12%,transparent);border-color:var(--primary)}
+ .fw-zone > .fw-zh{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13px;margin-bottom:10px}
+ .fw-zh .zdot{width:10px;height:10px;border-radius:3px;display:inline-block}
+ .fw-lane{display:flex;flex-direction:column;gap:10px;min-height:40px}
+ .fw-group{border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);overflow:hidden}
+ .fw-group.drop{outline:2px solid var(--primary);outline-offset:-2px}
+ .fw-group .fw-gh{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);cursor:grab;background:var(--panel2)}
+ .fw-group .fw-gh:active{cursor:grabbing}
+ .fw-gh .gdot{width:11px;height:11px;border-radius:50%;flex:0 0 auto}
+ .fw-gh .gname{font-weight:650;font-size:13px}
+ .fw-gh .gcount{font-size:11px;color:var(--muted)}
+ .fw-gh .gspace{flex:1}
+ .fw-members{display:flex;flex-wrap:wrap;padding:10px;min-height:46px}
+ .fw-members:empty::after{content:"drag VMs or port groups here";color:var(--muted);font-size:11.5px;font-style:italic;padding:6px 2px}
+ .fw-trash{margin-top:10px;border:1.5px dashed color-mix(in srgb,var(--danger) 40%,var(--line));border-radius:10px;
+   padding:10px;text-align:center;color:var(--muted);font-size:12px}
+ .fw-trash.drop{background:var(--danger-soft);border-color:var(--danger);color:var(--danger)}
+ /* rules */
+ .fw-rulehdr{display:flex;align-items:center;gap:8px;margin:14px 0 6px;font-size:12.5px}
+ .zchip{display:inline-flex;align-items:center;gap:6px;font-weight:600}
+ .zchip .zdot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--muted)}
+ .arrow{color:var(--muted)}
+ .fw-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+ .fw-tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:11px;padding:4px 8px;border-bottom:1px solid var(--line)}
+ .fw-tbl td{padding:5px 8px;border-bottom:1px solid var(--line)}
+ .fw-act-allow{color:var(--ok);font-weight:650}
+ .fw-act-deny{color:var(--danger);font-weight:650}
+ /* add/edit rule modal */
+ .fw-rule-form .fw-eps{display:grid;grid-template-columns:1fr 26px 1fr;gap:10px;align-items:stretch;margin-bottom:12px}
+ .fw-ep{border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:var(--panel2)}
+ .fw-ep h4{margin:0 0 9px;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+ .fw-ep .fld{margin-bottom:9px}
+ .fw-ep .fld:last-child{margin-bottom:0}
+ .fw-ep select{width:100%}
+ .fw-eparrow{display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--muted)}
+ .fw-rule-form .fw-opts{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px}
+ .fw-revtoggle{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--fg);background:var(--panel2);
+   border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin:4px 0 2px;cursor:pointer}
+ .fw-revtoggle input{margin:0}
+ @media(max-width:560px){.fw-rule-form .fw-eps{grid-template-columns:1fr}.fw-eparrow{transform:rotate(90deg);height:18px}.fw-rule-form .fw-opts{grid-template-columns:1fr}}
+ .fw-note{border-left:3px solid color-mix(in srgb,var(--primary) 50%,var(--line));background:var(--panel2);
+   padding:10px 14px;border-radius:0 8px 8px 0;font-size:12.5px;color:var(--muted);margin:0 0 14px}
+ .mono{font-family:'Fira Code',monospace}
+</style>
+
+<div id="fw-root" data-csrf="{{$.CSRF}}">
+<div class="card">
+  <div class="card-head"><h2>Firewall</h2>
+    <form method="post" action="/firewall" class="row" style="align-items:center;gap:12px;margin:0">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <label class="fld" style="flex-direction:row;align-items:center;gap:7px;margin:0">
+        <input type="checkbox" name="enabled" value="1" {{if .FW.Enabled}}checked{{end}}> Firewall enabled
+      </label>
+      <button class="btn sm primary">Save</button>
+    </form>
+  </div>
+  <div class="fw-note">
+    Group your VMs, then write rules between the groups. A <b>VM Group</b> is a set of VMs (drag them in)
+    and/or whole port groups; put each group in the <b>Internal</b> or <b>External</b> zone. Rules are split
+    by direction: <b>North-South</b> for traffic between different port groups or to and from External, and
+    <b>East-West</b> for traffic between VMs on the same port group. All membership is drag-and-drop.
+  </div>
+
+  <div class="fw-board">
+    <!-- palette -->
+    <div class="fw-pal">
+      <div class="fw-pal-group">
+        <h3>Virtual machines</h3>
+        {{range .FW.VMPalette}}<span class="fw-chip" draggable="true" data-kind="vm" data-mac="{{.MAC}}" data-name="{{.Name}}" data-net="{{.Net}}">{{.Name}} <span class="fw-mac">{{.MAC}}</span></span>{{else}}<div class="muted" style="font-size:12px">No VMs with a MAC yet.</div>{{end}}
+      </div>
+      <div class="fw-pal-group">
+        <h3>Port groups</h3>
+        {{range .FW.NetPalette}}<span class="fw-chip" draggable="true" data-kind="net" data-netid="{{.ID}}" data-name="{{.Name}}">&#9635; {{.Name}}</span>{{else}}<div class="muted" style="font-size:12px">No bridged port groups.</div>{{end}}
+      </div>
+      <div class="fw-trash" data-trash="1">drag a member here to remove it</div>
+      <form method="post" action="/firewall/group" class="row" style="margin-top:14px;gap:6px">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="text" name="name" placeholder="New group name" required style="flex:1;min-width:0">
+        <button class="btn sm">+ Group</button>
+      </form>
+    </div>
+
+    <!-- zones + groups -->
+    <div class="fw-zones">
+      <div class="fw-zone int" data-zone="Internal">
+        <div class="fw-zh"><span class="zdot" style="background:#0ea5e9"></span> Internal zone</div>
+        <div class="fw-lane">
+          {{range .FW.Internal}}{{template "fwgroup" (dict "G" . "CSRF" $.CSRF)}}{{end}}
+        </div>
+      </div>
+      <div class="fw-zone ext" data-zone="External">
+        <div class="fw-zh"><span class="zdot" style="background:#64748b"></span> External zone</div>
+        <div class="fw-lane">
+          {{range .FW.External}}{{template "fwgroup" (dict "G" . "CSRF" $.CSRF)}}{{end}}
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- North-South rules -->
+{{template "fwrules" (dict "Dir" "ns" "Title" "North-South — between port groups or to External" "Sub" "For traffic that moves between different port groups, or to and from External. Example: allow Web to reach Database on 1433, or Internal out to the internet on 443. Stateful and port-aware; once a rule is added, anything not allowed is denied." "Groups" .FW.RulesNS "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
+
+<!-- East-West rules -->
+{{template "fwrules" (dict "Dir" "ew" "Title" "East-West — within one port group" "Sub" "For traffic between VMs on the same port group. Example: let App-1 reach App-2 on 5432 and block everything else between them. Starts fully open — add rules to carve out what you want to deny." "Groups" .FW.RulesEW "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
+</div>
+
+<script>
+(function(){
+  var root=document.getElementById('fw-root'); if(!root) return;
+  var CSRF=root.dataset.csrf;
+  var dragEl=null, dragKind=null;
+
+  function chipKey(c){ return c.dataset.kind+':'+(c.dataset.mac||c.dataset.netid); }
+
+  function postMembers(grp){
+    var body=new URLSearchParams(); body.set('csrf',CSRF);
+    grp.querySelectorAll('.fw-members .fw-chip[data-kind=vm]').forEach(function(c){ body.append('mac',c.dataset.mac); });
+    grp.querySelectorAll('.fw-members .fw-chip[data-kind=net]').forEach(function(c){ body.append('net',c.dataset.netid); });
+    return fetch('/firewall/group/'+grp.dataset.gid+'/members?ajax=1',{method:'POST',body:body,credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.json().then(function(j){ throw new Error(j.error||'HTTP '+r.status); }); })
+      .catch(function(err){ var t=VDXToast.add('Could not update group'); t.fail(err.message); setTimeout(function(){location.reload();},900); });
+  }
+  function postZone(grp, zone){
+    var body=new URLSearchParams(); body.set('csrf',CSRF); body.set('zone',zone);
+    return fetch('/firewall/group/'+grp.dataset.gid+'/zone?ajax=1',{method:'POST',body:body,credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.json().then(function(j){ throw new Error(j.error||'HTTP '+r.status); }); })
+      .catch(function(err){ var t=VDXToast.add('Could not move group'); t.fail(err.message); setTimeout(function(){location.reload();},900); });
+  }
+
+  function makeMemberChip(src){
+    var c=src.cloneNode(true); c.draggable=true;
+    if(!c.querySelector('.fw-x')){ var x=document.createElement('span'); x.className='fw-x'; x.textContent='×'; c.appendChild(x); }
+    return c;
+  }
+  function addChip(grp, chip){
+    var members=grp.querySelector('.fw-members');
+    var key=chipKey(chip), dup=false;
+    members.querySelectorAll('.fw-chip').forEach(function(c){ if(chipKey(c)===key) dup=true; });
+    if(dup) return;
+    var fromPalette=!!chip.closest('.fw-pal');
+    var srcGroup=chip.closest('.fw-group');
+    if(fromPalette){ members.appendChild(makeMemberChip(chip)); postMembers(grp); }
+    else { members.appendChild(chip); postMembers(grp); if(srcGroup && srcGroup!==grp) postMembers(srcGroup); }
+  }
+  function removeChip(chip){
+    var srcGroup=chip.closest('.fw-group'); if(!srcGroup) return; // palette chips stay
+    chip.remove(); postMembers(srcGroup);
+  }
+  function moveGroup(zone, card){
+    var lane=zone.querySelector('.fw-lane'); lane.appendChild(card); postZone(card, zone.dataset.zone);
+  }
+
+  document.addEventListener('dragstart', function(e){
+    var chip=e.target.closest && e.target.closest('.fw-chip');
+    var grp=e.target.closest && e.target.closest('.fw-group');
+    if(chip){ dragEl=chip; dragKind='chip'; try{e.dataTransfer.setData('text/plain','c');e.dataTransfer.effectAllowed='copyMove';}catch(x){} }
+    else if(grp){ dragEl=grp; dragKind='group'; try{e.dataTransfer.setData('text/plain','g');}catch(x){} }
+  });
+  document.addEventListener('dragover', function(e){
+    if(dragKind==='chip'){ if(e.target.closest('.fw-group')||e.target.closest('.fw-trash')) e.preventDefault(); }
+    else if(dragKind==='group'){ if(e.target.closest('.fw-zone')) e.preventDefault(); }
+  });
+  function hl(el,on){ if(el) el.classList[on?'add':'remove']('drop'); }
+  document.addEventListener('dragenter', function(e){
+    if(dragKind==='chip'){ hl(e.target.closest('.fw-group'),true); hl(e.target.closest('.fw-trash'),true); }
+    else if(dragKind==='group'){ hl(e.target.closest('.fw-zone'),true); }
+  });
+  document.addEventListener('dragleave', function(e){
+    if(dragKind==='chip'){ hl(e.target.closest('.fw-group'),false); hl(e.target.closest('.fw-trash'),false); }
+    else if(dragKind==='group'){ hl(e.target.closest('.fw-zone'),false); }
+  });
+  document.addEventListener('drop', function(e){
+    document.querySelectorAll('.drop').forEach(function(el){el.classList.remove('drop');});
+    if(dragKind==='chip' && dragEl){
+      var grp=e.target.closest('.fw-group'), trash=e.target.closest('.fw-trash');
+      if(grp){ e.preventDefault(); addChip(grp, dragEl); }
+      else if(trash){ e.preventDefault(); removeChip(dragEl); }
+    } else if(dragKind==='group' && dragEl){
+      var zone=e.target.closest('.fw-zone'); if(zone){ e.preventDefault(); moveGroup(zone, dragEl); }
+    }
+    dragEl=null; dragKind=null;
+  });
+  // Click the x on a member chip to remove it too (touch / accessibility).
+  document.addEventListener('click', function(e){
+    var x=e.target.closest('.fw-x'); if(x){ var chip=x.closest('.fw-chip'); if(chip && chip.closest('.fw-group')) removeChip(chip); }
+  });
+})();
+</script>
+{{template "foot" .}}{{end}}
+
+{{/* one group card. arg = dict{G: FWGroupView, CSRF: token} */}}
+{{define "fwgroup"}}
+<div class="fw-group" draggable="true" data-gid="{{.G.ID}}">
+  <div class="fw-gh">
+    <span class="gdot" style="background:{{.G.Color}}"></span>
+    <span class="gname">{{.G.Name}}</span>
+    <span class="gcount">{{.G.Count}} VM{{if ne .G.Count 1}}s{{end}}</span>
+    <span class="gspace"></span>
+    <button class="btn sm" data-modal="m-gr-{{.G.ID}}" title="rename">&#9998;</button>
+    <form method="post" action="/firewall/group/{{.G.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete group {{.G.Name}}?')">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm danger" title="delete">&#128465;</button>
+    </form>
+  </div>
+  <div class="fw-members">
+    {{range .G.VMs}}<span class="fw-chip" draggable="true" data-kind="vm" data-mac="{{.MAC}}" data-name="{{.Name}}" data-net="{{.Net}}">{{.Name}} <span class="fw-mac">{{.MAC}}</span><span class="fw-x">&#215;</span></span>{{end}}
+    {{range .G.Nets}}<span class="fw-chip" draggable="true" data-kind="net" data-netid="{{.ID}}" data-name="{{.Name}}">&#9635; {{.Name}}<span class="fw-x">&#215;</span></span>{{end}}
+  </div>
+  <div class="modal" id="m-gr-{{.G.ID}}"><div class="modal-card">
+    <div class="modal-head"><h3>Rename group</h3><button class="modal-x" data-close>&times;</button></div>
+    <form class="mform" method="post" action="/firewall/group/{{.G.ID}}/rename">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label class="fld">Name<input type="text" name="name" value="{{.G.Name}}" required></label>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>
+  </div></div>
+</div>
+{{end}}
+
+{{/* a rules section. arg = dict{Dir,Title,Sub,Groups,FW,Protos,CSRF} */}}
+{{define "fwrules"}}
+{{$eps := .FW.Endpoints}}{{if eq .Dir "ew"}}{{$eps = .FW.EWEndpoints}}{{end}}
+<div class="card">
+  <div class="card-head"><h2>{{.Title}}</h2>
+    <button class="btn sm primary" data-modal="m-rule-{{.Dir}}">+ Rule</button>
+  </div>
+  <div class="fw-note" style="border-left-color:color-mix(in srgb,var(--muted) 40%,var(--line))">{{.Sub}}</div>
+  {{if not .Groups}}<div class="empty">No {{.Dir}} rules yet.</div>{{end}}
+  {{range .Groups}}
+    <div class="fw-rulehdr">
+      <span class="zchip"><span class="zdot" style="background:{{.FromColor}}"></span>{{.FromName}}</span>
+      <span class="arrow">&rarr;</span>
+      <span class="zchip"><span class="zdot" style="background:{{.ToColor}}"></span>{{.ToName}}</span>
+    </div>
+    <table class="fw-tbl">
+      <thead><tr><th>Action</th><th>Proto</th><th>Port</th><th>Note</th><th style="text-align:right">Order / edit</th></tr></thead>
+      <tbody>
+      {{range .Items}}
+        <tr>
+          <td class="fw-act-{{.Rule.Action}}">{{.Rule.Action}}</td>
+          <td>{{if .Rule.Proto}}{{.Rule.Proto}}{{else}}any{{end}}</td>
+          <td class="mono">{{if .Rule.DPort}}{{.Rule.DPort}}{{else}}&mdash;{{end}}</td>
+          <td class="muted">{{.Rule.Desc}}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <form method="post" action="/firewall/rule/{{$.Dir}}/{{.Idx}}/move" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="step" value="up"><button class="btn sm" title="up">&uarr;</button></form>
+            <form method="post" action="/firewall/rule/{{$.Dir}}/{{.Idx}}/move" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="step" value="down"><button class="btn sm" title="down">&darr;</button></form>
+            <button class="btn sm" data-modal="m-re-{{$.Dir}}-{{.Idx}}">&#9998;</button>
+            <form method="post" action="/firewall/rule/{{$.Dir}}/{{.Idx}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger" title="delete">&#128465;</button></form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  {{end}}
+
+  <!-- add-rule modal -->
+  <div class="modal" id="m-rule-{{.Dir}}"><div class="modal-card lg">
+    <div class="modal-head"><h3>Add {{if eq .Dir "ns"}}North-South{{else}}East-West{{end}} rule</h3><button class="modal-x" data-close>&times;</button></div>
+    <form class="mform fw-rule-form" method="post" action="/firewall/rule">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="dir" value="{{.Dir}}">
+      <div class="fw-eps">
+        <div class="fw-ep">
+          <h4>From</h4>
+          <label class="fld">Group / zone<select name="from" required>{{range $eps}}<option value="{{.Key}}">{{.Name}}</option>{{end}}</select></label>
+          <label class="fld">VM <span class="muted">(optional)</span><select name="from_vm"><option value="">whole group</option>{{range .FW.VMPalette}}<option value="{{.MAC}}">{{.Name}} &middot; {{.Net}}</option>{{end}}</select></label>
+        </div>
+        <div class="fw-eparrow">&rarr;</div>
+        <div class="fw-ep">
+          <h4>To</h4>
+          <label class="fld">Group / zone<select name="to" required>{{range $eps}}<option value="{{.Key}}">{{.Name}}</option>{{end}}</select></label>
+          <label class="fld">VM <span class="muted">(optional)</span><select name="to_vm"><option value="">whole group</option>{{range .FW.VMPalette}}<option value="{{.MAC}}">{{.Name}} &middot; {{.Net}}</option>{{end}}</select></label>
+        </div>
+      </div>
+      <div class="fw-opts">
+        <label class="fld">Action<select name="action"><option value="allow">allow</option><option value="deny">deny</option></select></label>
+        <label class="fld">Protocol<select name="proto">{{range .Protos}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+        <label class="fld">Dest port<input type="text" name="dport" placeholder="80 or 8000-8100"></label>
+      </div>
+      <label class="fld">Note<input type="text" name="desc" placeholder="web tier to internet"></label>
+      <label class="fw-revtoggle"><input type="checkbox" name="reverse" value="1"> Add reverse rule too</label>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add rule</button></div>
+    </form>
+  </div></div>
+
+  <!-- edit-rule modals -->
+  {{range .Groups}}{{range .Items}}{{$r := .Rule}}{{$idx := .Idx}}
+  <div class="modal" id="m-re-{{$.Dir}}-{{$idx}}"><div class="modal-card lg">
+    <div class="modal-head"><h3>Edit rule</h3><button class="modal-x" data-close>&times;</button></div>
+    <form class="mform fw-rule-form" method="post" action="/firewall/rule/{{$.Dir}}/{{$idx}}/update">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <div class="fw-eps">
+        <div class="fw-ep">
+          <h4>From</h4>
+          <label class="fld">Group / zone<select name="from" required>{{range $eps}}<option value="{{.Key}}" {{if eq .Key $r.From}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+          <label class="fld">VM <span class="muted">(optional)</span><select name="from_vm"><option value="">whole group</option>{{range $.FW.VMPalette}}<option value="{{.MAC}}" {{if eq .MAC $r.FromVM}}selected{{end}}>{{.Name}} &middot; {{.Net}}</option>{{end}}</select></label>
+        </div>
+        <div class="fw-eparrow">&rarr;</div>
+        <div class="fw-ep">
+          <h4>To</h4>
+          <label class="fld">Group / zone<select name="to" required>{{range $eps}}<option value="{{.Key}}" {{if eq .Key $r.To}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+          <label class="fld">VM <span class="muted">(optional)</span><select name="to_vm"><option value="">whole group</option>{{range $.FW.VMPalette}}<option value="{{.MAC}}" {{if eq .MAC $r.ToVM}}selected{{end}}>{{.Name}} &middot; {{.Net}}</option>{{end}}</select></label>
+        </div>
+      </div>
+      <div class="fw-opts">
+        <label class="fld">Action<select name="action"><option value="allow" {{if eq $r.Action "allow"}}selected{{end}}>allow</option><option value="deny" {{if eq $r.Action "deny"}}selected{{end}}>deny</option></select></label>
+        <label class="fld">Protocol<select name="proto">{{range $.Protos}}<option value="{{.}}" {{if eq . $r.Proto}}selected{{end}}>{{.}}</option>{{end}}</select></label>
+        <label class="fld">Dest port<input type="text" name="dport" value="{{$r.DPort}}"></label>
+      </div>
+      <label class="fld">Note<input type="text" name="desc" value="{{$r.Desc}}"></label>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+    </form>
+  </div></div>
+  {{end}}{{end}}
+</div>
+{{end}}

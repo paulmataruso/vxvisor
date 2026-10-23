@@ -165,6 +165,7 @@ type CreateOpts struct {
 	CISSHKey       string
 	Passthrough    string // csv of host PCI addresses (gated on IOMMU by caller)
 	NetworkID      int64  // port group (networks.id) to attach the NIC to; 0 = default/NAT
+	MAC            string // pin the NIC MAC (e.g. preserved from a VMware import); "" = generate
 	StoragePoolID  int64  // storage pool (storage_pools.id) for the disk; 0 = default disk dir
 	Display        string // vnc | spice
 	DiskBackend    string // qcow2 | zvol | lvm | rbd
@@ -187,7 +188,7 @@ type CreateOpts struct {
 // later step fails, so a failed create never leaves orphan files.
 func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	if o.Kind == "" {
-		o.Kind = "desktop"
+		o.Kind = "server"
 	}
 	if o.Firmware == "" {
 		o.Firmware = "uefi"
@@ -416,8 +417,15 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	}
 
 	// MAC is pinned now so the cloud-init network-config (bridge/overlay mode)
-	// can match it to the guest NIC and the address survives reboots.
+	// can match it to the guest NIC and the address survives reboots. A caller
+	// may supply one (preserved from a VMware import, so the guest keeps the same
+	// L2 identity — DHCP reservations, MAC-bound licenses); otherwise generate.
 	mac := netdrv.GenMAC()
+	if o.MAC != "" {
+		if hw, err := net.ParseMAC(strings.TrimSpace(o.MAC)); err == nil && len(hw) == 6 {
+			mac = hw.String()
+		}
+	}
 
 	// Bridge/overlay networking: allocate a stable guest IP from the cluster
 	// subnet so the VM comes up routable (for RDP and for migration identity).
@@ -445,10 +453,6 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 			o.CIPassword = randPassword()
 		}
 		seedPath = filepath.Join(m.cfg.Paths.DiskDir, id+".seed.iso")
-		// Provision an xrdp desktop when the guest is routable (bridge/overlay)
-		// and the gateway is configured for RDP, so "Open desktop" gives a full
-		// RDP session with device redirection rather than only the VNC console.
-		installRDP := staticIP != "" && m.cfg.Gateway.Protocol == "rdp"
 		// A static (bridge/overlay) guest has no DHCP-provided resolver, so give it
 		// DNS or its first-boot package install (desktop, guest agent) can't resolve.
 		// A DHCP guest gets its resolver from the LAN, so no override is needed.
@@ -463,7 +467,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 			InstanceID: id, Hostname: sanitizeHostname(o.Name),
 			Username: o.CIUsername, Password: o.CIPassword, SSHKey: o.CISSHKey,
 			MAC: mac, StaticIP: staticIP, Gateway: gw, Nameservers: ns, DHCP: dhcp,
-			InstallRDP: installRDP, Desktop: o.Desktop,
+			Desktop:           o.Desktop,
 			InstallGuestAgent: o.GuestAgent,
 		}
 		if err := cloudinit.BuildSeedISO(m.cfg.Paths.DiskDir, seedPath, cfg); err != nil {
@@ -924,7 +928,7 @@ func (m *Manager) Start(id string) (*Session, error) {
 		}
 		spec.TPMSock = tsock
 	}
-	// SPICE display: a loopback SPICE server + qxl, used by the guac desktop
+	// SPICE display: a loopback SPICE server + qxl, for a SPICE-aware client
 	// gateway. VNC stays enabled so the plain noVNC console still works too.
 	spicePort := 0
 	if s.Display == "spice" {

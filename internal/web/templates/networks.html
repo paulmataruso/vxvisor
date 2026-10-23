@@ -78,8 +78,7 @@
 {{if .P.IsAdmin}}
 <div class="card">
   <h2>Host interfaces</h2>
-  <table id="iftable" style="font-size:13px"><tr><th>Interface</th><th>State</th><th>Type</th><th>Addresses</th><th>Speed</th><th>In bridge</th></tr>
-    <tr><td colspan="6" class="muted">loading…</td></tr></table>
+  <div id="iftable"><div class="muted">loading…</div></div>
 </div>
 
 <div class="card">
@@ -264,6 +263,7 @@
 </div></div>
 
 {{if .P.IsAdmin}}
+{{template "topochart" .}}
 <script>
 (function(){
   // Fill a bond-member checkbox list: every FREE physical NIC (selectable) PLUS
@@ -299,290 +299,129 @@
     var tbl = document.getElementById('iftable');
     var ulsel = document.getElementById('uplinksel');     // vSwitch uplink picker
     window.__physNics = ifs.filter(function(it){ return it.type==='physical'; });
-    tbl.innerHTML = '<tr><th>Interface</th><th>State</th><th>Type</th><th>Addresses</th><th>Speed</th><th>In bridge</th></tr>';
+
+    // Uplink picker: free physical NICs (not already enslaved).
     ifs.forEach(function(it){
-      // Uplink picker: free physical NICs (not already enslaved).
       if(ulsel && it.type==='physical' && !it.master){
         var o=document.createElement('option'); o.value=it.name;
         o.textContent=it.name+' (NIC · '+it.state+(it.speed_mbps?', '+it.speed_mbps+'Mb/s':'')+')';
         ulsel.appendChild(o);
       }
+    });
+
+    // Group interfaces into labelled sections. The service assigns each iface a
+    // `group`; we render the groups in this fixed order and skip empty ones.
+    // Each group is a bold, color-coded panel so the types read as distinct
+    // blocks rather than blending into one long table.
+    var GROUP_META = {
+      'Physical interfaces': {c:'#3b82f6', ic:'🔌'},
+      'Bonds / LAGs':        {c:'#f59e0b', ic:'🔗'},
+      'VLAN interfaces':     {c:'#a78bfa', ic:'🏷️'},
+      'vSwitch bridges':     {c:'#34d399', ic:'🔀'},
+      'vRouter bridges':     {c:'#f472b6', ic:'🧭'},
+      'Other bridges':       {c:'#64748b', ic:'🌉'},
+      'VXLAN overlays':      {c:'#22d3ee', ic:'🛰️'},
+      'Container veth (LXC)':{c:'#818cf8', ic:'📦'},
+      'Loopback':            {c:'#94a3b8', ic:'↩️'},
+      'Other':               {c:'#64748b', ic:'•'}
+    };
+    var GROUP_ORDER = ['Physical interfaces','Bonds / LAGs','VLAN interfaces',
+      'vSwitch bridges','vRouter bridges','Other bridges','VXLAN overlays',
+      'Container veth (LXC)','Loopback','Other'];
+    var groups = {};
+    ifs.forEach(function(it){
+      var g = it.group || 'Other';
+      (groups[g] = groups[g] || []).push(it);
+    });
+    // Append any unexpected group label after the known ones.
+    Object.keys(groups).forEach(function(g){ if(GROUP_ORDER.indexOf(g)<0) GROUP_ORDER.push(g); });
+
+    // A CONFIGURED physical NIC (enslaved to a vSwitch/bond, or carrying an IP)
+    // whose link is down (unplugged / switch-port down) or admin-down = failure.
+    function nicFailed(it){
+      return it.type==='physical' && (it.master || (it.addrs&&it.addrs.length)) &&
+             (it.state==='down' || it.carrier===false);
+    }
+    function nicAckLoad(){ try{ return JSON.parse(localStorage.getItem('vdxNICAck')||'{}')||{}; }catch(e){ return {}; } }
+    function nicAckSave(o){ try{ localStorage.setItem('vdxNICAck',JSON.stringify(o)); }catch(e){} }
+    // One-time: flash CSS + a delegated handler for the per-row "✓ ack" button,
+    // which stops the flashing by hand even while the NIC is still down.
+    if(!document.getElementById('nicflash-css')){
+      var st=document.createElement('style'); st.id='nicflash-css';
+      st.textContent='@keyframes nicflash{0%,49%{background:#ff2020;color:#fff}50%,100%{background:transparent;color:inherit}}'+
+        ' tr.nic-failed td{animation:nicflash 1s steps(1,end) infinite} .nic-ack{margin-left:6px;padding:1px 7px;font-size:11px}';
+      document.head.appendChild(st);
+    }
+    if(!window.__nicAckWired){
+      window.__nicAckWired=true;
+      document.getElementById('iftable').addEventListener('click', function(e){
+        var b=e.target.closest('.nic-ack'); if(!b) return;
+        var o=nicAckLoad(); o['nic:'+b.getAttribute('data-nic')]=1; nicAckSave(o);
+        var tr=b.closest('tr'); if(tr) tr.classList.remove('nic-failed'); b.remove();
+      });
+    }
+    // Prune acks for NICs that have since recovered, so a future failure re-flashes.
+    var acks=nicAckLoad(), failedNow={}, pruned=false;
+    ifs.forEach(function(it){ if(nicFailed(it)) failedNow['nic:'+it.name]=1; });
+    Object.keys(acks).forEach(function(id){ if(!failedNow[id]){ delete acks[id]; pruned=true; } });
+    if(pruned) nicAckSave(acks);
+
+    function rowHTML(it){
       var up = it.state==='up';
       var dot = up?'running':(it.state==='down'?'stopped':'');
-      var tr=document.createElement('tr');
-      tr.innerHTML='<td class="mono">'+it.name+'</td>'+
-        '<td><span class="pill '+dot+'">'+it.state+'</span></td>'+
+      var failed = nicFailed(it), acked = failed && acks['nic:'+it.name];
+      var label = failed && it.carrier===false && it.state!=='down' ? 'link down' : it.state;
+      var stateCell = '<span class="pill '+(failed?'error':dot)+'">'+label+'</span>'+
+        (failed && !acked ? ' <button type="button" class="nic-ack btn sm" data-nic="'+it.name+'" title="Acknowledge — stop flashing (the adapter is still down)">✓ ack</button>' : '');
+      return '<tr'+((failed && !acked)?' class="nic-failed"':'')+'>'+
+        '<td class="mono">'+it.name+'</td>'+
+        '<td>'+stateCell+'</td>'+
         '<td>'+it.type+'</td>'+
         '<td class="mono" style="font-size:12px">'+((it.addrs||[]).join(', ')||'—')+'</td>'+
         '<td class="muted">'+(it.speed_mbps?it.speed_mbps+' Mb/s':'—')+'</td>'+
-        '<td class="muted">'+(it.master||'—')+'</td>';
-      tbl.appendChild(tr);
+        '<td class="muted">'+(it.master||'—')+'</td>'+
+        '</tr>';
+    }
+
+    tbl.innerHTML = '';
+    GROUP_ORDER.forEach(function(g){
+      var rows = groups[g];
+      if(!rows || !rows.length) return;
+      var m = GROUP_META[g] || {c:'#64748b', ic:'•'};
+      var sec = document.createElement('div');
+      sec.style.cssText = 'margin:0 0 18px;border:1px solid var(--line);border-left:5px solid '+m.c+
+        ';border-radius:12px;overflow:hidden;background:var(--panel)';
+      var body = rows.map(rowHTML).join('');
+      sec.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;'+
+          'background:color-mix(in srgb,'+m.c+' 16%,var(--panel));border-bottom:1px solid var(--line)">'+
+          '<span style="font-size:15px;line-height:1">'+m.ic+'</span>'+
+          '<span style="font-weight:700;font-size:13px;letter-spacing:.03em;text-transform:uppercase;color:var(--fg)">'+g+'</span>'+
+          '<span style="margin-left:auto;font-weight:700;font-size:12px;color:#fff;background:'+m.c+
+            ';border-radius:999px;padding:1px 9px">'+rows.length+'</span>'+
+        '</div>'+
+        '<table style="font-size:13px;width:100%;margin:0">'+
+        '<tr><th>Interface</th><th>State</th><th>Type</th><th>Addresses</th><th>Speed</th><th>In bridge</th></tr>'+
+        body+'</table>';
+      tbl.appendChild(sec);
     });
+    if(!tbl.children.length) tbl.innerHTML='<div class="muted">no interfaces</div>';
+
     // Fill the member pickers now that we know the NICs.
     window.fillBondMembers(document.getElementById('bondmembers'), '');
   }).catch(function(){});
 
-  // ---- topology diagram (VMware-style: Port Groups → vSwitch → Uplinks) ----
-  // Port groups (with their VMs) on the left, the vSwitch spine in the middle,
-  // physical adapters / LAGs on the right. Redrawn on a timer so it tracks live
-  // changes (new VMs, port groups, vSwitches, uplinks) without a manual reload.
-  var ESC=function(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
-
-  function drawTopo(topo){
-    var host=document.getElementById('topo');
-    var sws=(topo&&topo.switches)||[];
-    if(!sws.length){ host.innerHTML='<div class="empty">No vSwitches or networks yet. Create a port group to see the diagram.</div>'; return; }
-    var cs=getComputedStyle(document.documentElement);
-    function v(n,f){var x=cs.getPropertyValue(n).trim();return x||f;}
-    var C={panel:v('--panel','#121722'),panel2:v('--panel2','#1a2130'),line:v('--line','#27303f'),
-      fg:v('--fg','#e6e9ef'),muted:v('--muted','#8a93a6'),primary:v('--primary','#3b82f6'),
-      accent:v('--accent','#f59e0b'),ok:v('--ok','#34d399')};
-
-    // text measuring (canvas) so boxes size to their content instead of clipping
-    var _mctx=document.createElement('canvas').getContext('2d');
-    function measure(s,px,wt){ _mctx.font=(wt||400)+' '+px+"px 'Fira Sans',system-ui,sans-serif"; return _mctx.measureText(String(s==null?'':s)).width; }
-    function fit(s,px,wt,maxw){ s=String(s==null?'':s); if(measure(s,px,wt)<=maxw) return s; var t=s; while(t.length>1 && measure(t+'…',px,wt)>maxw) t=t.slice(0,-1); return t+'…'; }
-    function kindOf(sw){ return sw.kind==='standard'?'Standard Switch':sw.kind==='overlay'?'Overlay (VXLAN)':sw.kind==='management'?'Management':'User-mode (NAT)'; }
-
-    // geometry
-    var pad=18, pgW=330, upW=210, colGap=84, blkGap=34;
-    var pgHdr=40, vmRow=26, pgFoot=12, pgGap=14;        // port group box
-    var vmkH=48;                                        // host-adapter (host IP) box (1 IP)
-    // One host-adapter box grows to hold all its IPs (IPv4 + IPv6 on one adapter).
-    function vmkHeight(vmk){ return 24+Math.max((vmk.ips||[]).length,1)*15+9; }
-    var nicH=48, bondHdr=34, bondRow=22, bondFoot=12, upGap=14; // uplink / LAG box
-    // Center column width = the widest vSwitch label it must hold (name, kind,
-    // address — IPv6 can be long — and the counts line), clamped to a sane max.
-    var swW=140;
-    sws.forEach(function(sw){
-      swW=Math.max(swW, measure(sw.name,14,700)+28, measure(kindOf(sw),11,400)+24,
-        measure(((sw.port_groups||[]).length)+' PG · '+((sw.uplinks||[]).length)+' uplink',10,400)+24);
-      (sw.addrs||[]).forEach(function(a){ swW=Math.max(swW, measure(a,10,400)+22); });
-    });
-    swW=Math.min(Math.round(swW),420);
-    // Is any uplink wired to an upstream switch we've heard via LLDP/CDP? If so,
-    // reserve a right-hand column for the "Switch" boxes.
-    var hasNbr=sws.some(function(sw){return (sw.uplinks||[]).some(function(u){return (u.neighbors||[]).length;});});
-    var switchW=236;
-    var pgX=pad, swX=pgX+pgW+colGap, upX=swX+swW+colGap;
-    var switchX=upX+upW+colGap;
-    var W=(hasNbr?switchX+switchW:upX+upW)+pad;
-
-    function rect(x,y,w,h,fill,stroke,r,dash,sw){return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="'+(r||9)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="'+(sw||1)+'"'+(dash?' stroke-dasharray="5 4"':'')+'/>';}
-    function txt(x,y,s,fill,anchor,wt,sz){return '<text x="'+x+'" y="'+y+'" fill="'+(fill||C.fg)+'" text-anchor="'+(anchor||'start')+'"'+(wt?' font-weight="'+wt+'"':'')+(sz?' font-size="'+sz+'"':'')+'>'+ESC(s)+'</text>';}
-    function conn(x1,y1,x2,y2,col,on){var dx=Math.max(30,(x2-x1)/2);return '<path d="M'+x1+' '+y1+' C'+(x1+dx)+' '+y1+' '+(x2-dx)+' '+y2+' '+x2+' '+y2+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+(on?'.85':'.4')+'"'+(on?'':' stroke-dasharray="5 4"')+'/>';}
-    function dot(x,y,running){return '<circle cx="'+x+'" cy="'+y+'" r="4" fill="'+(running?C.ok:C.muted)+'"/>';}
-    function monitor(x,y,col){ // tiny VM/monitor glyph, top-left at x,y (14x12)
-      return '<rect x="'+x+'" y="'+y+'" width="14" height="10" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
-             '<rect x="'+(x+5)+'" y="'+(y+10)+'" width="4" height="2.5" fill="'+col+'"/>';
-    }
-    function nicGlyph(x,y,col){ // tiny ethernet-port glyph (14x12)
-      return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
-             '<rect x="'+(x+4)+'" y="'+(y+9)+'" width="6" height="3" fill="'+col+'"/>';
-    }
-    function ctGlyph(x,y,col){ // tiny container/box glyph (14x12) — distinguishes LXC
-      return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
-             '<path d="M'+x+' '+(y+4)+' h14 M'+(x+7)+' '+y+' v12" stroke="'+col+'" stroke-width="1.1"/>';
-    }
-
-    function pgHeight(pg){return pgHdr+Math.max((pg.vms||[]).length,1)*vmRow+pgFoot;}
-    function upHeight(up){return up.kind==='bond'?(bondHdr+Math.max((up.members||[]).length,1)*bondRow+bondFoot):nicH;}
-
-    var y=pad, svg='', H=pad;
-    // Upstream switches collapse by identity (mgmt IP, else chassis name): all the
-    // uplinks landing on ONE physical switch share ONE box, drawn after the blocks.
-    var upSwitches={}, upOrder=[];
-    sws.forEach(function(sw){
-      var pgs=sw.port_groups||[], ups=sw.uplinks||[];
-      var vmks=sw.vmks||[];
-      var leftH=0; vmks.forEach(function(vmk){leftH+=vmkHeight(vmk);}); pgs.forEach(function(pg){leftH+=pgHeight(pg);}); leftH+=pgGap*Math.max(vmks.length+pgs.length-1,0);
-      var rightH=0; ups.forEach(function(up){rightH+=upHeight(up);}); rightH+=upGap*Math.max(ups.length-1,0);
-      var blkH=Math.max(leftH,rightH,130);
-      var top=y, cy=top+blkH/2;
-
-      // vSwitch spine (center)
-      svg+=rect(swX,top,swW,blkH,C.panel2,C.muted,10,false,1.5);
-      svg+=txt(swX+swW/2,top+24,'vSwitch',C.muted,'middle',600,11);
-      svg+=txt(swX+swW/2,top+44,fit(sw.name,14,700,swW-20),C.fg,'middle',700,14);
-      svg+=txt(swX+swW/2,top+62,kindOf(sw),C.muted,'middle',400,11);
-      if((sw.addrs||[]).length){
-        var a0=sw.addrs[0];
-        svg+='<text x="'+(swX+swW/2)+'" y="'+(top+78)+'" fill="'+C.muted+'" text-anchor="middle" font-size="10"><title>'+ESC(a0)+'</title>'+ESC(fit(a0,10,400,swW-16))+'</text>';
-      }
-      svg+=txt(swX+swW/2,top+blkH-12,pgs.length+' PG · '+ups.length+' uplink',C.muted,'middle',400,10);
-
-      // host adapters (host IPs — management/storage) then port groups (left)
-      var py=top+(blkH-leftH)/2;
-      vmks.forEach(function(vmk){
-        var vh=vmkHeight(vmk), ips=vmk.ips||[];
-        svg+=rect(pgX,py,pgW,vh,C.panel,C.ok,9,false,1.4);
-        svg+='<rect x="'+pgX+'" y="'+py+'" width="4" height="'+vh+'" fill="'+C.ok+'"/>';
-        svg+=nicGlyph(pgX+16,py+16,C.ok);
-        var vb=measure('host adapter',11,600)+16;
-        svg+='<rect x="'+(pgX+pgW-vb-10)+'" y="'+(py+9)+'" width="'+vb+'" height="18" rx="9" fill="none" stroke="'+C.ok+'"/>';
-        svg+=txt(pgX+pgW-10-vb/2,py+22,'host adapter',C.ok,'middle',600,11);
-        svg+='<text x="'+(pgX+40)+'" y="'+(py+20)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(vmk.iface)+'</title>'+ESC(fit(vmk.label,13,700,pgW-vb-60))+'</text>';
-        // all IPs on this one adapter, one line each (IPv4 then IPv6)
-        ips.forEach(function(ip,i){ svg+=txt(pgX+40,py+36+i*15,fit(ip,11,400,pgW-60),C.muted,'start',400,11); });
-        svg+=conn(pgX+pgW,py+vh/2,swX,cy,C.ok,true);
-        py+=vh+pgGap;
-      });
-      pgs.forEach(function(pg){
-        var vms=pg.vms||[], h=pgHeight(pg);
-        svg+=rect(pgX,py,pgW,h,C.panel,C.primary,9,false,1.4);
-        // left accent spine on the port group
-        svg+='<rect x="'+pgX+'" y="'+py+'" width="4" height="'+h+'" fill="'+C.primary+'"/>';
-        // VLAN badge (drawn first so the name can be fit to the space left of it)
-        var badge=pg.vlan?('VLAN '+pg.vlan):'untagged';
-        var bw=measure(badge,11,600)+16;
-        svg+='<rect x="'+(pgX+pgW-bw-10)+'" y="'+(py+9)+'" width="'+bw+'" height="18" rx="9" fill="none" stroke="'+C.primary+'"/>';
-        svg+=txt(pgX+pgW-10-bw/2,py+22,badge,C.primary,'middle',600,11);
-        svg+='<text x="'+(pgX+14)+'" y="'+(py+22)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(pg.name)+'</title>'+ESC(fit(pg.name,13,700,pgW-bw-36))+'</text>';
-        if(pg.cidr) svg+=txt(pgX+14,py+36,fit(pg.cidr,11,400,pgW-28),C.muted,'start',400,11);
-        var exitY=py+h/2; // where the main line leaves the port-group box
-        if(vms.length){
-          // Mini network bus: a tight square enclosing every VM's state dot. Each VM
-          // (and a container's veth) draws a line INTO this bus; the bus then runs out
-          // of the box on the main line to the vSwitch — the port group's internal bus.
-          var mids=vms.map(function(_,i){return py+pgHdr+i*vmRow+9;});
-          var busHalf=9, dotX=pgX+pgW-20, busX=dotX-busHalf, busR=dotX+busHalf;
-          var bTop=mids[0]-busHalf, bBot=mids[mids.length-1]+busHalf, bMid=(bTop+bBot)/2;
-          exitY=bMid; // the box exit aligns with the bus, so the bus→edge line is straight
-          svg+=rect(busX,bTop,busHalf*2,bBot-bTop,C.panel2,C.primary,6,false,1.3);
-          // bus → box edge: a STRAIGHT horizontal segment (then the curve to the vSwitch)
-          svg+='<line x1="'+busR+'" y1="'+bMid+'" x2="'+(pgX+pgW)+'" y2="'+bMid+'" stroke="'+C.primary+'" stroke-width="1.6" opacity=".6"/>';
-          vms.forEach(function(vm,i){
-            var ry=py+pgHdr+i*vmRow, mid=mids[i];
-            var col=vm.state==='running'?C.ok:C.muted;
-            svg+=(vm.kind==='container'?ctGlyph(pgX+16,ry+2,col):monitor(pgX+16,ry+3,col));
-            if(vm.kind==='container' && vm.veth){
-              // name ——— [veth] ——— bus
-              var chipW=Math.min(96, measure(vm.veth,9,600)+14);
-              var chipRight=busX-10, chipX=chipRight-chipW;
-              var label=vm.name+' (lxc)';
-              var lbl=fit(label,12,400,chipX-10-(pgX+40));
-              svg+='<text x="'+(pgX+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(label)+'</title>'+ESC(lbl)+'</text>';
-              var nameEnd=pgX+40+measure(lbl,12,400);
-              svg+='<line x1="'+(nameEnd+5)+'" y1="'+mid+'" x2="'+chipX+'" y2="'+mid+'" stroke="'+C.primary+'" stroke-width="1.3" opacity=".6"/>';
-              svg+=rect(chipX,ry+1,chipW,16,C.panel2,C.primary,8,false,1.1);
-              svg+='<text x="'+(chipX+chipW/2)+'" y="'+(mid+3.5)+'" fill="'+C.primary+'" text-anchor="middle" font-size="9" font-weight="600"><title>veth pair · host side '+ESC(vm.veth)+'</title>'+ESC(fit(vm.veth,9,600,chipW-8))+'</text>';
-              svg+='<line x1="'+(chipX+chipW)+'" y1="'+mid+'" x2="'+busX+'" y2="'+mid+'" stroke="'+C.primary+'" stroke-width="1.3" opacity=".6"/>';
-            } else {
-              // name ——— bus
-              var label=(vm.name||vm.tap)+(vm.kind==='container'?' (lxc)':'');
-              var lbl2=fit(label,12,400,busX-12-(pgX+40));
-              svg+='<text x="'+(pgX+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(label)+'</title>'+ESC(lbl2)+'</text>';
-              var ne=pgX+40+measure(lbl2,12,400);
-              svg+='<line x1="'+(ne+5)+'" y1="'+mid+'" x2="'+busX+'" y2="'+mid+'" stroke="'+C.primary+'" stroke-width="1.2" opacity=".45"/>';
-            }
-            svg+=dot(dotX,mid,vm.state==='running'); // the dot sits inside the bus square
-          });
-        } else {
-          svg+=txt(pgX+40,py+pgHdr+14,'(no VMs attached)',C.muted,'start',400,12);
-        }
-        svg+=conn(pgX+pgW,exitY,swX,cy,C.primary,true); // main line: port group → vSwitch
-        py+=h+pgGap;
-      });
-
-      // Uplinks / LAGs (right)
-      var uy=top+(blkH-rightH)/2;
-      ups.forEach(function(up){
-        var h=upHeight(up), on=up.state!=='down';
-        svg+=conn(swX+swW,cy,upX,uy+h/2,C.accent,on);
-        if(up.kind==='bond'){
-          var mem=up.members||[];
-          svg+=rect(upX,uy,upW,h,C.panel,C.accent,9,false,1.6);
-          svg+='<rect x="'+(upX+upW-4)+'" y="'+uy+'" width="4" height="'+h+'" fill="'+C.accent+'"/>';
-          var mode=(up.mode==='lacp'?'LACP (802.3ad)':up.mode==='etherchannel'?'Etherchannel':up.mode||'bond');
-          var mw=measure(mode,10,600);
-          svg+=txt(upX+upW-12,uy+21,mode,C.accent,'end',600,10);
-          svg+=txt(upX+12,uy+21,fit('LAG · '+up.name,13,700,upW-mw-30),C.fg,'start',700,13);
-          mem.forEach(function(m,i){
-            var ry=uy+bondHdr+i*bondRow;
-            svg+=nicGlyph(upX+14,ry-1,C.muted);
-            svg+=txt(upX+36,ry+10,fit(m,12,400,upW-48),C.fg,'start',400,12);
-          });
-          if(!mem.length) svg+=txt(upX+36,uy+bondHdr+10,'(no members)',C.muted,'start',400,12);
-        }else{
-          svg+=rect(upX,uy,upW,h,C.panel,C.accent,9,false,1.4);
-          svg+='<rect x="'+(upX+upW-4)+'" y="'+uy+'" width="4" height="'+h+'" fill="'+C.accent+'"/>';
-          svg+=nicGlyph(upX+14,uy+12,C.accent);
-          svg+=txt(upX+38,uy+22,fit(up.name,13,700,upW-64),C.fg,'start',700,13);
-          var meta=(up.speed?(up.speed>=1000?(up.speed/1000)+' GbE':up.speed+' Mb/s'):'')+(up.speed&&up.state?' · ':'')+(up.state||'');
-          svg+=txt(upX+38,uy+38,meta||'physical adapter',C.muted,'start',400,11);
-          svg+=dot(upX+upW-16,uy+h/2,on);
-        }
-        // Record the upstream switch(es) this uplink's port(s) learned via LLDP/CDP.
-        // We do NOT draw per-port boxes — several uplinks on the SAME physical switch
-        // collapse into one box (drawn after all blocks). Each neighbor contributes a
-        // connection line (local port → remote port · vlan) and an anchor to wire from.
-        var anchor={x:upX+upW, y:uy+h/2};
-        (up.neighbors||[]).forEach(function(nb){
-          var k=nb.mgmt_ip||nb.switch_name||'?';
-          var s=upSwitches[k];
-          if(!s){ s=upSwitches[k]={name:nb.switch_name,descr:nb.switch_descr,mgmt:nb.mgmt_ip,via:nb.via,conns:[],anchors:[],akeys:{}}; upOrder.push(k); }
-          s.conns.push({local:nb.local||up.name, remote:nb.port_id, vlan:nb.vlan});
-          var ak=anchor.x+','+anchor.y;
-          if(!s.akeys[ak]){ s.akeys[ak]=1; s.anchors.push(anchor); }
-        });
-        uy+=h+upGap;
-      });
-      if(!ups.length){
-        svg+=rect(upX,cy-20,upW,40,C.panel,C.line,9,true,1.2);
-        svg+=txt(upX+upW/2,cy+4,'no uplink (internal only)',C.muted,'middle',400,12);
-        svg+=conn(swX+swW,cy,upX,cy,C.muted,false);
-      }
-
-      // column captions on the first block, centered over each column
-      if(sw===sws[0]){
-        svg+=txt(pgX+pgW/2,top-8,'PORT GROUPS',C.muted,'middle',700,10);
-        svg+=txt(swX+swW/2,top-8,'VSWITCH',C.muted,'middle',700,10);
-        svg+=txt(upX+upW/2,top-8,'PHYSICAL ADAPTERS',C.muted,'middle',700,10);
-        if(hasNbr) svg+=txt(switchX+switchW/2,top-8,'UPSTREAM SWITCH',C.muted,'middle',700,10);
-      }
-      y=top+blkH+blkGap; H=y;
-    });
-
-    // Consolidated upstream-switch boxes: one per distinct physical switch, listing
-    // every uplink port that lands on it, wired from each contributing uplink.
-    if(upOrder.length){
-      var sy=pad+14;
-      upOrder.forEach(function(k){
-        var s=upSwitches[k];
-        var via=s.via||'LLDP', vw=measure(via,9,600)+14;
-        var boxH=36+(s.descr?15:0)+(s.mgmt?15:0)+s.conns.length*15+14;
-        var sbX=switchX, sbY=sy;
-        // wire every contributing uplink to this one box
-        s.anchors.forEach(function(a){ svg+=conn(a.x,a.y,sbX,sbY+boxH/2,C.muted,true); });
-        svg+=rect(sbX,sbY,switchW,boxH,C.panel,C.muted,9,false,1.4);
-        svg+='<rect x="'+(sbX+switchW-4)+'" y="'+sbY+'" width="4" height="'+boxH+'" fill="'+C.muted+'"/>';
-        svg+='<rect x="'+(sbX+12)+'" y="'+(sbY+12)+'" width="16" height="5" rx="1" fill="none" stroke="'+C.fg+'" stroke-width="1.2"/>';
-        svg+='<rect x="'+(sbX+12)+'" y="'+(sbY+19)+'" width="16" height="5" rx="1" fill="none" stroke="'+C.fg+'" stroke-width="1.2"/>';
-        svg+='<rect x="'+(sbX+switchW-vw-10)+'" y="'+(sbY+10)+'" width="'+vw+'" height="16" rx="8" fill="none" stroke="'+C.muted+'"/>';
-        svg+=txt(sbX+switchW-10-vw/2,sbY+21,via,C.muted,'middle',600,9);
-        svg+='<text x="'+(sbX+36)+'" y="'+(sbY+24)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(s.name||'(unknown switch)')+'</title>'+ESC(fit(s.name||'(unknown switch)',13,700,switchW-vw-54))+'</text>';
-        var ly=sbY+40;
-        if(s.descr){ svg+='<text x="'+(sbX+14)+'" y="'+ly+'" fill="'+C.muted+'" font-size="11"><title>'+ESC(s.descr)+'</title>'+ESC(fit(s.descr,11,400,switchW-28))+'</text>'; ly+=15; }
-        if(s.mgmt){ svg+=txt(sbX+14,ly,'mgmt '+fit(s.mgmt,11,400,switchW-70),C.muted,'start',400,11); ly+=15; }
-        s.conns.forEach(function(c){
-          var line=(c.local||'?')+' → '+(c.remote||'?')+(c.vlan?(' · vlan '+c.vlan):'');
-          svg+='<text x="'+(sbX+14)+'" y="'+ly+'" fill="'+C.fg+'" font-size="11"><title>'+ESC(line)+'</title>'+ESC(fit(line,11,400,switchW-28))+'</text>'; ly+=15;
-        });
-        sy+=boxH+16;
-      });
-      H=Math.max(H, sy+pad);
-    }
-    host.innerHTML='<svg width="'+W+'" height="'+(H+pad)+'" viewBox="0 0 '+W+' '+(H+pad)+'" style="font:12px \'Fira Sans\',system-ui;min-width:'+W+'px">'+svg+'</svg>';
-    var ts=document.getElementById('topots'); if(ts) ts.textContent='updated '+new Date().toLocaleTimeString();
-  }
 
   function refreshTopo(){
-    fetch('/api/topology').then(function(r){return r.json();}).then(drawTopo)
+    fetch('/api/topology').then(function(r){return r.json();})
+      .then(function(t){ window.VXChart.drawTopo(t, document.getElementById('topo')); })
       .catch(function(){ var h=document.getElementById('topo'); if(h&&!h.querySelector('svg')) h.innerHTML='<div class="empty">topology unavailable</div>'; });
   }
   refreshTopo();
   var topoTimer=setInterval(function(){ if(!document.hidden) refreshTopo(); }, 5000);
   window.addEventListener('beforeunload', function(){ clearInterval(topoTimer); });
+  // Rich LLDP/CDP tooltip (shared renderer): hovering a switch hostname pops the full info.
+  window.VXChart.installTooltip(document.getElementById('topo'));
 })();
 </script>
 {{end}}

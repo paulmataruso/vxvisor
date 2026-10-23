@@ -1,11 +1,13 @@
 package web
 
 import (
+	"io"
 	"net/http"
 	neturl "net/url"
 	"strings"
 
 	"vdxclone/internal/service"
+	"vdxclone/internal/storage"
 	"vdxclone/internal/vmware"
 )
 
@@ -20,6 +22,10 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request, p *service.Prin
 		vms, _ = s.svc.ClusterVMs(p)
 	}
 	leaderName, vip, isLeaderHere := s.svc.ClusterLeader()
+	var pools []storage.Pool
+	if p.IsAdmin {
+		pools, _ = s.svc.ListPools(p) // for the import target-storage selector
+	}
 	s.render(w, p, "cluster.html", "cluster", map[string]any{
 		"Nodes":        nodes,
 		"Capability":   s.svc.HostCapability(p),
@@ -29,7 +35,58 @@ func (s *Server) cluster(w http.ResponseWriter, r *http.Request, p *service.Prin
 		"VIP":          vip,
 		"IsLeaderHere": isLeaderHere,
 		"Joins":        s.svc.JoinStates(p),
+		"Pools":         pools,
+		"VDDKReady":     s.svc.VDDKReady(p),
+		"VDDKInstalled": s.svc.VDDKInstalled(p),
+		"VDDKLibDir":    s.svc.VDDKLibDir(),
 	})
+}
+
+// uploadVDDK receives the operator-supplied VMware VDDK archive and installs it
+// so the fastest import transport lights up — no SSH/host unpacking needed. The
+// file is streamed straight to disk (MultipartReader, like ISO upload) so a
+// ~100 MB tarball never buffers into RAM. Admin only.
+func (s *Server) uploadVDDK(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		http.Error(w, "admin only", http.StatusForbidden)
+		return
+	}
+	mr, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "expected a multipart upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var csrfOK bool
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch part.FormName() {
+		case "csrf":
+			b, _ := io.ReadAll(io.LimitReader(part, 512))
+			csrfOK = strings.TrimSpace(string(b)) == csrfToken(p.Token())
+		case "vddk":
+			if !csrfOK { // CSRF must have arrived before the file
+				s.badCSRF(w)
+				return
+			}
+			dir, err := s.svc.UploadVDDK(p, part, clientIP(r))
+			if err != nil {
+				setFlash(w, "VDDK install failed: "+err.Error())
+			} else {
+				setFlashOK(w, "VMware VDDK installed ("+dir+"). The VDDK transfer method is now available in the import dialog.")
+			}
+			http.Redirect(w, r, "/migrate", http.StatusSeeOther)
+			return
+		}
+		part.Close()
+	}
+	http.Error(w, "no file uploaded", http.StatusBadRequest)
 }
 
 // clusterVMAction dispatches a single-pane lifecycle action to the owning node.
@@ -65,7 +122,7 @@ func (s *Server) importImage(w http.ResponseWriter, r *http.Request, p *service.
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
-	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
 }
 
 func (s *Server) addNode(w http.ResponseWriter, r *http.Request, p *service.Principal) {
@@ -151,12 +208,12 @@ func (s *Server) vmwareImport(w http.ResponseWriter, r *http.Request, p *service
 		s.badCSRF(w)
 		return
 	}
-	if _, err := s.svc.VMwareImport(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"), clientIP(r)); err != nil {
+	if _, err := s.svc.VMwareImport(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"), r.FormValue("transport"), int64(atoi(r.FormValue("target_pool_id"))), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
 		setFlashOK(w, "Import started — the source VM is only read, never changed. Watch progress below; when it finishes it creates a ready-to-run instance (same CPU/memory/firmware) you'll find on the Instances page.")
 	}
-	http.Redirect(w, r, "/cluster", http.StatusSeeOther)
+	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
 }
 
 // apiVmwareImport returns live/recent import progress for the poller.

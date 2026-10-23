@@ -14,8 +14,8 @@ import (
 	"sync"
 
 	"vdxclone/internal/ad"
-	"vdxclone/internal/broker"
 	"vdxclone/internal/config"
+	"vdxclone/internal/secrets"
 )
 
 // AD (Active Directory / LDAP) settings are persisted in the DB so an admin can
@@ -44,7 +44,7 @@ var (
 // (cluster.key) so a sealed bind-password blob replicated to peers decrypts on
 // every node — cluster.key is byte-identical across the cluster by constraint.
 // On a single-node install (no cluster.key) it falls back to a per-install
-// ad.key via broker.LoadOrCreateSecret, matching the connection-token secret.
+// ad.key via secrets.LoadOrCreate (a per-install 32-byte key file).
 func (s *Service) adKey() ([]byte, error) {
 	adKeyOnce.Do(func() {
 		if path := s.cfg.ClusterSecretPath(); path != "" {
@@ -53,7 +53,7 @@ func (s *Service) adKey() ([]byte, error) {
 				return
 			}
 		}
-		adKeyBuf, adKeyErr = broker.LoadOrCreateSecret(filepath.Join(s.cfg.Paths.DataDir, "ad.key"))
+		adKeyBuf, adKeyErr = secrets.LoadOrCreate(filepath.Join(s.cfg.Paths.DataDir, "ad.key"))
 	})
 	return adKeyBuf, adKeyErr
 }

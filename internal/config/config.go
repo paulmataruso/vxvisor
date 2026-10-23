@@ -1,7 +1,7 @@
 // Package config loads and defaults the daemon configuration.
 //
 // Design note: this is an original, simplified configuration model inspired by
-// the general shape of a VM/VDI appliance (a [server] block, an [images] cache,
+// the general shape of a VM appliance (a [server] block, an [images] cache,
 // a [network] mode). It is not a copy of any vendor's config file.
 package config
 
@@ -18,9 +18,6 @@ type Config struct {
 	Network NetworkConfig `toml:"network"`
 	VM      VMConfig      `toml:"vm"`
 	Cluster ClusterConfig `toml:"cluster"`
-	Gateway GatewayConfig `toml:"gateway"`
-	Public  PublicConfig  `toml:"public"`
-	Broker  BrokerConfig  `toml:"broker"`
 	OIDC    OIDCConfig    `toml:"oidc"`
 	AD      ADConfig      `toml:"ad"`
 	Update  UpdateConfig  `toml:"update"`
@@ -108,19 +105,6 @@ type ClusterConfig struct {
 	AdminPort int `toml:"admin_port"`
 }
 
-// GatewayConfig configures the browser-desktop gateway: a WebSocket↔guacd tunnel
-// that gives a full remote desktop (RDP, with clipboard/audio/mic/webcam virtual
-// channels) in any browser tab, with no plugin or client install.
-type GatewayConfig struct {
-	// Enabled turns on the /desktop route and the guacd tunnel.
-	Enabled bool `toml:"enabled"`
-	// GuacdAddr is the guacd daemon address (default 127.0.0.1:4822).
-	GuacdAddr string `toml:"guacd_addr"`
-	// Protocol is the remote-desktop protocol guacd connects to the guest with:
-	// "rdp" (default — carries audio/clipboard/mic/webcam) or "vnc".
-	Protocol string `toml:"protocol"`
-}
-
 type LicenseConfig struct {
 	// Enabled turns on license enforcement. Default false → everything allowed
 	// (NoopEnforcer), zero network calls. This is the deferred M9 seam.
@@ -132,30 +116,6 @@ type LicenseConfig struct {
 	// HeartbeatURL, when set, enables an opt-in signed status POST to a URL the
 	// operator controls. Empty (default) = no outbound heartbeat whatsoever.
 	HeartbeatURL string `toml:"heartbeat_url"`
-}
-
-// PublicConfig is the internet-facing VDI portal listener. It is SEPARATE from
-// the admin UI (Server.Addr): it serves only login, the "My Desktops" broker,
-// and the desktop gateway — never the management screens. Terminate TLS in front
-// of it with a reverse proxy (Caddy/nginx); bind it to loopback so only the
-// proxy can reach it.
-type PublicConfig struct {
-	Enabled bool   `toml:"enabled"`
-	Addr    string `toml:"addr"` // e.g. 127.0.0.1:8768 (behind the TLS proxy)
-	// BaseURL is the public https origin users reach, used in OIDC redirects and
-	// absolute links (e.g. https://desktops.example.com).
-	BaseURL string `toml:"base_url"`
-}
-
-// BrokerConfig tunes the VDI broker: how connection tokens and pooled desktops
-// behave.
-type BrokerConfig struct {
-	// SecretFile holds the HMAC key for connection tokens. Empty = a key file is
-	// created under the data dir on first start. Never hardcode a key.
-	SecretFile string `toml:"secret_file"`
-	// IdleMinutes reclaims a leased pooled desktop after this much inactivity
-	// (0 = default 30). Persistent desktops are only stopped, never unassigned.
-	IdleMinutes int `toml:"idle_minutes"`
 }
 
 type OIDCConfig struct {
@@ -258,10 +218,6 @@ func Default() *Config {
 			GossipBind:  "0.0.0.0",
 			GossipPort:  7946,
 			AdminPort:   8766,
-		},
-		Gateway: GatewayConfig{
-			GuacdAddr: "127.0.0.1:4822",
-			Protocol:  "rdp",
 		},
 	}
 }

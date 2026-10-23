@@ -107,7 +107,10 @@ func (m *Manager) poolDir(poolID int64) (string, error) {
 // disk dir). It auto-selects the live (drive-mirror) or offline (qemu-img) path.
 // The moved disk always becomes a qcow2 file in the target pool (covers dir /
 // NFS / CIFS / Ceph / iSCSI-backed pools, and local↔shared).
-func (m *Manager) MoveStorage(id string, targetPoolID int64) error {
+// MoveStorage relocates an instance's disk to another pool. onProg (optional)
+// receives (bytesDone, bytesTotal) during the offline copy so the caller can
+// surface live progress + throughput; pass nil if not needed.
+func (m *Manager) MoveStorage(id string, targetPoolID int64, onProg func(done, total int64)) error {
 	if m.MigrationBusy(id) {
 		return fmt.Errorf("a storage move is already in progress for this instance")
 	}
@@ -139,7 +142,7 @@ func (m *Manager) MoveStorage(id string, targetPoolID int64) error {
 		}
 		return m.moveStorageLive(s, targetPoolID, s.DiskPath, tgt.disk)
 	}
-	return m.moveStorageOffline(s, targetPoolID, tgt)
+	return m.moveStorageOffline(s, targetPoolID, tgt, onProg)
 }
 
 // moveTarget describes where a storage move will land, resolved from the target
@@ -208,11 +211,23 @@ func sameLocation(srcPath string, t moveTarget) bool {
 // atomically. The source is read-only throughout and is only reclaimed AFTER the
 // target is durable and the DB is committed (files retained aside for the admin;
 // block volumes removed, since they can't be renamed aside).
-func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTarget) error {
+func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTarget, onProg func(done, total int64)) error {
 	src := s.DiskPath
 	vsz, err := qemu.VirtualSizeBytes(src)
 	if err != nil || vsz <= 0 {
 		return fmt.Errorf("source virtual size: %w", err)
+	}
+	// Bridge qemu-img's 0..1 fraction to the (bytesDone, bytesTotal) the status
+	// card wants, using the known virtual size as the total.
+	var frac qemu.ProgressFunc
+	if onProg != nil {
+		frac = func(f float64) {
+			d := int64(f * float64(vsz))
+			if d > vsz {
+				d = vsz
+			}
+			onProg(d, vsz)
+		}
 	}
 	if err := m.setMigState(s.ID, "offline", tgt.disk, src); err != nil {
 		return err
@@ -233,7 +248,7 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 			return fail(fmt.Errorf("not enough free space on target (%d MB free, need %d MB)", free>>20, vsz>>20))
 		}
 		cleanupTarget = func() { _ = os.Remove(tgt.disk) }
-		if err := qemu.ConvertToQcow2(src, tgt.disk); err != nil {
+		if err := qemu.ConvertToQcow2P(src, tgt.disk, frac); err != nil {
 			cleanupTarget()
 			return fail(fmt.Errorf("copy disk: %w", err))
 		}
@@ -242,7 +257,7 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 			return fail(fmt.Errorf("the target Ceph cluster is not available"))
 		}
 		cleanupTarget = func() { _ = ceph.RemoveImage(tgt.rbdPool, tgt.rbdImage) }
-		if err := ceph.ImportImage(tgt.rbdPool, tgt.rbdImage, src); err != nil {
+		if err := ceph.ImportImageProgress(tgt.rbdPool, tgt.rbdImage, src, frac); err != nil {
 			cleanupTarget()
 			return fail(fmt.Errorf("copy disk to Ceph RBD: %w", err))
 		}
@@ -254,7 +269,7 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 			return fail(fmt.Errorf("create LVM volume: %w", err))
 		}
 		cleanupTarget = func() { _ = lvm.RemoveLV(tgt.lvDev) }
-		if err := qemu.ConvertToRaw(src, tgt.disk); err != nil {
+		if err := qemu.ConvertToRawP(src, tgt.disk, frac); err != nil {
 			cleanupTarget()
 			return fail(fmt.Errorf("copy disk to LVM: %w", err))
 		}
@@ -266,7 +281,7 @@ func (m *Manager) moveStorageOffline(s *Session, targetPoolID int64, tgt moveTar
 			return fail(fmt.Errorf("create zvol: %w", err))
 		}
 		cleanupTarget = func() { _ = zfs.DestroyDataset(tgt.zvolDS) }
-		if err := qemu.ConvertToRaw(src, tgt.disk); err != nil {
+		if err := qemu.ConvertToRawP(src, tgt.disk, frac); err != nil {
 			cleanupTarget()
 			return fail(fmt.Errorf("copy disk to zvol: %w", err))
 		}

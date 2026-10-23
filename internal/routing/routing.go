@@ -134,6 +134,11 @@ type Config struct {
 	OSPF          OSPF             `json:"ospf"`
 	BGP           BGP              `json:"bgp"`
 	EIGRP         EIGRP            `json:"eigrp"`
+	// FRRVersion is the "frr version X" banner. Empty defaults to the host FRR
+	// version ("10.5"); a vRouter backend sets it to the FRR actually running in
+	// its runtime (e.g. an LXC container on an older distro) so frr-reload.py
+	// doesn't choke on a mismatched banner.
+	FRRVersion string `json:"frr_version,omitempty"`
 }
 
 // ---- kernel forwarding ---------------------------------------------------
@@ -149,7 +154,7 @@ func EnableForwarding() error {
 
 // ---- FRR -----------------------------------------------------------------
 
-var frrTmpl = template.Must(template.New("frr").Parse(`frr version 10.5
+var frrTmpl = template.Must(template.New("frr").Parse(`frr version {{.FRRVersion}}
 frr defaults traditional
 hostname {{.Hostname}}
 log syslog informational
@@ -208,6 +213,9 @@ func RenderFRR(c Config) (string, error) {
 	if c.Hostname == "" {
 		c.Hostname = "vdxclone"
 	}
+	if c.FRRVersion == "" {
+		c.FRRVersion = "10.5" // host FRR default; preserves prior behaviour
+	}
 	// Group interface prefixes so each interface gets a single stanza.
 	var groups []ifaceGroup
 	idx := map[string]int{}
@@ -238,19 +246,78 @@ func ApplyFRR(c Config) error {
 	if err != nil {
 		return err
 	}
+	// Reconcile interface addresses SAFELY. FRR refuses `no interface <X>` for any
+	// live kernel NIC ("only inactive interfaces can be deleted"), so if the
+	// managed config simply drops an interface stanza, frr-reload fails. For every
+	// interface WE PREVIOUSLY MANAGED (present in our last frr.conf) but no longer
+	// do, emit an EMPTY `interface <X>` stanza so frr-reload removes the address
+	// with `no ip address` (allowed) and keeps an empty node (FRR hides it later).
+	//
+	// CRITICAL: the source of "what we managed" is our OWN previous frr.conf, NOT
+	// `vtysh show running-config`. FRR's running config can contain addresses we
+	// never managed (e.g. the Ceph storage IP 10.77.0.1 on the storage NIC) — if
+	// we reconciled against that, an L3 apply would strip those and wedge Ceph.
+	desired := map[string]bool{}
+	for _, p := range c.Prefixes {
+		if p.Iface != "" {
+			desired[p.Iface] = true
+		}
+	}
+	var extra strings.Builder
+	for _, ifc := range managedIfaces() { // interfaces in our PREVIOUS frr.conf
+		if ifc == "" || desired[ifc] {
+			continue
+		}
+		extra.WriteString("interface " + ifc + "\nexit\n!\n")
+	}
+	if extra.Len() > 0 {
+		conf += extra.String()
+	}
 	if err := os.WriteFile(frrConfPath, []byte(conf), 0o640); err != nil {
 		return err
 	}
-	// Make sure frr is running, then apply the delta with frr-reload.py directly.
-	// The `systemctl reload frr` wrapper can hang against watchfrr; calling the
-	// reload script is fast and reliable. Fall back to a restart if it's absent.
 	_, _ = run(10*time.Second, "systemctl", "start", "frr")
 	if _, err := os.Stat(frrReloadPy); err == nil {
-		_, err = run(60*time.Second, frrReloadPy, "--reload", "--stdout", frrConfPath)
-		return err
+		out, rerr := run(60*time.Second, frrReloadPy, "--reload", "--stdout", frrConfPath)
+		if rerr != nil {
+			// Tolerate FRR's refusal to delete a stale, non-managed interface node
+			// (a live NIC it won't `no interface`): the rest of the config applied,
+			// and we must NOT fail the whole operation over a node we don't own.
+			if ifaceRemovalOnly(out + " " + rerr.Error()) {
+				return nil
+			}
+			return rerr
+		}
+		return nil
 	}
 	_, err = run(45*time.Second, "systemctl", "restart", "frr")
 	return err
+}
+
+// ifaceRemovalOnly reports whether a frr-reload failure is only FRR refusing to
+// delete an interface node (harmless — the node is a live NIC it keeps).
+func ifaceRemovalOnly(out string) bool {
+	return strings.Contains(out, "only inactive interfaces can be deleted") ||
+		strings.Contains(out, "Failed to execute no interface")
+}
+
+// managedIfaces returns the interfaces that appear in OUR previously-written
+// frr.conf — i.e. the interfaces the L3 feature itself manages. Reconciliation
+// is scoped to these so we never remove an address we didn't put there (e.g. the
+// Ceph storage IP on the storage NIC, which lives outside the managed config).
+func managedIfaces() []string {
+	b, err := os.ReadFile(frrConfPath)
+	if err != nil {
+		return nil
+	}
+	var ifs []string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "interface ") {
+			ifs = append(ifs, strings.TrimSpace(strings.TrimPrefix(line, "interface ")))
+		}
+	}
+	return ifs
 }
 
 // FRRStatus returns a routing summary from FRR.

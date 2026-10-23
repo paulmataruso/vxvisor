@@ -1,6 +1,6 @@
 // Package db opens the SQLite database and runs forward-only migrations.
 //
-// The schema is an original model for a multi-tenant VM/VDI manager. Migrations
+// The schema is an original model for a multi-tenant VM manager. Migrations
 // are numbered and tracked in schema_migrations so the database upgrades in
 // place across releases. Pure-Go driver (modernc.org/sqlite), no CGO.
 package db
@@ -730,6 +730,106 @@ CREATE INDEX IF NOT EXISTS idx_vdi_user ON vdi_desktops(user_id);
 -- NOT touch running/stopped VMs). Default ON so existing VMs come back after a
 -- power cycle; clear it per-VM to keep one powered off across reboots.
 ALTER TABLE sessions ADD COLUMN autostart INTEGER NOT NULL DEFAULT 1;
+`},
+	{37, "vrouter", `
+-- NSX-lite virtual routers. A vRouter is a dedicated routing instance (an LXC
+-- container or a network namespace running its own FRR) that routes between a
+-- "transit link" (a free physical NIC) and one or more internal-only port
+-- groups that VMs attach to. runtime=vm (a QEMU appliance from a user-supplied
+-- image) is reserved for a later release and rejected by the service layer.
+CREATE TABLE IF NOT EXISTS vrouters (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id         INTEGER NOT NULL,
+    owner_id       INTEGER NOT NULL DEFAULT 0,
+    name           TEXT NOT NULL UNIQUE,
+    runtime        TEXT NOT NULL DEFAULT 'lxc',    -- lxc|netns|vm
+    container_name TEXT NOT NULL DEFAULT '',       -- lxc: the container name (vrtr-<id>)
+    netns_name     TEXT NOT NULL DEFAULT '',       -- netns: the namespace name (vrtr-<id>)
+    vm_session_id  TEXT NOT NULL DEFAULT '',        -- vm (reserved): backing VM session id
+    image          TEXT NOT NULL DEFAULT '',        -- vm (reserved): user-supplied appliance image
+    lxcpath        TEXT NOT NULL DEFAULT '',
+    dist           TEXT NOT NULL DEFAULT 'debian',
+    release        TEXT NOT NULL DEFAULT 'trixie',  -- FRR 10.x (matches the frr.conf version banner)
+    cpus           INTEGER NOT NULL DEFAULT 1,
+    mem_mb         INTEGER NOT NULL DEFAULT 512,
+    frr_json       TEXT NOT NULL DEFAULT '{}',       -- per-vRouter routing.Config (protocols)
+    status         TEXT NOT NULL DEFAULT 'creating', -- creating|stopped|running|error
+    error          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vrouters_org ON vrouters(org_id);
+
+-- A vRouter's interfaces. idx 0 is the transit leg (eth0); idx 1.. are internal
+-- legs (eth1..), each backing one isolated bridge + a networks row VMs bind to.
+CREATE TABLE IF NOT EXISTS vrouter_legs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    vrouter_id  INTEGER NOT NULL REFERENCES vrouters(id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,            -- lxc.net.N / ethN inside the runtime
+    kind        TEXT NOT NULL,               -- transit|internal
+    bridge      TEXT NOT NULL DEFAULT '',    -- host bridge this leg's veth lands on
+    phys_iface  TEXT NOT NULL DEFAULT '',    -- transit: the enslaved physical NIC
+    network_id  INTEGER NOT NULL DEFAULT 0,  -- internal: the networks row VMs bind to
+    iface_name  TEXT NOT NULL DEFAULT '',    -- eth0/eth1.. inside the runtime
+    cidr        TEXT NOT NULL DEFAULT '',    -- leg IP (zebra assigns it from frr.conf)
+    mac         TEXT NOT NULL DEFAULT '',
+    dhcp        INTEGER NOT NULL DEFAULT 0,  -- internal: run dnsmasq on this leg
+    dhcp_range  TEXT NOT NULL DEFAULT '',    -- e.g. 10.60.0.100,10.60.0.200
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vrouter_legs_vr ON vrouter_legs(vrouter_id);
+`},
+	{38, "vrouter-dhcp-dns", `
+-- DNS servers a vRouter internal leg's DHCP hands out (dnsmasq option 6), CSV.
+ALTER TABLE vrouter_legs ADD COLUMN dhcp_dns TEXT NOT NULL DEFAULT '';
+`},
+	{39, "vrouter-firewall", `
+-- Per-vRouter zone-based firewall (ZBFW). A "zone" is a security label (App
+-- Zone, DB Zone, …) that owns one or more of the vRouter's legs (port groups);
+-- a "policy" allows/denies traffic between a pair of zones. The whole config is
+-- a JSON blob (mirrors frr_json) rendered to an nftables table that is applied
+-- INSIDE the vRouter runtime's own netfilter instance — never on the host.
+ALTER TABLE vrouters ADD COLUMN fw_json TEXT NOT NULL DEFAULT '{}';
+`},
+	{40, "net-firewall", `
+-- Distributed firewall / microsegmentation for REGULAR port groups (non-vRouter
+-- vSwitch bridges). Per-network zones group VMs (by MAC); policies allow/deny
+-- east-west traffic between them, enforced on the HOST via an nftables
+-- BRIDGE-family table (bridge vdxdfw) that matches VM MACs. Default stance is
+-- ALLOW (enabling never blackholes a live segment). Separate from the vRouter
+-- zone firewall and from the host L3 table inet vdxclone.
+CREATE TABLE IF NOT EXISTS net_firewall (
+    network_id INTEGER PRIMARY KEY REFERENCES networks(id) ON DELETE CASCADE,
+    fw_json    TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`},
+	{41, "org-firewall", `
+-- Unified NSX-style firewall (one document per org). Supersedes the two older,
+-- separate models (vrouters.fw_json + net_firewall), which now become DERIVED
+-- output of the compiler. The source of truth is a single JSON document holding:
+--   groups   : VM Groups (VMs by MAC and/or whole port groups), each in a zone
+--   rules_ns : North-South rules (compiled to each vRouter's inet vdxfw table)
+--   rules_ew : East-West rules  (compiled to the host bridge vdxdfw table)
+-- A group can span port groups and outlive any one vRouter, so it lives here at
+-- org scope rather than on a vrouter/network row.
+CREATE TABLE IF NOT EXISTS org_firewall (
+    org_id     INTEGER PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    fw_json    TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`},
+	{42, "drop-vdi", `
+-- The VDI feature (both the "VM tagged to a user" model and the older desktop
+-- pool / published-app broker + guacd gateway) has been removed. Drop every
+-- table it owned. The vestigial sessions columns from migration 11 (pool_id,
+-- assigned_to, leased_at, last_activity) are intentionally LEFT in place: SQLite
+-- rewrites the whole table on DROP COLUMN, and nothing reads them anymore, so
+-- there is no reason to churn the live sessions table.
+DROP TABLE IF EXISTS vdi_desktops;
+DROP TABLE IF EXISTS published_apps;
+DROP TABLE IF EXISTS desktop_creds;
+DROP TABLE IF EXISTS pool_grants;
+DROP TABLE IF EXISTS desktop_pools;
 `},
 }
 

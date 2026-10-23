@@ -115,6 +115,35 @@ func CreateThinPool(vg, pool string, devices []string) error {
 
 // CreateThinVolume creates a thin LV of sizeBytes in vg/pool, usable as a raw VM
 // disk at /dev/<vg>/<name>.
+// LV is one logical volume in a VG, for the storage browser.
+type LV struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+	Pool  string `json:"pool"` // the thin pool it is carved from, if any
+}
+
+// ListLVs returns the logical volumes in a VG, excluding the thin-pool container
+// LVs themselves (lv_attr starting with 't') — i.e. the actual VM/data volumes.
+func ListLVs(vg string) ([]LV, error) {
+	out, err := run(10*time.Second, "lvs", "--noheadings", "--units", "b", "--nosuffix",
+		"-o", "lv_name,lv_size,pool_lv,lv_attr", vg)
+	if err != nil {
+		return nil, err
+	}
+	var lvs []LV
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) < 4 {
+			continue
+		}
+		if attr := f[3]; attr != "" && attr[0] == 't' {
+			continue // thin-pool container, not a usable volume
+		}
+		lvs = append(lvs, LV{Name: f[0], Bytes: atoi64(f[1]), Pool: f[2]})
+	}
+	return lvs, nil
+}
+
 func CreateThinVolume(vg, pool, name string, sizeBytes int64) error {
 	for _, n := range []string{vg, pool, name} {
 		if err := validName(n); err != nil {

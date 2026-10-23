@@ -113,6 +113,24 @@ func ApplyNFT(ruleset string) error {
 	return nil
 }
 
+// BridgeFWTable is the host nftables BRIDGE-family table for distributed-firewall
+// (port-group microsegmentation) rules. It is separate from the L3 inet vdxclone
+// table and from each vRouter's in-runtime inet vdxfw table.
+const BridgeFWTable = "vdxdfw"
+
+// ReplaceBridgeFW flush-then-loads the bridge vdxdfw table. An empty ruleset just
+// removes the table (microsegmentation disabled everywhere).
+func ReplaceBridgeFW(ruleset string) error {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return fmt.Errorf("nftables is not installed")
+	}
+	_ = exec.Command("nft", "delete", "table", "bridge", BridgeFWTable).Run() // ignore if absent
+	if strings.TrimSpace(ruleset) == "" {
+		return nil
+	}
+	return ApplyNFT(ruleset)
+}
+
 // ---- data store ----------------------------------------------------------
 
 type Store struct{ db *db.DB }

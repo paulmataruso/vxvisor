@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"vdxclone/internal/qemu"
 )
 
 const (
@@ -262,6 +264,73 @@ func AddOSD(disk string) error {
 	return nil
 }
 
+// CephDiskRemnant reports whether a disk carries Ceph OSD remnants (its BlueStore
+// LVM volume group/logical volume), so the UI can offer to reclaim it once the OSD
+// is gone. It reads LOCAL LVM metadata only — no running cluster required — so a
+// disk stranded by a removed/stopped OSD is always detectable.
+func CephDiskRemnant(disk string) (bool, string) {
+	if disk == "" {
+		return false, ""
+	}
+	if has("ceph-volume") {
+		if out, err := run(20*time.Second, "ceph-volume", "lvm", "list", disk); err == nil && strings.Contains(out, "osd") {
+			return true, "Ceph OSD remnants"
+		}
+	}
+	// Fallback: ceph-volume names its VG "ceph-<uuid>" and lays it on the raw disk.
+	if out, err := run(15*time.Second, "pvs", "--noheadings", "-o", "pv_name,vg_name"); err == nil {
+		for _, ln := range strings.Split(out, "\n") {
+			f := strings.Fields(ln)
+			if len(f) >= 2 && strings.HasPrefix(f[0], disk) && strings.HasPrefix(f[1], "ceph-") {
+				return true, "Ceph volume group " + f[1]
+			}
+		}
+	}
+	return false, ""
+}
+
+// ZapDisk reclaims a disk for reuse: it tears down any LVM that lives on it (a
+// Ceph OSD's VG/LV) and wipes every filesystem/LVM signature plus the partition
+// table. DESTRUCTIVE. It is pure LOCAL LVM + wipe work, so it succeeds even when
+// the Ceph cluster is stopped. The caller MUST have verified the disk is not
+// mounted / not an active OSD. `disk` must be a real /dev path (service validates).
+func ZapDisk(disk string) error {
+	if disk == "" {
+		return fmt.Errorf("no disk specified")
+	}
+	// 1) ceph-volume's own zap removes its LVs cleanly (best-effort; may no-op).
+	if has("ceph-volume") {
+		_, _ = run(3*time.Minute, "ceph-volume", "lvm", "zap", "--destroy", disk)
+	}
+	// 2) Tear down any remaining LVM VGs sitting on this disk.
+	if out, err := run(15*time.Second, "pvs", "--noheadings", "-o", "pv_name,vg_name"); err == nil {
+		seen := map[string]bool{}
+		for _, ln := range strings.Split(out, "\n") {
+			f := strings.Fields(ln)
+			if len(f) >= 2 && strings.HasPrefix(f[0], disk) && f[1] != "" && !seen[f[1]] {
+				seen[f[1]] = true
+				_, _ = run(30*time.Second, "vgchange", "-an", f[1])
+				_, _ = run(60*time.Second, "vgremove", "-f", "-y", f[1])
+			}
+		}
+	}
+	_, _ = run(30*time.Second, "pvremove", "-ff", "-y", disk)
+	// 3) Wipe signatures, then zap the GPT (primary + backup) and the first/last MiB.
+	_, _ = run(30*time.Second, "wipefs", "-a", disk)
+	if has("sgdisk") {
+		_, _ = run(30*time.Second, "sgdisk", "--zap-all", disk)
+	}
+	_, _ = run(60*time.Second, "dd", "if=/dev/zero", "of="+disk, "bs=1M", "count=16", "conv=fsync")
+	_, _ = run(30*time.Second, "sh", "-c", "sz=$(blockdev --getsz "+disk+") && dd if=/dev/zero of="+disk+" bs=512 seek=$((sz-2048)) count=2048 conv=fsync 2>/dev/null")
+	// 4) Re-read the now-empty partition table.
+	_, _ = run(20*time.Second, "partprobe", disk)
+	_, _ = run(10*time.Second, "udevadm", "settle")
+	if used, note := CephDiskRemnant(disk); used {
+		return fmt.Errorf("disk still carries %s after wipe — a holder may be open; stop any OSD using it and retry", note)
+	}
+	return nil
+}
+
 // CreatePool creates an RBD pool, initialises it for rbd, and pins its replica
 // size (1 on a single node — non-redundant until a second node joins).
 func CreatePool(name string, size int) error {
@@ -367,11 +436,48 @@ func CreateImage(pool, image string, bytes int64) error {
 // ImportImage writes a source disk image (a cloud base image) onto a NEW RBD
 // image, expanding it to raw. qemu-img speaks the rbd: transport directly.
 func ImportImage(pool, image, srcPath string) error {
+	return ImportImageProgress(pool, image, srcPath, nil)
+}
+
+// ImportImageProgress is ImportImage with an optional progress sink (0..1), so
+// the migration status card can show live throughput of the disk copy.
+func ImportImageProgress(pool, image, srcPath string, onProg qemu.ProgressFunc) error {
 	dst := RBDPath(pool, image)
-	if _, err := run(30*time.Minute, "qemu-img", "convert", "-p", "-O", "raw", srcPath, dst); err != nil {
+	if err := qemu.ConvertToRawP(srcPath, dst, onProg); err != nil {
 		return fmt.Errorf("import to rbd %s/%s: %w", pool, image, err)
 	}
 	return nil
+}
+
+// RBDImage is one image in a pool, for the storage browser.
+type RBDImage struct {
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+}
+
+// ListImages returns the RBD images in a pool with their provisioned size.
+// Runs as client.admin (root) like the other rbd ops here.
+func ListImages(pool string) ([]RBDImage, error) {
+	out, err := run(30*time.Second, "rbd", "ls", "-l", "-p", pool, "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+	var raw []struct {
+		Image    string `json:"image"`
+		Size     int64  `json:"size"`
+		Snapshot string `json:"snapshot"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &raw); err != nil {
+		return nil, fmt.Errorf("parse rbd ls: %w", err)
+	}
+	var imgs []RBDImage
+	for _, r := range raw {
+		if r.Snapshot != "" {
+			continue // skip snapshot rows; we list base images only
+		}
+		imgs = append(imgs, RBDImage{Name: r.Image, Bytes: r.Size})
+	}
+	return imgs, nil
 }
 
 // RemoveImage deletes an RBD image (best-effort; used on VM purge).

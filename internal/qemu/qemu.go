@@ -53,7 +53,7 @@ type Spec struct {
 	VNCPwFile string
 
 	// Display selects the console protocol. "spice" adds a loopback SPICE server
-	// + qxl VGA + guest-agent channel (served to the browser via the guac gateway);
+	// + qxl VGA + guest-agent channel (for a SPICE-aware client);
 	// VNC stays enabled regardless so the plain noVNC console always works.
 	Display   string // "" / "vnc" | "spice"
 	SPICEPort int    // loopback SPICE TCP port when Display=="spice"
@@ -163,17 +163,19 @@ func CreateBlank(path string, gib int) error {
 // ConvertToRaw writes a base image onto a raw target (e.g. a ZFS zvol device).
 // ConvertToQcow2 copies any-format source to a new qcow2 at dst (used by offline
 // storage vMotion). The source is only READ; dst is created fresh.
-func ConvertToQcow2(src, dst string) error {
+func ConvertToQcow2(src, dst string) error { return ConvertToQcow2P(src, dst, nil) }
+
+// ConvertToQcow2P is ConvertToQcow2 with an optional progress sink (0..1).
+func ConvertToQcow2P(src, dst string, onProg ProgressFunc) error {
 	// -m 16: up to 16 coroutines copying in parallel; -W: out-of-order writes
 	// (both markedly faster for a large convert); -t none / -T none: skip the host
 	// page cache so the convert doesn't evict the running VMs' working set.
-	cmd := exec.Command("qemu-img", "convert", "-m", "16", "-W",
-		"-t", "none", "-T", "none", "-O", "qcow2", src, dst)
-	if _, err := cmd.CombinedOutput(); err != nil {
+	args := []string{"convert", "-m", "16", "-W", "-t", "none", "-T", "none", "-O", "qcow2", src, dst}
+	if err := runImgProgress(onProg, withProgress(onProg, args)...); err != nil {
 		// Older qemu-img / some inputs reject -T/-t; retry with a safe subset.
-		cmd = exec.Command("qemu-img", "convert", "-m", "16", "-W", "-O", "qcow2", src, dst)
-		if out2, err2 := cmd.CombinedOutput(); err2 != nil {
-			return fmt.Errorf("qemu-img convert to qcow2: %v: %s", err2, out2)
+		args = []string{"convert", "-m", "16", "-W", "-O", "qcow2", src, dst}
+		if err2 := runImgProgress(onProg, withProgress(onProg, args)...); err2 != nil {
+			return fmt.Errorf("qemu-img convert to qcow2: %w", err2)
 		}
 	}
 	return nil
@@ -213,12 +215,44 @@ func ProbeReadable(path string) error {
 	return nil
 }
 
-func ConvertToRaw(src, dst string) error {
-	cmd := exec.Command("qemu-img", "convert", "-O", "raw", src, dst)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("qemu-img convert to raw: %v: %s", err, out)
+func ConvertToRaw(src, dst string) error { return ConvertToRawP(src, dst, nil) }
+
+// ConvertToRawP is ConvertToRaw with an optional progress sink (0..1). Used by
+// the offline storage move to LVM / ZFS (and Ceph RBD) so the status card can
+// show real throughput.
+func ConvertToRawP(src, dst string, onProg ProgressFunc) error {
+	args := []string{"convert", "-O", "raw", src, dst}
+	if err := runImgProgress(onProg, withProgress(onProg, args)...); err != nil {
+		return fmt.Errorf("qemu-img convert to raw: %w", err)
 	}
 	return nil
+}
+
+// ConvertToVMDKStream converts src to a stream-optimized VMDK — the single-file,
+// sparse, compressed VMDK format OVF/OVA uses and that VMware/ESXi, VirtualBox and
+// most hypervisors accept. Used by the export path. src may be any format qemu-img
+// reads (qcow2/raw/vmdk/…); it is read, never modified.
+func ConvertToVMDKStream(src, dst string) error {
+	cmd := exec.Command("qemu-img", "convert", "-O", "vmdk", "-o", "subformat=streamOptimized", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img convert to streamOptimized vmdk: %v: %s", err, out)
+	}
+	return nil
+}
+
+// ConvertImage converts src to dst in the named format for export. format is one
+// of qcow2 | raw | vmdk (vmdk ⇒ stream-optimized). src is read-only.
+func ConvertImage(src, dst, format string) error {
+	switch format {
+	case "qcow2":
+		return ConvertStandaloneCopy(src, dst) // collapses any backing chain
+	case "raw":
+		return ConvertToRaw(src, dst)
+	case "vmdk":
+		return ConvertToVMDKStream(src, dst)
+	default:
+		return fmt.Errorf("unsupported export format %q (use qcow2, raw, or vmdk)", format)
+	}
 }
 
 // Args renders the QEMU argument vector for the spec.

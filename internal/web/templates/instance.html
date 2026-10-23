@@ -72,7 +72,7 @@
     <div class="si editable" data-field="disk_gb" data-type="num" data-value="{{$s.DiskGB}}" data-min="{{if $s.DiskGB}}{{$s.DiskGB}}{{else}}1{{end}}" data-max="2048" title="disk can only grow">
       <span class="si-l">Disk</span><span class="si-v big" data-disp>{{if $s.DiskGB}}{{$s.DiskGB}}<small>GB</small>{{else}}<span class="muted" style="font-size:14px">image default</span>{{end}}</span><span class="si-max">grow only · max 2048 GB</span></div>
     <div class="si"><span class="si-l">Image</span><span class="si-v">{{$s.DisplayImage}}</span></div>
-    <div class="si"><span class="si-l">Purpose</span><span class="si-v">{{if eq $s.Kind "desktop"}}VDI desktop{{else}}Server / workstation{{end}}</span></div>
+    <div class="si"><span class="si-l">Purpose</span><span class="si-v">{{if eq $s.Kind "desktop"}}Desktop{{else}}Server / workstation{{end}}</span></div>
     <div class="si editable" data-field="os_type" data-type="select" data-value="{{$s.OSType}}" data-options="linux|Linux;windows|Windows" title="click to edit">
       <span class="si-l">OS type</span><span class="si-v" style="text-transform:capitalize" data-disp>{{$s.OSType}}</span></div>
     <div class="si editable" data-field="machine_type" data-type="select" data-value="{{$s.MachineType}}" data-options="q35|q35 (modern);pc|pc (i440fx)" title="click to edit">

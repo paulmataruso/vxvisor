@@ -53,6 +53,36 @@
 </div>
 {{end}}
 
+<!-- Local disks: status + reclaim a disk stranded by a removed OSD -->
+<div class="card">
+  <h2>Local disks</h2>
+  {{if .Disks}}
+  <table style="font-size:13px">
+    <tr><th>Device</th><th>Model</th><th>Size</th><th>SMART</th><th>Status</th><th></th></tr>
+    {{range .Disks}}
+    <tr>
+      <td class="mono"><strong>{{.Path}}</strong></td>
+      <td class="muted">{{if .Model}}{{.Model}}{{else}}—{{end}}</td>
+      <td>{{.Size}}</td>
+      <td><span class="pill {{if eq .Health "PASSED"}}running{{else if eq .Health "FAILED"}}error{{end}}">{{.Health}}</span></td>
+      <td>{{if .InUse}}<span class="pill error" title="{{.UseNote}}">in use</span> <span class="muted" style="font-size:12px">{{.UseNote}}</span>{{else}}<span class="pill running">free</span>{{end}}</td>
+      <td style="text-align:right">{{if .Reclaim}}<form method="post" action="/ceph/disk/clear" style="display:inline" onsubmit="return confirmClear(this,'{{.Path}}')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="disk" value="{{.Path}}"><button class="btn sm danger" title="{{.ReclaimNote}} — wipe and reclaim this disk">Clear for reuse…</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">After an OSD is removed (or Ceph is stopped), its disk still carries Ceph's LVM volume group and reads as <em>in use</em>. <strong>Clear for reuse</strong> wipes that VG and all signatures so the disk is free again — it works without the cluster running, with a double confirmation. Mounted disks and the OS/boot disk are never offered.</p>
+  {{else}}<div class="empty">No physical disks detected.</div>{{end}}
+  <script>
+  function confirmClear(form, disk){
+    if(!confirm('CLEAR '+disk+' ?\n\nThis ERASES ALL DATA on the disk — it removes the disk\'s LVM volume group and wipes the partition table so it can be reused. This CANNOT be undone.')) return false;
+    var typed = prompt('Second confirmation. Type the full disk path to permanently wipe it:\n\n'+disk);
+    if(typed === null) return false;
+    if(typed.trim() !== disk){ alert('“'+typed+'” does not match '+disk+' — cancelled.'); return false; }
+    return true;
+  }
+  </script>
+</div>
+
 <!-- Bootstrap modal -->
 <div class="modal" id="m-bootstrap"><div class="modal-card">
   <div class="modal-head"><h3>Bootstrap Ceph cluster</h3><button class="modal-x" data-close>&times;</button></div>

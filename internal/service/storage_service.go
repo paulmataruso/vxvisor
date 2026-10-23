@@ -4,12 +4,120 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"time"
 
 	"vdxclone/internal/ceph"
 	"vdxclone/internal/lvm"
 	"vdxclone/internal/storage"
+	"vdxclone/internal/zfs"
 )
+
+// PoolEntry is one item inside a storage pool — a file (dir pool), ZFS dataset/
+// zvol, LVM logical volume, or RBD image — for the datastore/filesystem browser.
+// Bytes is the provisioned/used size; Kind is a coarse type for the UI icon.
+type PoolEntry struct {
+	Name     string `json:"name"`
+	Bytes    int64  `json:"bytes"`
+	Kind     string `json:"kind"` // qcow2|iso|raw|file|dir|dataset|zvol|lv|image
+	Modified string `json:"modified,omitempty"`
+}
+
+// BrowsePool lists the contents of a registered storage pool, dispatching by the
+// pool's kind. Read-only: it never creates, moves, or deletes anything. Admin
+// only (a pool's raw contents can expose other orgs' disk names).
+func (s *Service) BrowsePool(p *Principal, poolID int64) (storage.Pool, []PoolEntry, error) {
+	if !p.IsAdmin {
+		return storage.Pool{}, nil, ErrUnauthorized
+	}
+	pools, err := s.ListPools(p)
+	if err != nil {
+		return storage.Pool{}, nil, err
+	}
+	var pool storage.Pool
+	found := false
+	for _, pl := range pools {
+		if pl.ID == poolID {
+			pool, found = pl, true
+			break
+		}
+	}
+	if !found {
+		return storage.Pool{}, nil, fmt.Errorf("storage pool %d not found", poolID)
+	}
+
+	var entries []PoolEntry
+	switch pool.Kind {
+	case "zfs":
+		ds, e := zfs.ListDatasets(pool.Name)
+		if e != nil {
+			return pool, nil, e
+		}
+		for _, d := range ds {
+			if d.Name == pool.Name {
+				continue // skip the root dataset itself
+			}
+			k := "dataset"
+			if d.Type == "volume" {
+				k = "zvol"
+			}
+			entries = append(entries, PoolEntry{Name: d.Name, Bytes: d.UsedBytes, Kind: k})
+		}
+	case "lvm":
+		vg := pool.Name // registered as "<vg>/<thinpool>"
+		if i := strings.IndexByte(vg, '/'); i > 0 {
+			vg = vg[:i]
+		}
+		lvs, e := lvm.ListLVs(vg)
+		if e != nil {
+			return pool, nil, e
+		}
+		for _, lv := range lvs {
+			entries = append(entries, PoolEntry{Name: lv.Name, Bytes: lv.Bytes, Kind: "lv"})
+		}
+	case "rbd":
+		imgs, e := ceph.ListImages(pool.Path)
+		if e != nil {
+			return pool, nil, e
+		}
+		for _, im := range imgs {
+			entries = append(entries, PoolEntry{Name: im.Name, Bytes: im.Bytes, Kind: "image"})
+		}
+	default: // "dir" and any filesystem-like pool: list the directory
+		ents, e := os.ReadDir(pool.Path)
+		if e != nil {
+			return pool, nil, e
+		}
+		for _, en := range ents {
+			if en.IsDir() {
+				entries = append(entries, PoolEntry{Name: en.Name() + "/", Kind: "dir"})
+				continue
+			}
+			var sz int64
+			var mod string
+			if fi, ferr := en.Info(); ferr == nil {
+				sz = fi.Size()
+				mod = fi.ModTime().Format("2006-01-02 15:04")
+			}
+			entries = append(entries, PoolEntry{Name: en.Name(), Bytes: sz, Kind: fileKind(en.Name()), Modified: mod})
+		}
+	}
+	return pool, entries, nil
+}
+
+func fileKind(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".qcow2"):
+		return "qcow2"
+	case strings.HasSuffix(name, ".iso"):
+		return "iso"
+	case strings.HasSuffix(name, ".raw"), strings.HasSuffix(name, ".img"):
+		return "raw"
+	default:
+		return "file"
+	}
+}
 
 // This file holds the authorized, audited entry points for the M3 storage
 // features (ISOs, templates, snapshots, backups, schedules, pools). Every method
@@ -57,6 +165,36 @@ func (s *Service) DeleteISO(p *Principal, id int64, ip string) error {
 		return err
 	}
 	s.audit(p, p.OrgID, "iso.delete", "iso", fmt.Sprint(id), ip, nil)
+	return nil
+}
+
+// ---- imported base images --------------------------------------------------
+
+// ImportedImages lists the base images created by VMware imports, so the UI can
+// clean up the templates left behind after an import. Admin only.
+func (s *Service) ImportedImages(p *Principal) ([]storage.ImportedImage, error) {
+	if !p.IsAdmin {
+		return nil, ErrUnauthorized
+	}
+	return s.stg.ListImportedImages()
+}
+
+// DeleteBaseImage removes an imported base image — its row and its on-disk file.
+// Refused while any instance still references it (handled in the Store). Admin only.
+func (s *Service) DeleteBaseImage(p *Principal, name, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	path, err := s.stg.DeleteImage(name)
+	if err != nil {
+		return err
+	}
+	if path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove image file: %w", err)
+		}
+	}
+	s.audit(p, p.OrgID, "image.delete", "image", name, ip, map[string]any{"path": path})
 	return nil
 }
 

@@ -3,16 +3,15 @@
 Read this before changing anything. It captures the architecture, the non-obvious
 conventions, and the gotchas that will bite you otherwise.
 
-VXVisor is a **single-binary VM + VDI control plane** for Linux, written from scratch
+VXVisor is a **single-binary VM control plane** for Linux, written from scratch
 in Go (CGO-free). The daemon/CLI is `vdxd`. Product name is **VXVisor**; the Go module
 is still `vdxclone` (historical — do NOT rename it, it's 40+ files of churn for zero
 runtime benefit). Repo: `github.com/paulmataruso/vxvisor` (name ≠ module path, that's fine).
 
 ## Hard constraints (never violate)
 - **Licensing is OFF by default** (NoopEnforcer). No outbound/telemetry calls.
-- **guacd, VNC, QMP, SPICE bind loopback only.** The only external path to a console is
-  the authenticated WebSocket proxy / guac gateway. Never bind these to 0.0.0.0.
-- **Per-connection HMAC tokens** for the public desktop WS (`internal/broker/token.go`).
+- **VNC, QMP, SPICE bind loopback only.** The only external path to a console is the
+  authenticated noVNC WebSocket proxy (`/console/{id}`). Never bind these to 0.0.0.0.
 - **Never brute-force / guess guest or user passwords.**
 - **Management NIC is sacred.** `service.guardMgmt()` refuses to bond/trunk/assign the NIC
   that carries the admin listener IP. The **storage NIC rule**: NFS/iSCSI/Ceph refuse
@@ -23,7 +22,7 @@ runtime benefit). Repo: `github.com/paulmataruso/vxvisor` (name ≠ module path,
   exposes it, the host must have the software for it — no "optional" gaps. Current coverage:
   qemu/ovmf/swtpm (VMs/TPM), lvm2+zfsutils (ZFS/LVM pools), nfs-common/cifs-utils/ceph-common/
   open-iscsi (shared storage), **frr+frr-pythontools (routing — OSPF/BGP/static)**, lxc stack
-  (containers), guacd-from-source (desktops), chrony (time), tuned (perf), bridge/nft/ethtool
+  (containers), chrony (time), tuned (perf), bridge/nft/ethtool
   (networking). `apt_opt` skips only packages with NO install candidate on the release; an
   available package that fails to install is a **hard error** (never `|| true`-swallowed).
 
@@ -48,20 +47,20 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 - `go build ./...` + `go vet ./internal/...` before every deploy.
 
 ## Repo layout (`internal/`)
-- `config/` — TOML config (`Config`: Server[:8766], Public[:8768 portal], Broker, Gateway,
-  Cluster, Network, Paths, OIDC). `Paths.DataDir` default `/var/lib/vdxclone/data`.
+- `config/` — TOML config (`Config`: Server[:8766], Cluster, Network, VM, Paths, OIDC, AD,
+  License, Update). `Paths.DataDir` default `/var/lib/vdxclone/data`.
 - `db/` — SQLite (`modernc.org/sqlite`), **numbered append-only migrations** (see below).
 - `auth/` — sessions (cookie `vdx_session`), password hashing, OIDC.
 - `service/` — **the authz + audit layer; all handlers go through it.** `Principal` carries
   user/org/role. Gate with `p.IsAdmin` or `p.atLeast("member"|"viewer"|...)`; call `s.audit(...)`.
-- `web/` — two HTTP listeners share one `Server`: admin `Routes(mux)` (:8766) and public
-  portal `PublicRoutes(pmux)` (:8768). `html/template`, embedded. `render()` injects P/CSRF/
-  Active/PortalURL. `writeJSON()` for AJAX/API.
+- `web/` — the admin HTTP listener `Routes(mux)` (:8766); in cluster mode a separate
+  cluster-NIC peer listener via `PeerRoutes`. `html/template`, embedded. `render()` injects
+  P/CSRF/Active. `writeJSON()` for AJAX/API.
 - `session/` — VM lifecycle (`manager.go`): Create/Start/Stop/Delete/Purge/Resize, QEMU launch.
 - `qemu/` — builds the QEMU argv (`Spec.Args()`), OVMF, qcow2/zvol helpers, QMP.
 - `zfs/`, `lvm/`, `sharedstg/` (NFS/CIFS/Ceph/iSCSI), `netdrv/` (bonds/vSwitches/taps),
   `routing/` (FRR+nft), `lxc/` (containers), `cloudinit/` (NoCloud seed), `metrics/`,
-  `broker/` (VDI pools+token), `gateway/` (guacd wire protocol), `image/`, `storage/`,
+  `secrets/` (per-install key files), `image/`, `storage/`,
   `platform/` (passthrough/import), `cluster/`, `worker/` (background loops), `api/` (REST, admin listener).
 
 ## Conventions you MUST follow
@@ -102,7 +101,7 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   qemu-img convert races udev otherwise. Purge does `zfs destroy`, not file remove. Resize =
   `zfs set volsize`. zvol VMs can't use qemu-img snapshots (would need zfs snapshots — TODO).
 - **ZFS registration:** creating a zpool/LVM registers a `storage_pools` row; destroy removes it.
-  Use `DeleteStoragePool`/`deleteStoragePool` (NOT `DeletePool`, which is the VDI broker's).
+  Use `DeleteStoragePool`/`deleteStoragePool` to remove a storage pool.
 - **FRR:** apply via `/usr/lib/frr/frr-reload.py --reload` (NOT `systemctl reload frr`, which
   hangs against watchfrr). vdxd owns `/etc/frr/frr.conf` + nft table `inet vdxclone`.
 - **ISO upload** streams via `r.MultipartReader()` (NO `ParseMultipartForm`/`FormFile` — those
@@ -110,23 +109,25 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   csrf, name, file. `TMPDIR` is set to disk in the systemd unit.
 - **ISO pull / container create / warm pool** are async (status rows: downloading/creating/error);
   pages auto-refresh while in progress.
-- **Console/desktop:** admin console = noVNC (`/console/{id}`) with a Proxmox-style control bar
-  (send-keys, clipboard, fullscreen). "Open desktop" = guac gateway (`/desktop/{id}`), protocol
-  rdp (routable guest) / spice (display=spice) / vnc fallback. Public portal always re-mints a
-  token via `/connect` (idempotent — reuses the user's held VM).
-- **Desktops on weak/no-GPU hosts:** GNOME = slow (llvmpipe). Use a **lightweight live desktop
+- **Console:** admin console = noVNC (`/console/{id}`) with a Proxmox-style control bar
+  (send-keys, clipboard, fullscreen) + a serial text console (`/console/{id}/serial`). VNC binds
+  loopback; the only external path is the authenticated WebSocket proxy. (The old VDI feature —
+  the per-user desktop portal, the pool/published-app broker, and the guacd `/desktop` gateway —
+  was removed; see the session memory.)
+- **Graphical guests on weak/no-GPU hosts:** GNOME = slow (llvmpipe). Use a **lightweight live desktop
   ISO** (Lubuntu/LXQt, Xubuntu/XFCE) pulled host-side and booted live — do NOT install a desktop
   via cloud-init apt over SLIRP user-NAT (it crawls/stalls). LXC containers are fastest.
 - **Networking for throughput:** bridged/tap (vhost+mq), not SLIRP user-NAT (convenience only).
 
 ## Secrets / git hygiene
-- `.gitignore` excludes `/run/`, `/dist/`, `/bin/` and `/vdxd`. `run/data/broker.key`, the live
-  DB, VM disks, ISOs, and backups live under `/run/` (local) or `/var/lib/vdxclone/` (host) —
-  **never commit them.** No host IPs/passwords/tokens in the repo.
+- `.gitignore` excludes `/run/`, `/dist/`, `/bin/` and `/vdxd`. `run/data/cluster.key`,
+  `run/data/ad.key`, the live DB, VM disks, ISOs, and backups live under `/run/` (local) or
+  `/var/lib/vdxclone/` (host) — **never commit them.** No host IPs/passwords/tokens in the repo.
 
 ## Current state (migrate when the new host is ready)
-- Feature set complete through M22 (see the session memory / `PLAN.md`). Latest: VDI portal
-  buildout + admin link, perf tuning (`docs/TUNING.md`).
+- Feature set complete through M22 (see the session memory / `PLAN.md`). The VDI feature
+  (desktop portal + pool/app broker + guacd gateway) was removed — VXVisor is now a pure
+  VM/host control plane.
 - The old test host was an **Intel Atom C2758** (weak; fine for servers/LXC/light desktops).
   A faster host is being provisioned — on it, apply `docs/TUNING.md` §B (tuned, hugepages,
   CPU pinning, ZFS ARC cap, bridged+multiqueue net; GPU passthrough via vfio for desktops).

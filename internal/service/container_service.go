@@ -264,6 +264,40 @@ func (s *Service) ContainerConsole(p *Principal, id int64) (*exec.Cmd, string, e
 	return lxc.ConsoleCmd(c.Name, c.Lxcpath), c.Name, nil
 }
 
+// UpdateContainer changes a container's network (bridge) and CPU/memory limits.
+// The network change is applied LIVE on a running container — its host-side veth
+// is re-mastered onto the new bridge (no restart) — and persisted to the config
+// + DB. This is how a container is moved onto, e.g., a vRouter's internal port
+// group. CPU/memory are updated live via cgroup2 and persisted for next boot.
+func (s *Service) UpdateContainer(p *Principal, id int64, bridge string, cpus, memMB int, ip string) error {
+	c, err := s.containerByID(p, id)
+	if err != nil {
+		return err
+	}
+	bridge = strings.TrimSpace(bridge)
+	if bridge != "" && !netdrv.IfaceExists(bridge) {
+		return fmt.Errorf("network %q (bridge) does not exist on this host", bridge)
+	}
+	if cpus < 1 {
+		cpus = c.CPUs
+	}
+	if memMB < 1 {
+		memMB = c.MemoryMB
+	}
+	if err := lxc.UpdateManaged(c.Name, c.Lxcpath, bridge, cpus, memMB); err != nil {
+		return fmt.Errorf("update container config: %w", err)
+	}
+	if bridge != "" {
+		_ = netdrv.SetMaster(lxc.VethName(c.Name), bridge) // live re-master (no-op if stopped)
+	}
+	lxc.SetLimits(c.Name, c.Lxcpath, cpus, memMB)
+	if _, err := s.db.Exec(`UPDATE containers SET bridge=?, cpus=?, memory_mb=? WHERE id=?`, bridge, cpus, memMB, id); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "container.update", "container", c.Name, ip, map[string]any{"bridge": bridge, "cpus": cpus, "mem_mb": memMB})
+	return nil
+}
+
 func (s *Service) StartContainer(p *Principal, id int64, ip string) error {
 	c, err := s.containerByID(p, id)
 	if err != nil {

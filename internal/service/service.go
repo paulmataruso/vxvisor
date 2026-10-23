@@ -11,15 +11,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"vdxclone/internal/auth"
-	"vdxclone/internal/broker"
 	"vdxclone/internal/config"
 	"vdxclone/internal/db"
 	"vdxclone/internal/policy"
@@ -44,13 +40,12 @@ type Service struct {
 	enf   policy.Enforcer
 	mc     *metrics.Collector
 	cl     *cluster.Store
-	pools  *broker.PoolStore
-	signer *broker.Signer
 	role   *cluster.Role
 	peerc  *peer.Client
 	migtr  *migTracker
 	joins  *joinTracker
 	vmwimp *vmwImportTracker
+	vmwexp *vmExportTracker
 	// adReload, when registered by the web layer, pushes a freshly-saved or
 	// freshly-replicated AD config to the live auth provider (no restart). Lets a
 	// follower apply the leader's AD settings the moment a snapshot lands.
@@ -58,7 +53,9 @@ type Service struct {
 }
 
 func New(cfg *config.Config, d *db.DB, st *store.Store, stg *storage.Store, net *netdrv.Store, mgr *session.Manager, enf policy.Enforcer) *Service {
-	return &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker(), joins: newJoinTracker(), vmwimp: newVmwImportTracker()}
+	s := &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker(), joins: newJoinTracker(), vmwimp: newVmwImportTracker(), vmwexp: newVMExportTracker()}
+	s.reloadExports() // re-register export files left on disk so they stay listable/deletable across restarts
+	return s
 }
 
 // SetADReloadHook registers the callback that applies AD config to the live
@@ -310,23 +307,7 @@ func (s *Service) ListSessions(p *Principal) ([]*session.Session, error) {
 	if p.OrgID == 0 {
 		return nil, nil
 	}
-	all, err := s.mgr.List(p.OrgID)
-	if err != nil {
-		return nil, err
-	}
-	// VDI-tagged VMs live on the VDI page only — keep them out of the regular
-	// instances list.
-	vdi := s.vdiSessionIDs(p.OrgID)
-	if len(vdi) == 0 {
-		return all, nil
-	}
-	out := all[:0]
-	for _, sess := range all {
-		if !vdi[sess.ID] {
-			out = append(out, sess)
-		}
-	}
-	return out, nil
+	return s.mgr.List(p.OrgID)
 }
 
 func (s *Service) counts(orgID int64) policy.Counts {
@@ -352,6 +333,7 @@ type CreateInput struct {
 	CISSHKey    string
 	Passthrough   string // csv of host PCI addresses
 	NetworkID     int64  // port group to attach the NIC to; 0 = default/NAT
+	MAC           string // pin the NIC MAC (preserved from a VMware import); "" = generate
 	StoragePoolID int64  // storage pool for the disk; 0 = default disk dir
 	Display       string // vnc | spice
 	DiskBackend   string // qcow2 | zvol | lvm | rbd
@@ -399,7 +381,7 @@ func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*sessi
 		Name: in.Name, ImageName: in.Image, Kind: in.Kind, Firmware: in.Firmware, BootISOID: in.BootISOID,
 		CPUs: in.CPUs, MemoryMB: in.MemoryMB, DiskGB: in.DiskGB,
 		CloudInit: in.CloudInit, CIUsername: in.CIUsername, CIPassword: in.CIPassword, CISSHKey: in.CISSHKey,
-		Passthrough: in.Passthrough, NetworkID: in.NetworkID, StoragePoolID: in.StoragePoolID, Display: in.Display,
+		Passthrough: in.Passthrough, NetworkID: in.NetworkID, MAC: in.MAC, StoragePoolID: in.StoragePoolID, Display: in.Display,
 		DiskBackend: in.DiskBackend, ZvolPool: in.ZvolPool, Desktop: in.Desktop,
 		MachineType: in.MachineType, DiskBus: in.DiskBus, NICModel: in.NICModel, VGA: in.VGA,
 		GuestAgent: in.GuestAgent, TPM: in.TPM, SecureBoot: in.SecureBoot, OSType: in.OSType,
@@ -657,159 +639,6 @@ func (s *Service) ConsoleTarget(p *Principal, id string) (*session.Session, erro
 	return sess, nil
 }
 
-// DesktopInfo is the resolved target for the browser-desktop gateway.
-type DesktopInfo struct {
-	SessionID string
-	Name      string
-	Protocol  string // rdp | vnc
-	Hostname  string
-	Port      string
-	Username  string
-	Password  string
-	Domain    string
-	NeedCreds bool // RDP-capable but no stored creds → the page prompts for them
-	// RemoteApp (RDP only), when set, launches a single seamless published app
-	// instead of a full desktop — carried from the published-app token.
-	RemoteApp     string
-	RemoteAppArgs string
-}
-
-// DesktopTarget authorizes browser-desktop access (same check as ConsoleTarget)
-// and resolves how guacd should reach the guest. When the VM has a routable
-// overlay/bridge lease it uses the configured protocol (RDP by default, which
-// carries clipboard/audio/mic/webcam) against the guest's own IP and cloud-init
-// credentials. Otherwise it falls back to VNC against the loopback QEMU display,
-// which always works regardless of guest OS or networking mode.
-func (s *Service) DesktopTarget(p *Principal, id string) (*DesktopInfo, error) {
-	sess, err := s.ConsoleTarget(p, id)
-	if err != nil {
-		return nil, err
-	}
-	return s.desktopInfoFor(sess), nil
-}
-
-// DesktopTargetByToken authorizes desktop access via a signed connection token
-// (the public portal path). The token itself is the grant — it names the exact
-// session and user the broker leased — so it stands in for the org-membership
-// check used by the cookie path.
-func (s *Service) DesktopTargetByToken(token, id string) (*DesktopInfo, error) {
-	if s.signer == nil {
-		return nil, ErrUnauthorized
-	}
-	c, err := s.signer.Verify(token)
-	if err != nil {
-		return nil, ErrUnauthorized
-	}
-	if c.SessionID != id {
-		return nil, ErrUnauthorized
-	}
-	sess, err := s.mgr.Get(id)
-	if err != nil {
-		return nil, ErrNotFound
-	}
-	if !s.mgr.Running(sess) {
-		return nil, errors.New("session not running")
-	}
-	if s.pools != nil {
-		s.pools.Touch(id)
-	}
-	di := s.desktopInfoFor(sess)
-	// A published RemoteApp pins the seamless program into the (signed) token.
-	if c.RemoteApp != "" {
-		di.RemoteApp = c.RemoteApp
-		di.RemoteAppArgs = c.RemoteAppArgs
-	}
-	return di, nil
-}
-
-// desktopInfoFor resolves how guacd should reach a guest. RDP is intentionally
-// disabled: browser desktops always use VNC against QEMU's always-on loopback
-// display, which renders for any guest OS regardless of networking or in-guest
-// RDP configuration. (guacd speaks vnc/rdp/ssh only — never SPICE.)
-func (s *Service) desktopInfoFor(sess *session.Session) *DesktopInfo {
-	return &DesktopInfo{
-		SessionID: sess.ID,
-		Name:      sess.Name,
-		Protocol:  "vnc",
-		Hostname:  "127.0.0.1",
-		Port:      strconv.Itoa(sess.VNCPort),
-		Password:  sess.VNCPassword,
-	}
-}
-
-// DesktopVNCInfo returns the loopback-VNC desktop target for a session, used when
-// the user explicitly chooses "VNC" at the credential prompt. The caller must
-// have already authorized desktop access to this session (resolveDesktop did).
-func (s *Service) DesktopVNCInfo(sessionID string) (*DesktopInfo, error) {
-	sess, err := s.mgr.Get(sessionID)
-	if err != nil {
-		return nil, ErrNotFound
-	}
-	return &DesktopInfo{
-		SessionID: sess.ID, Name: sess.Name, Protocol: "vnc",
-		Hostname: "127.0.0.1", Port: strconv.Itoa(sess.VNCPort), Password: sess.VNCPassword,
-	}, nil
-}
-
-// desktopCreds returns the stored (decrypted) RDP credentials for a VM, or empty
-// strings when none are set.
-func (s *Service) desktopCreds(sessionID string) (user, pass, domain string) {
-	var u, sec, dom string
-	if err := s.db.QueryRow(`SELECT username,secret,domain FROM desktop_creds WHERE session_id=?`, sessionID).Scan(&u, &sec, &dom); err != nil {
-		return "", "", ""
-	}
-	if u == "" {
-		return "", "", ""
-	}
-	pw, err := s.encOpen(sec)
-	if err != nil {
-		return "", "", ""
-	}
-	return u, pw, dom
-}
-
-// SetDesktopCredentials stores (or clears) per-VM guest RDP credentials for the
-// browser desktop. The password is sealed at rest. An empty username clears them.
-func (s *Service) SetDesktopCredentials(p *Principal, sessionID, user, pass, domain, ip string) error {
-	if !p.atLeast("member") {
-		return ErrUnauthorized
-	}
-	if _, err := s.sessionInOrg(p, sessionID); err != nil {
-		return err
-	}
-	if strings.TrimSpace(user) == "" {
-		_, err := s.db.Exec(`DELETE FROM desktop_creds WHERE session_id=?`, sessionID)
-		if err == nil {
-			s.audit(p, p.OrgID, "desktop.creds_clear", "session", sessionID, ip, nil)
-		}
-		return err
-	}
-	sealed, err := s.encSeal(pass)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`INSERT INTO desktop_creds(session_id,username,secret,domain,updated_at)
-		VALUES(?,?,?,?,datetime('now'))
-		ON CONFLICT(session_id) DO UPDATE SET username=excluded.username, secret=excluded.secret, domain=excluded.domain, updated_at=datetime('now')`,
-		sessionID, user, sealed, domain)
-	if err != nil {
-		return err
-	}
-	// Never log the password.
-	s.audit(p, p.OrgID, "desktop.creds_set", "session", sessionID, ip, map[string]any{"username": user, "domain": domain})
-	return nil
-}
-
-// DesktopCredsUser returns just the stored RDP username (for the UI to show
-// whether creds are configured, without exposing the password).
-func (s *Service) DesktopCredsUser(p *Principal, sessionID string) string {
-	if !p.atLeast("member") {
-		return ""
-	}
-	u, _, _ := s.desktopCreds(sessionID)
-	return u
-}
-
 // guestPrimaryIP finds a running guest's primary IPv4 — first from the guest
 // agent's reported interfaces, else from the host's neighbor table by the VM's
 // MAC. Empty when it can't be determined (e.g. no agent and no ARP entry yet).
@@ -840,22 +669,6 @@ func (s *Service) guestPrimaryIP(sess *session.Session) string {
 		}
 	}
 	return ""
-}
-
-// guacHasRDP reports whether guacd actually has the RDP client plugin installed
-// (it's a separate FreeRDP-dependent library). Without it, selecting RDP yields a
-// blank screen ("Support for protocol rdp is not installed"), so we must fall
-// back to VNC.
-func guacHasRDP() bool {
-	for _, d := range []string{"/usr/local/lib", "/usr/local/lib/guacamole", "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/guacamole"} {
-		if m, _ := filepath.Glob(filepath.Join(d, "libguac-client-rdp.so*")); len(m) > 0 {
-			return true
-		}
-		if _, err := os.Stat(filepath.Join(d, "libguac-client-rdp.so")); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // rdpReachable reports whether an RDP server is listening on the guest's 3389,

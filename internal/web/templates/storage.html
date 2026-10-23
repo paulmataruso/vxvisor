@@ -15,7 +15,7 @@
     {{range .Pools}}
     <tr><td><strong>{{.Name}}</strong></td><td><span class="pill">{{.Kind}}</span></td><td class="mono">{{.Path}}</td>
       <td class="muted">{{if .TotalBytes}}{{humanBytes .UsedBytes}} / {{humanBytes .TotalBytes}}{{else}}—{{end}}</td>
-      {{if $.P.IsAdmin}}<td style="text-align:right"><form method="post" action="/storage/delete" onsubmit="return confirm('Unregister pool {{.Name}}? (only removes the registry entry; the underlying ZFS/LVM backend is not touched)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><button class="btn sm danger">Unregister</button></form></td>{{end}}</tr>
+      {{if $.P.IsAdmin}}<td style="text-align:right;white-space:nowrap"><button type="button" class="btn sm browse-pool" data-modal="m-browse" data-id="{{.ID}}" data-name="{{.Name}}" data-kind="{{.Kind}}">Browse</button> <form method="post" action="/storage/delete" style="display:inline" onsubmit="return confirm('Unregister pool {{.Name}}? (only removes the registry entry; the underlying ZFS/LVM backend is not touched)')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><button class="btn sm danger">Unregister</button></form></td>{{end}}</tr>
     {{end}}
   </table>
   {{else}}<div class="empty">No pools registered. The default disk directory is always used for overlays.</div>{{end}}
@@ -108,25 +108,145 @@
   {{end}}
 </div>
 
+<!-- ======================= Software RAID (mdraid) ======================= -->
+{{if and $.P.IsAdmin .MDReady}}
+<div class="card">
+  <div class="card-head"><h2>Software RAID (mdraid)</h2>
+    <button class="btn primary" data-modal="m-md-create">+ Create array</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px;font-size:12px">A software-RAID array is a plain block device — once created it appears in the LVM, ZFS and filesystem-pool pickers below, so you can place any of them on top of it.</p>
+  {{if .MDArrays}}
+  <table style="font-size:13px">
+    <tr><th>Array</th><th>Level</th><th>Size</th><th>State</th><th>Members</th><th>In use</th><th></th></tr>
+    {{range .MDArrays}}
+    <tr>
+      <td class="mono"><strong>{{.Dev}}</strong></td>
+      <td>{{.Level}}</td>
+      <td>{{.SizeH}}</td>
+      <td><span class="pill {{if .Degraded}}error{{else}}running{{end}}">{{.State}}</span>{{if .Sync}}<div class="muted" style="font-size:11px">{{.Sync}}</div>{{end}}</td>
+      <td class="mono muted" style="font-size:12px">{{range .Members}}{{.}} {{end}}</td>
+      <td>{{if .InUse}}<span class="pill error" title="{{.UseNote}}">in use</span>{{else}}<span class="pill running">free</span>{{end}}</td>
+      <td style="text-align:right">{{if not .InUse}}<form method="post" action="/storage/mdraid/{{.Name}}/destroy" style="display:inline" onsubmit="return confirm('Stop and destroy {{.Dev}}? Its member disks are wiped (superblocks zeroed) and become free again.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Destroy</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No software-RAID arrays. Create one from free disks to back an LVM/ZFS/filesystem pool.</div>{{end}}
+</div>
+
+<div class="modal" id="m-md-create"><div class="modal-card">
+  <div class="modal-head"><h3>Create software-RAID array</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/storage/mdraid/create" onsubmit="return confirm('The selected disks will be WIPED into a new RAID array. Continue?')">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <div class="row" style="gap:8px">
+      <label class="fld">Name<input type="text" name="name" placeholder="data" required></label>
+      <label class="fld">RAID level<select name="level">{{range .MDLevels}}<option value="{{.Name}}">{{.Name}} (min {{.Min}} disks)</option>{{end}}</select></label>
+    </div>
+    <label class="fld">Member disks (free only)</label>
+    <div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px">
+      {{range .Disks}}{{if and (not .InUse) (ne .Type "raid")}}<label class="fld" style="flex-direction:row;align-items:center;gap:8px;margin:2px 0"><input type="checkbox" name="devices" value="{{.Path}}" style="width:auto"> <span class="mono">{{.Path}}</span> <span class="muted">{{.Size}} {{.Model}}</span></label>{{else}}{{end}}{{end}}
+    </div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create array</button></div>
+  </form>
+</div></div>
+{{end}}
+
+<!-- ======================= Filesystem pool (ext4/xfs) =================== -->
+{{if $.P.IsAdmin}}
+<div class="card">
+  <div class="card-head"><h2>Filesystem pool</h2>
+    <button class="btn primary" data-modal="m-fs-create">+ Create filesystem pool</button>
+  </div>
+  <p class="muted" style="margin:0;font-size:12px">Put a plain <strong>ext4 / xfs / ext3</strong> filesystem on a disk or a RAID array, mount it, and register it as a VM storage pool. (LVM, LVM-thin and ZFS pools are created from their cards above / the pool form.)</p>
+</div>
+
+<div class="modal" id="m-fs-create"><div class="modal-card">
+  <div class="modal-head"><h3>Create filesystem pool</h3><button class="modal-x" data-close>&times;</button></div>
+  <form class="mform" method="post" action="/storage/fs/create" onsubmit="return confirm('The selected device will be FORMATTED (all data erased) and mounted. Continue?')">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <label class="fld">Pool name<input type="text" name="name" placeholder="fast-fs" required></label>
+    <div class="row" style="gap:8px">
+      <label class="fld">Device<select name="device" required>{{range .Disks}}{{if not .InUse}}<option value="{{.Path}}">{{.Path}} — {{.Size}}{{if .Model}} ({{.Model}}){{end}}</option>{{end}}{{end}}</select></label>
+      <label class="fld">Filesystem<select name="fstype">{{range .FSTypes}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+    </div>
+    <p class="muted" style="font-size:12px;margin:2px 0">Mounts at <span class="mono">/var/lib/vdxclone/pools/&lt;name&gt;</span> and adds a by-UUID <span class="mono">/etc/fstab</span> entry so it remounts on boot.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create pool</button></div>
+  </form>
+</div></div>
+{{end}}
+
 <!-- ============================ Disk status ============================ -->
+<style>
+ @keyframes diskflash{0%,49%{background:#ff2020;color:#fff}50%,100%{background:transparent;color:inherit}}
+ tr.disk-failed td{animation:diskflash 1s steps(1,end) infinite;font-weight:600}
+ tr.disk-failed td strong{color:inherit}
+ .pill.dead{background:#ff2020;color:#fff;border-color:#ff2020;font-weight:700}
+ .pill.warn{background:#b06a00;color:#fff;border-color:#b06a00;font-weight:700}
+</style>
 <div class="card">
   <h2>Disk status</h2>
   {{if .DiskStatus}}
   <table style="font-size:13px">
-    <tr><th>Device</th><th>Model</th><th>Size</th><th>SMART</th><th>In use</th></tr>
+    <tr><th>Device</th><th>Model</th><th>Size</th><th>SMART</th><th>In use</th><th></th></tr>
     {{range .DiskStatus}}
-    <tr>
+    <tr {{if .Failed}}class="disk-failed" title="{{.FailNote}}"{{end}}>
       <td class="mono"><strong>{{.Path}}</strong></td>
       <td class="muted">{{if .Model}}{{.Model}}{{else}}—{{end}}</td>
       <td>{{.Size}}</td>
-      <td><span class="pill {{if eq .Health "PASSED"}}running{{else if eq .Health "FAILED"}}error{{end}}">{{.Health}}</span></td>
+      <td>{{if .Failed}}<span class="pill dead" title="{{.FailNote}}">⚠ FAILED</span>{{else if .Degraded}}<span class="pill warn" title="{{.FailNote}}">⚠ {{if .State}}{{.State}}{{else}}DEGRADED{{end}}</span>{{else}}<span class="pill {{if eq .Health "PASSED"}}running{{else if eq .Health "FAILED"}}error{{end}}">{{.Health}}</span>{{end}}</td>
       <td>{{if .InUse}}<span class="pill error" title="{{.UseNote}}">in use</span>{{else}}<span class="pill running">free</span>{{end}}</td>
+      <td style="text-align:right">{{if .Reclaim}}<form method="post" action="/ceph/disk/clear" style="display:inline" onsubmit="return confirmClear(this,'{{.Path}}')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="disk" value="{{.Path}}"><button class="btn sm danger" title="{{.ReclaimNote}} — wipe and reclaim this disk">Clear for reuse…</button></form>{{end}}</td>
     </tr>
     {{end}}
   </table>
-  <p class="muted" style="margin:8px 0 0;font-size:12px">SMART health needs <span class="mono">smartmontools</span>; devices without SMART show “unknown”/“n/a”.</p>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">SMART health needs <span class="mono">smartmontools</span>; devices without SMART show “unknown”/“n/a”. A disk left behind by a removed Ceph OSD shows <strong>Clear for reuse</strong> — it wipes the disk's LVM volume group and all signatures (works even when Ceph is stopped) so it becomes a free disk again. Mounted disks are never offered.</p>
+  <script>
+  function confirmClear(form, disk){
+    if(!confirm('CLEAR '+disk+' ?\n\nThis ERASES ALL DATA on the disk — it removes the disk\'s LVM volume group and wipes the partition table so it can be reused. This CANNOT be undone.')) return false;
+    var typed = prompt('Second confirmation. Type the full disk path to permanently wipe it:\n\n'+disk);
+    if(typed === null) return false;
+    if(typed.trim() !== disk){ alert('“'+typed+'” does not match '+disk+' — cancelled.'); return false; }
+    return true;
+  }
+  </script>
   {{else}}<div class="empty">No physical disks detected.</div>{{end}}
 </div>
+
+<!-- ===================== RAID controller drives ===================== -->
+{{if or .RAIDCtrls .CtrlHints}}
+<div class="card">
+  <h2>RAID controller drives</h2>
+  <p class="muted" style="margin:-4px 0 12px;font-size:12px">Physical disks behind a hardware RAID controller. The kernel only sees each <strong>virtual disk</strong> (the <span class="mono">/dev/sdX</span> your pools bind to, shown in Disk status) — these member drives are health-only and can't be selected or wiped here. A failed member flashes red and raises a toast.</p>
+  {{range .RAIDCtrls}}
+  <div style="margin-bottom:14px">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">{{.Name}} <span class="muted" style="font-weight:400">· {{.Vendor}}{{if .Tool}} · via {{.Tool}}{{end}}</span></div>
+    {{range .Groups}}
+    <div style="border:1px solid var(--border,#333);border-radius:8px;padding:8px 10px;margin:0 0 8px">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;font-size:13px">
+        {{if .RAID}}<span class="pill running">{{.RAID}}</span>{{end}}
+        {{if .Dev}}<span class="mono" style="font-weight:600">{{.Dev}}</span>{{else if .Name}}<span style="font-weight:600">{{.Name}}</span>{{else}}<span class="muted">unconfigured</span>{{end}}
+        {{if .Size}}<span class="muted">{{.Size}}</span>{{end}}
+        {{if .Name}}{{if .Dev}}<span class="muted">“{{.Name}}”</span>{{end}}{{end}}
+        {{if .State}}<span class="pill {{if eq .State "Optimal"}}running{{else}}warn{{end}}" title="virtual-disk state">{{.State}}</span>{{end}}
+        {{if .Dev}}<span class="muted" style="font-size:12px">— disk group {{.Group}}</span>{{end}}
+      </div>
+      <table style="font-size:13px;margin:0">
+        <tr><th>Slot</th><th>Model</th><th>Size</th><th>Health</th></tr>
+        {{range .Drives}}
+        <tr {{if .Failed}}class="disk-failed" title="{{.FailNote}}"{{end}}>
+          <td class="mono"><strong>{{.Path}}</strong></td>
+          <td class="muted">{{if .Model}}{{.Model}}{{else}}—{{end}}</td>
+          <td>{{.Size}}</td>
+          <td>{{if .Failed}}<span class="pill dead" title="{{.FailNote}}">⚠ FAILED</span>{{else if .Degraded}}<span class="pill warn" title="{{.FailNote}}">⚠ {{if .State}}{{.State}}{{else}}DEGRADED{{end}}</span>{{else}}<span class="pill {{if eq .Health "PASSED"}}running{{else if eq .Health "FAILED"}}error{{end}}" title="controller / SMART health">{{.Health}}</span>{{end}}</td>
+        </tr>
+        {{end}}
+      </table>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+  {{range .CtrlHints}}<p class="muted" style="margin:8px 0 0;font-size:12px">🧩 {{.}}</p>{{end}}
+</div>
+{{end}}
 
 <!-- ============================ LVM ============================ -->
 <div class="card">
@@ -281,7 +401,55 @@
     }, 150);
   });
 })();
+// Datastore/filesystem browser: list a pool's contents in a modal (read-only).
+(function(){
+  function gb(b){b=b||0; if(b>=1073741824)return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576)return (b/1048576).toFixed(1)+' MB'; if(b>=1024)return (b/1024).toFixed(0)+' KB'; return b+' B';}
+  function esc(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('.browse-pool'); if(!b) return;
+    var id=b.getAttribute('data-id'), name=b.getAttribute('data-name')||'', kind=b.getAttribute('data-kind')||'';
+    var title=document.getElementById('browse-title'), body=document.getElementById('browse-body');
+    if(title) title.textContent=name+' ('+kind+')';
+    if(body) body.innerHTML='<p class="muted">Loading…</p>';
+    fetch('/api/storage/pool/'+encodeURIComponent(id)+'/browse',{credentials:'same-origin'})
+      .then(function(r){return r.json().then(function(d){return r.ok?d:Promise.reject(d.error||r.status);});})
+      .then(function(d){
+        var items=(d&&d.entries)||[];
+        if(!items.length){ body.innerHTML='<div class="empty">This pool is empty.</div>'; return; }
+        var h='<table style="font-size:13px"><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th></tr>';
+        items.forEach(function(it){
+          h+='<tr><td class="mono"><strong>'+esc(it.name)+'</strong></td>'+
+             '<td><span class="pill">'+esc(it.kind)+'</span></td>'+
+             '<td class="muted">'+(it.kind==='dir'?'—':gb(it.bytes))+'</td>'+
+             '<td class="muted">'+esc(it.modified||'')+'</td></tr>';
+        });
+        body.innerHTML=h+'</table>';
+      }).catch(function(err){ body.innerHTML='<p style="color:var(--bad,#e55)">'+esc(err)+'</p>'; });
+  });
+})();
 </script>
+
+{{if .P.IsAdmin}}
+<div class="card">
+  <div class="card-head"><h2>VMware VDDK (fastest import transport)</h2></div>
+  <p class="muted" style="margin:0 0 8px">Optional. The fastest vCenter/ESXi import path (VDDK over NBD — reads only used blocks) needs VMware's <strong>VDDK</strong> library, which is proprietary and can't be shipped with VXVisor. Install the wrapper (<span class="mono">apt install nbdkit nbdkit-plugin-vddk</span>), download VDDK from Broadcom, unpack it, and set its path below. The VDDK transfer option then appears in the import dialog.</p>
+  <p class="muted" style="margin:0 0 8px">nbdkit + VDDK plugin: {{if .VDDKInstalled}}<span class="pill running">installed</span>{{else}}<span class="pill error">not installed</span>{{end}}</p>
+  <form class="mform" method="post" action="/storage/vddk-libdir" style="max-width:640px">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">VDDK library path (libdir)<input type="text" name="vddk_libdir" value="{{.VDDKLibDir}}" placeholder="/opt/vmware-vix-disklib-distrib" class="mono"></label>
+    <div class="modal-actions" style="justify-content:flex-start"><button class="btn primary">Save VDDK path</button></div>
+  </form>
+</div>
+{{end}}
+
+<div class="modal" id="m-browse"><div class="modal-card lg">
+  <div class="modal-head"><h3>Browse storage &mdash; <span id="browse-title"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="mform">
+    <p class="muted" style="margin:0 0 6px">Read-only view of this pool's contents (files, volumes, or RBD images).</p>
+    <div id="browse-body" style="max-height:60vh;overflow:auto"></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+  </div>
+</div></div>
 {{template "foot" .}}{{end}}
 
 {{define "diskpicker"}}

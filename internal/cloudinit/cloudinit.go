@@ -37,11 +37,6 @@ type Config struct {
 	// than the platform's static IPAM.
 	DHCP bool
 
-	// InstallRDP adds an xrdp server on first boot so the browser-desktop gateway
-	// can offer a full RDP session (clipboard, audio, microphone, webcam) rather
-	// than only the VNC framebuffer. Requires guest internet to fetch the package.
-	InstallRDP bool
-
 	// Desktop, when "xfce", installs a lightweight XFCE desktop + lightdm on first
 	// boot so the VNC/SPICE console shows a graphical login. XFCE is far lighter
 	// than GNOME and usable even on weak hosts. Requires guest internet.
@@ -88,24 +83,16 @@ func (c Config) userData() string {
 	// Guarantee NTP sync is enabled (systemd-timesyncd is present on cloud images
 	// by default; this is a no-op if already on). Keeps guest time correct.
 	cmds = append(cmds, "[ timedatectl, set-ntp, true ]")
-	if c.InstallRDP {
-		// A minimal XFCE + xrdp desktop so the guest answers RDP on :3389.
-		pkgs = append(pkgs, "xrdp", "xfce4")
-		cmds = append(cmds,
-			"[ bash, -c, \"echo xfce4-session > /home/"+c.Username+"/.xsession\" ]",
-			"[ systemctl, enable, --now, xrdp ]",
-			"[ adduser, xrdp, ssl-cert ]")
-	}
 	if c.InstallGuestAgent {
 		pkgs = append(pkgs, "qemu-guest-agent")
 		cmds = append(cmds, "[ systemctl, enable, --now, qemu-guest-agent ]")
 	}
 	if c.Desktop == "xfce" {
 		// Lightweight graphical console: XFCE + lightdm on the local display, with
-		// Firefox so the desktop is immediately useful, and lightdm autologin so a
-		// VDI user lands straight on the desktop (the browser VNC can't easily type
-		// a graphical login). Renders to the QEMU display, which the console/desktop
-		// gateway shows over VNC.
+		// Firefox so the desktop is immediately useful, and lightdm autologin so the
+		// user lands straight on the desktop (the browser VNC can't easily type a
+		// graphical login). Renders to the QEMU display, which the built-in noVNC
+		// console shows.
 		pkgs = append(pkgs, "xorg", "xfce4", "xfce4-goodies", "lightdm", "dbus-x11", "firefox")
 		cmds = append(cmds,
 			"[ systemctl, set-default, graphical.target ]",

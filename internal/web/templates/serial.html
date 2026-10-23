@@ -17,7 +17,6 @@
   <a href="/instances">←</a><b>{{.Session.Name}}</b>
   <select class="cbtn" title="Switch console technology" onchange="if(this.value)location.href=this.value">
     <option value="/console/{{.Session.ID}}">VNC (noVNC)</option>
-    <option value="/desktop/{{.Session.ID}}">Desktop (RDP / VNC)</option>
     <option value="/console/{{.Session.ID}}/serial" selected>Serial (text)</option>
   </select>
   <span class="sep"></span>

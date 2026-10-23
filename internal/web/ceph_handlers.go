@@ -48,3 +48,21 @@ func (s *Server) addCephOSD(w http.ResponseWriter, r *http.Request, p *service.P
 	}
 	http.Redirect(w, r, "/ceph", http.StatusSeeOther)
 }
+
+// clearDisk reclaims a disk stranded by a removed Ceph OSD (wipe LVM + signatures).
+// Double-confirmed in the UI; the service refuses a mounted / non-Ceph disk.
+func (s *Server) clearDisk(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.ClearCephDisk(p, r.FormValue("disk"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	dest := r.Referer()
+	if dest == "" {
+		dest = "/ceph"
+	}
+	http.Redirect(w, r, dest, http.StatusSeeOther)
+}

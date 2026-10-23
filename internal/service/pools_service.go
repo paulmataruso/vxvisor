@@ -7,6 +7,38 @@ import (
 	"vdxclone/internal/zfs"
 )
 
+// ResolveDiskTarget maps a chosen storage pool (by registry id) to the disk
+// backend fields CreateInput/session.Create expect, deriving the backend from the
+// pool's kind so a caller only has to ask "which pool?". poolID <= 0 means the
+// default disk directory (a qcow2 file). Used by the vCenter/ESXi import so a VM
+// can land on ANY registered storage — dir(qcow2) / ZFS zvol / LVM thin / Ceph RBD
+// — exactly like the create-instance form, but as a single choice.
+func (s *Service) ResolveDiskTarget(p *Principal, poolID int64) (backend, zvolPool string, err error) {
+	if poolID <= 0 {
+		return "qcow2", "", nil // default disk directory
+	}
+	pools, err := s.ListPools(p)
+	if err != nil {
+		return "", "", err
+	}
+	for _, pl := range pools {
+		if pl.ID != poolID {
+			continue
+		}
+		switch pl.Kind {
+		case "zfs":
+			return "zvol", pl.Name, nil // ZvolPool is the zpool/dataset name
+		case "lvm":
+			return "lvm", "", nil
+		case "rbd":
+			return "rbd", "", nil
+		default: // "dir" (and anything filesystem-like): a qcow2 file in the pool dir
+			return "qcow2", "", nil
+		}
+	}
+	return "", "", fmt.Errorf("storage pool %d not found", poolID)
+}
+
 // Backend availability (for conditional UI). No side effects, admin-gated.
 func (s *Service) ZFSAvailable(p *Principal) bool { return p != nil && p.IsAdmin && zfs.Available() }
 func (s *Service) LVMAvailable(p *Principal) bool { return p != nil && p.IsAdmin && lvm.Available() }

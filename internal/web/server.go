@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io"
 	"net"
@@ -60,6 +61,22 @@ var tmplFuncs = template.FuncMap{
 		}
 		return strconv.FormatFloat(f, 'f', 1, 64) + " " + units[i]
 	},
+	// dict builds a map from alternating key/value pairs, so a template can pass
+	// several named values to a sub-template (html/template has no native way).
+	"dict": func(kv ...any) (map[string]any, error) {
+		if len(kv)%2 != 0 {
+			return nil, fmt.Errorf("dict needs an even number of arguments")
+		}
+		m := make(map[string]any, len(kv)/2)
+		for i := 0; i < len(kv); i += 2 {
+			k, ok := kv[i].(string)
+			if !ok {
+				return nil, fmt.Errorf("dict keys must be strings")
+			}
+			m[k] = kv[i+1]
+		}
+		return m, nil
+	},
 }
 
 func NewServer(cfg *config.Config, svc *service.Service) (*Server, error) {
@@ -91,6 +108,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /containers", s.auth(s.containersPage))
 	mux.HandleFunc("POST /containers", s.auth(s.createContainer))
 	mux.HandleFunc("POST /containers/{id}/start", s.auth(s.startContainer))
+	mux.HandleFunc("POST /containers/{id}/update", s.auth(s.updateContainer))
 	mux.HandleFunc("POST /containers/{id}/stop", s.auth(s.stopContainer))
 	mux.HandleFunc("POST /containers/{id}/delete", s.auth(s.deleteContainer))
 	mux.HandleFunc("POST /containers/{id}/snapshot", s.auth(s.snapshotContainer))
@@ -118,10 +136,6 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /console/{id}/ws", s.auth(s.vncProxy))
 	mux.HandleFunc("GET /console/{id}/serial", s.auth(s.serialConsole))
 	mux.HandleFunc("GET /console/{id}/serial/ws", s.auth(s.serialProxy))
-	// Full browser desktop via the guacd gateway (RDP with device redirection,
-	// or VNC fallback). Separate route so the console page stays plugin-free noVNC.
-	mux.HandleFunc("GET /desktop/{id}", s.auth(s.desktop))
-	mux.HandleFunc("GET /desktop/{id}/ws", s.desktopProxy) // token- or cookie-authorized inside
 
 	// M3: images & storage
 	mux.HandleFunc("GET /isos", s.auth(s.isos))
@@ -153,6 +167,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /schedules/{id}/delete", s.auth(s.deleteSchedule))
 
 	mux.HandleFunc("GET /storage", s.auth(s.storagePools))
+	mux.HandleFunc("GET /api/storage/pool/{id}/browse", s.auth(s.apiBrowsePool))
+	mux.HandleFunc("POST /storage/vddk-libdir", s.auth(s.setVDDKLibDir))
+	mux.HandleFunc("POST /cluster/vddk-upload", s.auth(s.uploadVDDK))
 	mux.HandleFunc("POST /storage", s.auth(s.upsertPool))
 	mux.HandleFunc("POST /storage/delete", s.auth(s.deleteStoragePool))
 	// ZFS + LVM pool management (admin; destructive ops confirmed in the UI).
@@ -164,6 +181,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /storage/zfs/log", s.auth(s.addZFSLog))
 	mux.HandleFunc("POST /storage/lvm/create", s.auth(s.createLVMPool))
 	mux.HandleFunc("POST /storage/lvm/{vg}/remove", s.auth(s.removeVG))
+	mux.HandleFunc("POST /storage/mdraid/create", s.auth(s.createMDArray))
+	mux.HandleFunc("POST /storage/mdraid/{name}/destroy", s.auth(s.destroyMDArray))
+	mux.HandleFunc("POST /storage/fs/create", s.auth(s.createFilesystemPool))
 
 	// Shared storage: dedicated storage NIC + NFS/CIFS/Ceph mounts + iSCSI.
 	mux.HandleFunc("GET /shared", s.auth(s.sharedPage))
@@ -182,8 +202,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ceph", s.auth(s.cephPage))
 	mux.HandleFunc("POST /ceph/bootstrap", s.auth(s.bootstrapCeph))
 	mux.HandleFunc("POST /ceph/osd", s.auth(s.addCephOSD))
+	mux.HandleFunc("POST /ceph/disk/clear", s.auth(s.clearDisk))
 	mux.HandleFunc("GET /api/iscsi/discover", s.auth(s.apiISCSIDiscover))
 	mux.HandleFunc("GET /api/migrations", s.auth(s.apiMigrations))
+	mux.HandleFunc("GET /api/drive-alerts", s.auth(s.apiDriveAlerts))
+	mux.HandleFunc("GET /api/nic-alerts", s.auth(s.apiNICAlerts))
+	mux.HandleFunc("POST /host/restart", s.auth(s.hostRestart))
+	mux.HandleFunc("POST /host/shutdown", s.auth(s.hostShutdown))
 	mux.HandleFunc("GET /api/instances/{id}/guest", s.auth(s.apiGuestInfo))
 
 	// Host-introspection JSON APIs (interface picker, disk picker, path
@@ -229,6 +254,54 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/vswitches", s.auth(s.createVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/delete", s.auth(s.deleteVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))
+	// NSX-lite virtual routers (vRouter): a per-tenant FRR routing instance (LXC
+	// container or network namespace) between a transit link and internal port groups.
+	mux.HandleFunc("GET /vrouters", s.auth(s.vroutersPage))
+	mux.HandleFunc("GET /vrouters/{id}/status", s.auth(s.apiVRouterStatus))
+	mux.HandleFunc("GET /vrouters/{id}/diagram", s.auth(s.apiVRouterDiagram))
+	mux.HandleFunc("POST /vrouters", s.auth(s.createVRouter))
+	mux.HandleFunc("POST /vrouters/{id}/start", s.auth(s.startVRouter))
+	mux.HandleFunc("POST /vrouters/{id}/stop", s.auth(s.stopVRouter))
+	mux.HandleFunc("POST /vrouters/{id}/delete", s.auth(s.deleteVRouter))
+	mux.HandleFunc("POST /vrouters/{id}/transit", s.auth(s.addTransitLink))
+	mux.HandleFunc("POST /vrouters/{id}/internal", s.auth(s.attachInternal))
+	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/dhcp", s.auth(s.updateInternalDHCP))
+	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/update", s.auth(s.updateInternalNetwork))
+	mux.HandleFunc("POST /vrouters/{id}/transit/update", s.auth(s.updateTransitLink))
+	mux.HandleFunc("POST /vrouters/{id}/static/{i}/update", s.auth(s.vrUpdateStatic))
+	mux.HandleFunc("POST /vrouters/{id}/ospf/net/{i}/update", s.auth(s.vrUpdateOSPFNet))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/neighbor/{i}/update", s.auth(s.vrUpdateBGPNeighbor))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/network/{i}/update", s.auth(s.vrUpdateBGPNet))
+	mux.HandleFunc("POST /vrouters/{id}/static", s.auth(s.vrAddStatic))
+	mux.HandleFunc("POST /vrouters/{id}/static/{i}/delete", s.auth(s.vrDelStatic))
+	mux.HandleFunc("POST /vrouters/{id}/ospf", s.auth(s.vrSetOSPF))
+	mux.HandleFunc("POST /vrouters/{id}/ospf/net", s.auth(s.vrAddOSPFNet))
+	mux.HandleFunc("POST /vrouters/{id}/ospf/net/{i}/delete", s.auth(s.vrDelOSPFNet))
+	mux.HandleFunc("POST /vrouters/{id}/bgp", s.auth(s.vrSetBGP))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/neighbor", s.auth(s.vrAddBGPNeighbor))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/neighbor/{i}/delete", s.auth(s.vrDelBGPNeighbor))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/network", s.auth(s.vrAddBGPNet))
+	mux.HandleFunc("POST /vrouters/{id}/bgp/network/{i}/delete", s.auth(s.vrDelBGPNet))
+	mux.HandleFunc("POST /vrouters/{id}/eigrp", s.auth(s.vrSetEIGRP))
+	mux.HandleFunc("POST /vrouters/{id}/eigrp/net", s.auth(s.vrAddEIGRPNet))
+	mux.HandleFunc("POST /vrouters/{id}/eigrp/net/{i}/delete", s.auth(s.vrDelEIGRPNet))
+	// Zone-based firewall (ZBFW): a dedicated page that maps port groups to
+	// security zones and applies allow/deny policies between them, enforced in the
+	// vRouter runtime's own nftables instance.
+	// Unified NSX-style firewall: one org-scoped document (VM Groups + Zones +
+	// North-South/East-West rules), compiled onto the vRouter inet tables and the
+	// host bridge table. Drag-and-drop membership posts with ?ajax=1.
+	mux.HandleFunc("GET /vfirewall", s.auth(s.fwPage))
+	mux.HandleFunc("POST /firewall", s.auth(s.fwSetEnabled))
+	mux.HandleFunc("POST /firewall/group", s.auth(s.fwAddGroup))
+	mux.HandleFunc("POST /firewall/group/{gid}/rename", s.auth(s.fwRenameGroup))
+	mux.HandleFunc("POST /firewall/group/{gid}/delete", s.auth(s.fwDelGroup))
+	mux.HandleFunc("POST /firewall/group/{gid}/members", s.auth(s.fwSetGroupMembers))
+	mux.HandleFunc("POST /firewall/group/{gid}/zone", s.auth(s.fwSetGroupZone))
+	mux.HandleFunc("POST /firewall/rule", s.auth(s.fwAddRule))
+	mux.HandleFunc("POST /firewall/rule/{dir}/{i}/delete", s.auth(s.fwDelRule))
+	mux.HandleFunc("POST /firewall/rule/{dir}/{i}/update", s.auth(s.fwUpdateRule))
+	mux.HandleFunc("POST /firewall/rule/{dir}/{i}/move", s.auth(s.fwMoveRule))
 	mux.HandleFunc("POST /sessions/{id}/forwards", s.auth(s.vmManage(s.addPortForward)))
 	mux.HandleFunc("POST /sessions/{id}/forwards/{pfid}/delete", s.auth(s.vmManage(s.deletePortForward)))
 
@@ -252,10 +325,18 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/nodes", s.auth(s.addNode))
 	mux.HandleFunc("POST /cluster/nodes/join", s.auth(s.joinNode))
 	mux.HandleFunc("GET /api/node-join", s.auth(s.apiNodeJoin))
+	mux.HandleFunc("GET /migrate", s.auth(s.migrate))
 	mux.HandleFunc("POST /import/vmware/connect", s.auth(s.vmwareConnect))
 	mux.HandleFunc("POST /import/vmware/start", s.auth(s.vmwareImport))
+	mux.HandleFunc("POST /migrate/plan/start", s.auth(s.migratePlanStart))
 	mux.HandleFunc("GET /api/vmware-import", s.auth(s.apiVmwareImport))
 	mux.HandleFunc("GET /api/vmware-import/{id}/log", s.auth(s.apiVmwareImportLog))
+	mux.HandleFunc("POST /export/start", s.auth(s.exportStart))
+	mux.HandleFunc("GET /api/vm-export", s.auth(s.apiExport))
+	mux.HandleFunc("GET /api/vm-export/{id}/log", s.auth(s.apiExportLog))
+	mux.HandleFunc("GET /export/{id}/download", s.auth(s.exportDownload))
+	mux.HandleFunc("POST /export/{id}/delete", s.auth(s.exportDelete))
+	mux.HandleFunc("POST /images/{name}/delete", s.auth(s.imageDelete))
 	mux.HandleFunc("POST /cluster/nodes/{id}/probe", s.auth(s.probeNode))
 	mux.HandleFunc("POST /cluster/nodes/{id}/delete", s.auth(s.deleteNode))
 	mux.HandleFunc("POST /cluster/vms/{node}/{id}/{action}", s.auth(s.clusterVMAction))
@@ -266,17 +347,6 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /settings/auth", s.auth(s.settingsAuth))
 	mux.HandleFunc("POST /settings/auth", s.auth(s.saveAuthSettings))
 	mux.HandleFunc("POST /settings/auth/test", s.auth(s.testAuthSettings))
-
-	// VDI broker: desktop pool administration (admin creates pools + grants).
-	mux.HandleFunc("GET /vdi", s.auth(s.adminVDI))
-	mux.HandleFunc("POST /vdi/assign", s.auth(s.assignVDI))
-	mux.HandleFunc("POST /vdi/{id}/unassign", s.auth(s.unassignVDI))
-	mux.HandleFunc("GET /pools", s.auth(s.adminPools))
-	mux.HandleFunc("POST /pools", s.auth(s.createPool))
-	mux.HandleFunc("POST /pools/{id}/delete", s.auth(s.deletePool))
-	mux.HandleFunc("POST /pools/{id}/grant", s.auth(s.grantPool))
-	mux.HandleFunc("POST /apps", s.auth(s.createApp))
-	mux.HandleFunc("POST /apps/{id}/delete", s.auth(s.deleteApp))
 
 	mux.HandleFunc("GET /members", s.auth(s.members))
 	mux.HandleFunc("POST /members/add", s.auth(s.addMember))
@@ -547,10 +617,9 @@ func (s *Server) requestOnVIP(r *http.Request) bool {
 
 func (s *Server) render(w http.ResponseWriter, p *service.Principal, name, active string, data map[string]any) {
 	view := map[string]any{
-		"P":         p,
-		"CSRF":      csrfToken(p.Token()),
-		"Active":    active,
-		"PortalURL": s.portalURL(),
+		"P":      p,
+		"CSRF":   csrfToken(p.Token()),
+		"Active": active,
 	}
 	// Cluster mode indicators for the chrome (topbar badge, nav). Unified = the
 	// request came in on the VIP; NodeName/VIP label the current view.
@@ -570,26 +639,6 @@ func (s *Server) render(w http.ResponseWriter, p *service.Principal, name, activ
 	if err := s.tmpl.ExecuteTemplate(w, name, view); err != nil {
 		http.Error(w, err.Error(), 500)
 	}
-}
-
-// portalURL is the public VDI portal's address for the admin "VDI Portal" link.
-// Prefers the configured public base URL; otherwise derives one from the public
-// listener address. Empty when the portal is disabled.
-func (s *Server) portalURL() string {
-	if !s.cfg.Public.Enabled {
-		return ""
-	}
-	if s.cfg.Public.BaseURL != "" {
-		return s.cfg.Public.BaseURL
-	}
-	if s.cfg.Public.Addr != "" {
-		host := s.cfg.Public.Addr
-		if h, _, err := net.SplitHostPort(host); err == nil && (h == "" || h == "0.0.0.0") {
-			return "" // wildcard bind — no single reachable URL to link
-		}
-		return "http://" + s.cfg.Public.Addr
-	}
-	return ""
 }
 
 // writeJSON sends v as an application/json response. It is the one JSON helper

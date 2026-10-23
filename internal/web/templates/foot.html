@@ -62,7 +62,7 @@
  // migrations; on a node IP it's that node's. Fail-soft: stops polling after
  // repeated errors so it never spams the console on a standalone/offline box.
  (function(){
-   var el=null, fails=0, stopped=false, KEY='vdxMigCollapsed';
+   var el=null, fails=0, stopped=false, KEY='vdxMigCollapsed', rates={};
    function panel(){
      if(el) return el;
      el=document.createElement('div'); el.id='vdx-migs';
@@ -88,7 +88,14 @@
        var indet=(m.status==='starting' || (m.status==='active' && !m.total));
        if(ok) row.classList.add('ok'); if(bad) row.classList.add('err'); if(indet) row.classList.add('indet');
        var st = ok?'done': m.status==='failed'?'failed': m.status==='cancelled'?'cancelled': m.status==='starting'?'starting…': ((m.pct||0)+'%');
-       var sub = (m.status==='active'&&m.total)? (bytes(m.total-m.remaining)+' / '+bytes(m.total)) : (bad&&m.err?m.err:'');
+       // Transfer speed: bytes copied since the previous poll ÷ elapsed time.
+       var done=(m.total? (m.total-m.remaining):0), now=Date.now(), rateStr='';
+       if(m.status==='active' && m.total){
+         var pv=rates[m.id];
+         if(pv && now>pv.t && done>=pv.done){ var bps=(done-pv.done)*1000/(now-pv.t); if(bps>0) rateStr=bytes(bps)+'/s'; }
+         rates[m.id]={done:done,t:now};
+       } else { delete rates[m.id]; }
+       var sub = (m.status==='active'&&m.total)? (bytes(done)+' / '+bytes(m.total)+(rateStr?('  ·  '+rateStr):'')) : (bad&&m.err?m.err:'');
        row.innerHTML='<div class="mt"><span class="mname"></span><span class="mpct"></span></div>'+
          '<div class="mpath"></div><div class="mbar"><i></i></div>'+(sub?'<div class="mpath msub"></div>':'');
        row.querySelector('.mname').textContent=m.name||m.id;
@@ -117,7 +124,7 @@
      if(!c){ c=document.createElement('div'); c.id='vdx-toasts'; document.body.appendChild(c); }
      return c;
    }
-   function add(title){
+   function add(title, onClose){
      var el=document.createElement('div'); el.className='vtoast indet';
      el.innerHTML='<div class="vt-head"><span class="vt-title"></span><button class="vt-x" type="button" aria-label="Dismiss">&times;</button></div>'+
                   '<div class="vt-note"></div><div class="vt-bar"><i></i></div>';
@@ -126,7 +133,7 @@
      container().appendChild(el);
      var bar=el.querySelector('.vt-bar>i'), note=el.querySelector('.vt-note'), tEl=el.querySelector('.vt-title');
      var removed=false;
-     function remove(){ if(removed) return; removed=true; el.style.transition='opacity .2s'; el.style.opacity='0'; setTimeout(function(){ el.remove(); },200); }
+     function remove(){ if(removed) return; removed=true; if(onClose){try{onClose();}catch(e){}} el.style.transition='opacity .2s'; el.style.opacity='0'; setTimeout(function(){ el.remove(); },200); }
      return {
        // frac 0..1 sets a determinate bar; null = indeterminate (animated).
        progress:function(frac){ if(frac==null){ el.classList.add('indet'); bar.style.width=''; } else { el.classList.remove('indet'); bar.style.width=Math.max(0,Math.min(1,frac))*100+'%'; } },
@@ -155,6 +162,43 @@
      setTimeout(t.remove, 7000);
    }catch(e){}
  })();
+
+ /* Hardware-health alerts (drives, NICs): poll a tiny admin endpoint and raise a
+    STICKY red toast the first time each failure is seen — from any page.
+    Dismissing a toast SILENCES that item persistently (localStorage) so it won't
+    nag on reload; if it later recovers/leaves, its silence clears so a fresh
+    failure alerts again. The flashing rows on /storage (drives) and /networks
+    (NICs) are driven separately on those pages. Fail-soft: stops after repeated
+    errors or a 401/403 (non-admin). */
+ function vdxAlertPoll(url, key, fallbackTitle){
+   var seen={}, fails=0, stopped=false;
+   function load(){ try{ return JSON.parse(localStorage.getItem(key)||'{}')||{}; }catch(e){ return {}; } }
+   function save(o){ try{ localStorage.setItem(key, JSON.stringify(o)); }catch(e){} }
+   function poll(){
+     if(stopped) return;
+     fetch(url,{headers:{'Accept':'application/json'},credentials:'same-origin'}).then(function(r){
+       if(r.status===401||r.status===403){ stopped=true; return null; }
+       if(!r.ok) throw new Error('http '+r.status);
+       return r.json();
+     }).then(function(list){
+       if(!Array.isArray(list)) return; fails=0;
+       var silenced=load(), active={};
+       list.forEach(function(a){
+         active[a.id]=1;
+         if(seen[a.id] || silenced[a.id]) return;
+         seen[a.id]=1;
+         var t=VDXToast.add(a.title||fallbackTitle, function(){ var s=load(); s[a.id]=1; save(s); });
+         t.fail(a.msg);
+       });
+       var changed=false;
+       Object.keys(silenced).forEach(function(id){ if(!active[id]){ delete silenced[id]; delete seen[id]; changed=true; } });
+       if(changed) save(silenced);
+     }).catch(function(){ if(++fails>=5) stopped=true; });
+   }
+   poll(); setInterval(poll, 10000);
+ }
+ vdxAlertPoll('/api/drive-alerts', 'vdxDiskSilenced', 'Drive failure');
+ vdxAlertPoll('/api/nic-alerts', 'vdxNICSilenced', 'Network adapter down');
 </script>
 <div id="vdx-toasts"></div>
 </body></html>{{end}}

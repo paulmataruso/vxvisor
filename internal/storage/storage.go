@@ -546,6 +546,57 @@ func (s *Store) RegisterImage(name, path, sourceURL string) error {
 // ImageDir returns the configured base-image directory.
 func (s *Store) ImageDir() string { return s.cfg.Paths.ImageDir }
 
+// ImportedImage is a base image created by a VMware import (source_url "vmware:").
+type ImportedImage struct {
+	Name      string
+	Path      string
+	Source    string
+	Status    string
+	SizeBytes int64
+	CreatedAt string
+}
+
+// ListImportedImages returns the base images registered by VMware imports, so
+// the UI can manage (and delete) the templates left behind after an import.
+func (s *Store) ListImportedImages() ([]ImportedImage, error) {
+	rows, err := s.db.Query(`SELECT name,path,COALESCE(source_url,''),COALESCE(status,'ready'),COALESCE(size_bytes,0),COALESCE(created_at,'')
+		FROM images WHERE source_url LIKE 'vmware:%' ORDER BY created_at DESC, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ImportedImage
+	for rows.Next() {
+		var im ImportedImage
+		if err := rows.Scan(&im.Name, &im.Path, &im.Source, &im.Status, &im.SizeBytes, &im.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, im)
+	}
+	return out, rows.Err()
+}
+
+// DeleteImage removes a base-image row and returns its on-disk path for the
+// caller to unlink. It refuses while any instance (even a trashed one) still
+// references the image, so a VM never loses its backing template out from under
+// it. Returns the path so the service layer can delete the file + audit.
+func (s *Store) DeleteImage(name string) (path string, err error) {
+	var n int
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE image_name=?`, name).Scan(&n); err != nil {
+		return "", err
+	}
+	if n > 0 {
+		return "", fmt.Errorf("%d instance(s) still reference image %q — delete them first", n, name)
+	}
+	if err = s.db.QueryRow(`SELECT path FROM images WHERE name=?`, name).Scan(&path); err != nil {
+		return "", err
+	}
+	if _, err = s.db.Exec(`DELETE FROM images WHERE name=?`, name); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // FreeBytes returns the free space available at dir (0 if unknown).
 func (s *Store) FreeBytes(dir string) int64 {
 	used, total := diskUsage(dir)

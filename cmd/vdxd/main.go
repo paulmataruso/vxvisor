@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,7 +29,6 @@ import (
 
 	"vdxclone/internal/api"
 	"vdxclone/internal/auth"
-	"vdxclone/internal/broker"
 	"vdxclone/internal/cluster"
 	"vdxclone/internal/config"
 	"vdxclone/internal/db"
@@ -43,6 +41,7 @@ import (
 	"vdxclone/internal/platform"
 	"vdxclone/internal/policy"
 	"vdxclone/internal/qemu"
+	"vdxclone/internal/secrets"
 	"vdxclone/internal/service"
 	"vdxclone/internal/session"
 	"vdxclone/internal/storage"
@@ -164,7 +163,7 @@ func cmdServe(cfgPath string) {
 		mgmtAddr = defaultSrcIP()
 	}
 	if clusterMode {
-		sk, err := broker.LoadOrCreateSecret(cfg.ClusterSecretPath())
+		sk, err := secrets.LoadOrCreate(cfg.ClusterSecretPath())
 		if err != nil {
 			log.Fatalf("cluster secret %s: %v", cfg.ClusterSecretPath(), err)
 		}
@@ -227,18 +226,6 @@ func cmdServe(cfgPath string) {
 		cl.SetPeerClient(peer.NewClient(clusterSecret))
 	}
 
-	// VDI broker: desktop pools + per-connection tokens. The token secret is a
-	// key file under the data dir (created on first run); never hardcoded.
-	secretPath := cfg.Broker.SecretFile
-	if secretPath == "" {
-		secretPath = filepath.Join(cfg.Paths.DataDir, "broker.key")
-	}
-	if secret, err := broker.LoadOrCreateSecret(secretPath); err != nil {
-		log.Printf("broker token secret unavailable (VDI portal disabled): %v", err)
-	} else {
-		svc.SetBroker(broker.NewPoolStore(d), broker.NewSigner(secret))
-	}
-
 	srv, err := web.NewServer(cfg, svc)
 	if err != nil {
 		log.Fatalf("web: %v", err)
@@ -290,25 +277,6 @@ func cmdServe(cfgPath string) {
 		}
 	}()
 
-	// Public VDI portal on a SEPARATE listener (admin screens are not served
-	// here). Put a TLS-terminating reverse proxy in front; bind to loopback.
-	var publicSrv *http.Server
-	if cfg.Public.Enabled && svc.BrokerReady() {
-		pmux := http.NewServeMux()
-		srv.PublicRoutes(pmux)
-		addr := cfg.Public.Addr
-		if addr == "" {
-			addr = "127.0.0.1:8768"
-		}
-		publicSrv = &http.Server{Addr: addr, Handler: logReq(pmux)}
-		go func() {
-			log.Printf("vdxd public VDI portal listening on %s (front with a TLS proxy)", addr)
-			if err := publicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("public listener error: %v", err)
-			}
-		}()
-	}
-
 	<-ctx.Done()
 	log.Println("shutting down…")
 	// Release the VIP synchronously BEFORE exit so the macvlan is gone and no
@@ -319,9 +287,6 @@ func cmdServe(cfgPath string) {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutCtx)
-	if publicSrv != nil {
-		_ = publicSrv.Shutdown(shutCtx)
-	}
 	if peerSrv != nil {
 		_ = peerSrv.Shutdown(shutCtx)
 	}

@@ -50,7 +50,6 @@ type OverviewData struct {
 	Nodes        int
 	Members      int
 	Containers   int // LXC system containers (this node)
-	DesktopPools int
 	Routing      string // "", "off", or a short status line
 	// usage / quota
 	Usage UsageReport
@@ -262,12 +261,6 @@ func (s *Service) Overview(p *Principal) OverviewData {
 	}
 	if bl, err := s.ListBonds(p); err == nil {
 		d.Bonds = len(bl)
-	}
-
-	if s.BrokerReady() {
-		if pools, err := s.ListDesktopPools(p); err == nil {
-			d.DesktopPools = len(pools)
-		}
 	}
 
 	if pools, err := s.ListPools(p); err == nil {

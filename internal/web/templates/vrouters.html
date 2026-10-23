@@ -1,0 +1,354 @@
+{{define "vrouters.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Virtual Routers <span class="muted" style="font-weight:400;font-size:12px">— NSX-lite</span></h2>
+    {{if .Available}}<button class="btn primary" data-modal="m-vr">+ New vRouter</button>{{end}}
+  </div>
+  <p class="muted" style="margin:0">A vRouter is a dedicated routing instance (an LXC container or a network namespace running its own FRR). Bind a <strong>transit link</strong> to a free NIC, attach <strong>internal port groups</strong> for your VMs, and it routes between them with OSPF / BGP / static / EIGRP.
+  {{if not .Available}}<strong style="color:var(--danger)"> No vRouter runtime is available on this host (needs LXC and/or FRR).</strong>{{end}}</p>
+  {{if .UserMode}}<p class="muted" style="margin:8px 0 0;color:var(--danger)">VXVisor is in <strong>user-mode networking</strong> — VMs on an internal port group won't attach to a vRouter. Switch to bridge/overlay networking to route guest traffic (the vRouter itself still runs).</p>{{end}}
+</div>
+
+{{range .VRouters}}{{$vrid := .ID}}
+<div class="card"{{if eq .Status "creating"}} data-creating{{end}}>
+  <div class="card-head">
+    <h2 style="display:flex;align-items:center;gap:8px">
+      {{.Name}}
+      <span class="pill">{{.Runtime}}</span>
+      <span class="pill {{if eq .LiveState "running"}}running{{else if eq .Status "error"}}error{{end}}">{{if .LiveState}}{{.LiveState}}{{else}}{{.Status}}{{end}}</span>
+    </h2>
+    <span style="white-space:nowrap">
+      {{if ne .Status "creating"}}<a class="btn sm" href="/vfirewall" title="Zone firewall">🛡 Firewall</a>{{end}}
+      {{if ne .Status "creating"}}
+        {{if eq .LiveState "running"}}<form method="post" action="/vrouters/{{$vrid}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
+        {{else}}<form method="post" action="/vrouters/{{$vrid}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm primary">Start</button></form>{{end}}
+      {{end}}
+      <form method="post" action="/vrouters/{{$vrid}}/delete" style="display:inline" onsubmit="return confirm('Delete vRouter {{.Name}}? This tears down its runtime, internal port groups, and releases the transit NIC.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+    </span>
+  </div>
+
+  {{if eq .Status "creating"}}
+    <div class="empty">Provisioning FRR… this page refreshes automatically.</div>
+  {{else}}
+    {{if .Error}}<p class="muted" style="margin:0 0 10px;color:var(--danger)">{{.Error}}</p>{{end}}
+
+    <!-- Interfaces -->
+    <div class="card-head" style="border:0;padding:0;margin:0 0 8px">
+      <h3 style="margin:0;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Interfaces</h3>
+      <span>
+        <button class="btn sm" data-modal="m-tr-{{$vrid}}">+ Transit link</button>
+        <button class="btn sm" data-modal="m-in-{{$vrid}}">+ Internal port group</button>
+      </span>
+    </div>
+    {{if .Legs}}
+    <table>
+      <tr><th>Role</th><th>Iface</th><th>Bridge / NIC</th><th>Address</th><th>DHCP</th><th>DNS</th><th></th></tr>
+      {{range .Legs}}
+      <tr>
+        <td><span class="pill {{if eq .Kind "transit"}}running{{end}}">{{.Kind}}</span></td>
+        <td class="mono">{{.IfaceName}}</td>
+        <td class="muted" style="font-size:12px">{{if eq .Kind "transit"}}<span class="mono">{{.PhysIface}}</span> → {{end}}<span class="mono">{{.Bridge}}</span></td>
+        <td class="mono" style="font-size:12px">{{.CIDR}}</td>
+        <td class="muted" style="font-size:12px">{{if .DHCP}}<span class="pill running">on</span> <span class="mono">{{.DHCPRange}}</span>{{else}}off{{end}}</td>
+        <td class="muted mono" style="font-size:12px">{{if .DHCPDNS}}{{.DHCPDNS}}{{else}}—{{end}}</td>
+        <td style="text-align:right;white-space:nowrap">
+          {{if eq .Kind "transit"}}<button class="btn sm" data-modal="m-tre-{{$vrid}}">Edit</button>{{end}}
+          {{if eq .Kind "internal"}}<button class="btn sm" data-modal="m-ine-{{$vrid}}-{{.Idx}}">Edit</button> <button class="btn sm" data-modal="m-dhcp-{{$vrid}}-{{.Idx}}">DHCP</button>{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </table>
+    {{else}}<div class="empty">No interfaces yet — add a transit link and an internal port group.</div>{{end}}
+
+    <!-- per-leg edit modals (transit CIDR, internal port group, DHCP) -->
+    {{range .Legs}}{{if eq .Kind "transit"}}
+    <div class="modal" id="m-tre-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit transit link — {{.IfaceName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/transit/update">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Transit IP / CIDR<input type="text" name="cidr" value="{{.CIDR}}" placeholder="10.50.0.1/30" required></label>
+        <p class="muted" style="margin:0">Physical NIC is <span class="mono">{{.PhysIface}}</span>. To change the NIC, delete the transit link and add a new one.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    {{end}}{{end}}
+    {{range .Legs}}{{if eq .Kind "internal"}}
+    <div class="modal" id="m-ine-{{$vrid}}-{{.Idx}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit port group — {{.NetworkName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/internal/{{.Idx}}/update">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Name<input type="text" name="name" value="{{.NetworkName}}" required></label>
+        <label class="fld">Subnet (CIDR)<input type="text" name="cidr" value="{{.NetworkCIDR}}" placeholder="10.60.0.0/24"></label>
+        <label class="fld">vRouter gateway IP / CIDR<input type="text" name="gateway" value="{{.CIDR}}" placeholder="10.60.0.1/24" required></label>
+        <p class="muted" style="margin:0">Changing the gateway re-assigns the vRouter's address on this segment (via FRR) and re-applies DHCP.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    <div class="modal" id="m-dhcp-{{$vrid}}-{{.Idx}}"><div class="modal-card">
+      <div class="modal-head"><h3>DHCP — {{.IfaceName}} ({{.CIDR}})</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/internal/{{.Idx}}/dhcp">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="vdx-chk" style="display:inline-flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;font-weight:500"><input type="checkbox" name="dhcp" value="1" {{if .DHCP}}checked{{end}}> Serve DHCP on this segment</label>
+        <label class="fld">DHCP range<input type="text" name="dhcp_range" value="{{.DHCPRange}}" placeholder="10.60.0.100,10.60.0.200"></label>
+        <label class="fld">DNS servers (handed out, comma-separated)<input type="text" name="dns" value="{{.DHCPDNS}}" placeholder="1.1.1.1,8.8.8.8"></label>
+        <p class="muted" style="margin:0">Clients get the vRouter leg IP ({{.CIDR}}) as their gateway. Range format is <code>start,end</code>.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save DHCP</button></div>
+      </form>
+    </div></div>
+    {{end}}{{end}}
+
+    <!-- Dynamic routing -->
+    <h3 style="margin:18px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Network diagram</h3>
+    <div class="vr-diagram" data-vr="{{$vrid}}" data-vrname="{{.Name}}" style="border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--panel);display:flex;justify-content:center;align-items:center;min-height:160px;overflow-x:auto"><div class="muted" style="font-size:12px">loading…</div></div>
+
+    <h3 style="margin:18px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Dynamic routing</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px">
+
+      <!-- Static -->
+      <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
+        <div class="card-head" style="border:0;padding:0;margin:0 0 8px"><strong>Static routes</strong><button class="btn sm" data-modal="m-sr-{{$vrid}}">+ Route</button></div>
+        {{if .Cfg.Static}}<table><tr><th>Dest</th><th>Next hop</th><th></th></tr>
+        {{range $i, $r := .Cfg.Static}}<tr><td class="mono">{{$r.Dest}}</td><td class="mono">{{$r.NextHop}}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-modal="m-sre-{{$vrid}}-{{$i}}">edit</button> <form method="post" action="/vrouters/{{$vrid}}/static/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">×</button></form></td></tr>{{end}}
+        </table>{{else}}<div class="empty" style="padding:10px">None</div>{{end}}
+      </div>
+
+      <!-- OSPF -->
+      <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
+        <div class="card-head" style="border:0;padding:0;margin:0 0 8px"><strong>OSPF <span class="pill {{if .Cfg.OSPF.Enabled}}running{{end}}">{{if .Cfg.OSPF.Enabled}}on{{else}}off{{end}}</span></strong><button class="btn sm" data-modal="m-on-{{$vrid}}">+ Network</button></div>
+        <form method="post" action="/vrouters/{{$vrid}}/ospf" class="row" style="align-items:end;gap:8px;margin-bottom:8px">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <label class="fld" style="flex-direction:row;align-items:center;gap:6px;margin:0"><input type="checkbox" name="enabled" value="1" {{if .Cfg.OSPF.Enabled}}checked{{end}}> Enabled</label>
+          <label class="fld" style="margin:0">Router ID<input type="text" name="router_id" value="{{.Cfg.OSPF.RouterID}}" placeholder="1.1.1.1" style="width:110px"></label>
+          <button class="btn sm">Save</button>
+        </form>
+        {{if .Cfg.OSPF.Networks}}<table><tr><th>Network</th><th>Area</th><th></th></tr>
+        {{range $i, $n := .Cfg.OSPF.Networks}}<tr><td class="mono">{{$n.CIDR}}</td><td>{{$n.Area}}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-modal="m-one-{{$vrid}}-{{$i}}">edit</button> <form method="post" action="/vrouters/{{$vrid}}/ospf/net/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">×</button></form></td></tr>{{end}}
+        </table>{{end}}
+      </div>
+
+      <!-- BGP -->
+      <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
+        <div class="card-head" style="border:0;padding:0;margin:0 0 8px"><strong>BGP <span class="pill {{if .Cfg.BGP.Enabled}}running{{end}}">{{if .Cfg.BGP.Enabled}}on{{else}}off{{end}}</span></strong>
+          <span><button class="btn sm" data-modal="m-ba-{{$vrid}}">+ Advertise</button> <button class="btn sm" data-modal="m-bn-{{$vrid}}">+ Neighbor</button></span></div>
+        <form method="post" action="/vrouters/{{$vrid}}/bgp" class="row" style="align-items:end;gap:8px;margin-bottom:8px">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <label class="fld" style="flex-direction:row;align-items:center;gap:6px;margin:0"><input type="checkbox" name="enabled" value="1" {{if .Cfg.BGP.Enabled}}checked{{end}}> Enabled</label>
+          <label class="fld" style="margin:0">ASN<input type="number" name="asn" value="{{.Cfg.BGP.ASN}}" placeholder="65010" style="width:90px"></label>
+          <label class="fld" style="margin:0">Router ID<input type="text" name="router_id" value="{{.Cfg.BGP.RouterID}}" placeholder="1.1.1.1" style="width:110px"></label>
+          <button class="btn sm">Save</button>
+        </form>
+        {{if .Cfg.BGP.Neighbors}}<div class="muted" style="font-size:11px;margin:2px 0">Neighbors</div>
+        <table><tr><th>Neighbor</th><th>Remote AS</th><th></th></tr>
+        {{range $i, $nb := .Cfg.BGP.Neighbors}}<tr><td class="mono">{{$nb.Addr}}</td><td>{{$nb.RemoteAS}}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-modal="m-bne-{{$vrid}}-{{$i}}">edit</button> <form method="post" action="/vrouters/{{$vrid}}/bgp/neighbor/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">×</button></form></td></tr>{{end}}
+        </table>{{end}}
+        {{if .Cfg.BGP.Networks}}<div class="muted" style="font-size:11px;margin:6px 0 2px">Advertised networks</div>
+        <table><tr><th>Prefix</th><th></th></tr>
+        {{range $i, $n := .Cfg.BGP.Networks}}<tr><td class="mono">{{$n}}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-modal="m-bae-{{$vrid}}-{{$i}}">edit</button> <form method="post" action="/vrouters/{{$vrid}}/bgp/network/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">×</button></form></td></tr>{{end}}
+        </table>{{end}}
+      </div>
+    </div>
+
+    <!-- routing-item edit modals -->
+    {{range $i, $r := .Cfg.Static}}
+    <div class="modal" id="m-sre-{{$vrid}}-{{$i}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit static route</h3><button class="modal-x" data-close>&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/static/{{$i}}/update"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Destination<input type="text" name="dest" value="{{$r.Dest}}" required></label>
+        <label class="fld">Next hop<input type="text" name="next_hop" value="{{$r.NextHop}}" required></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    {{end}}
+    {{range $i, $n := .Cfg.OSPF.Networks}}
+    <div class="modal" id="m-one-{{$vrid}}-{{$i}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit OSPF network</h3><button class="modal-x" data-close>&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/ospf/net/{{$i}}/update"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Network CIDR<input type="text" name="cidr" value="{{$n.CIDR}}" required></label>
+        <label class="fld">Area<input type="text" name="area" value="{{$n.Area}}"></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    {{end}}
+    {{range $i, $nb := .Cfg.BGP.Neighbors}}
+    <div class="modal" id="m-bne-{{$vrid}}-{{$i}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit BGP neighbor</h3><button class="modal-x" data-close>&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/bgp/neighbor/{{$i}}/update"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Neighbor IP<input type="text" name="addr" value="{{$nb.Addr}}" required></label>
+        <label class="fld">Remote AS<input type="number" name="remote_as" value="{{$nb.RemoteAS}}" required></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    {{end}}
+    {{range $i, $n := .Cfg.BGP.Networks}}
+    <div class="modal" id="m-bae-{{$vrid}}-{{$i}}"><div class="modal-card">
+      <div class="modal-head"><h3>Edit advertised prefix</h3><button class="modal-x" data-close>&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/bgp/network/{{$i}}/update"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Prefix (CIDR)<input type="text" name="cidr" value="{{$n}}" required></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+      </form>
+    </div></div>
+    {{end}}
+
+    <h3 style="margin:18px 0 6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Live status <span style="text-transform:none;letter-spacing:0;font-weight:400">· auto-refreshing</span></h3>
+    <div data-vr="{{$vrid}}">
+      <details open style="margin:10px 0">
+        <summary style="cursor:pointer;padding:6px 0;font-weight:600;user-select:none">Route table</summary>
+        <pre class="vr-live" id="rt-{{$vrid}}" style="max-height:240px;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:8px;font-size:12px;white-space:pre-wrap;margin:8px 0 0">{{if .RouteTable}}{{.RouteTable}}{{else}}loading…{{end}}</pre>
+      </details>
+      <details style="margin:10px 0">
+        <summary style="cursor:pointer;padding:6px 0;font-weight:600;user-select:none">BGP neighbors</summary>
+        <pre class="vr-live" id="bgp-{{$vrid}}" style="max-height:240px;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:8px;font-size:12px;white-space:pre-wrap;margin:8px 0 0">loading…</pre>
+      </details>
+      <details style="margin:10px 0">
+        <summary style="cursor:pointer;padding:6px 0;font-weight:600;user-select:none">OSPF neighbors</summary>
+        <pre class="vr-live" id="ospf-{{$vrid}}" style="max-height:240px;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:8px;font-size:12px;white-space:pre-wrap;margin:8px 0 0">loading…</pre>
+      </details>
+      <details style="margin:10px 0">
+        <summary style="cursor:pointer;padding:6px 0;font-weight:600;user-select:none">Advertised routes (BGP table)</summary>
+        <pre class="vr-live" id="adv-{{$vrid}}" style="max-height:240px;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:8px;font-size:12px;white-space:pre-wrap;margin:8px 0 0">loading…</pre>
+      </details>
+    </div>
+
+    <!-- Per-vRouter modals -->
+    <div class="modal" id="m-tr-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Add transit link — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/transit">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Free interface
+          <select name="iface" required>
+            <option value="">— select a free NIC —</option>
+            {{range $.Transit}}<option value="{{.Name}}">{{.Name}}{{if .Neighbor}} ↔ {{.Neighbor}}{{end}}{{if .SpeedMbps}} ({{.SpeedMbps}} Mb/s){{end}}</option>{{end}}
+          </select>
+        </label>
+        <label class="fld">Transit IP / CIDR<input type="text" name="cidr" placeholder="10.50.0.1/30" required></label>
+        <p class="muted" style="margin:0">The upstream router sits on this link. The vRouter peers over it (static/OSPF/BGP). The mgmt + enslaved NICs are excluded.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add transit</button></div>
+      </form>
+    </div></div>
+
+    <div class="modal" id="m-in-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Attach internal port group — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/internal">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Name<input type="text" name="name" placeholder="app-tier" required></label>
+        <label class="fld">Subnet (CIDR)<input type="text" name="cidr" placeholder="10.60.0.0/24"></label>
+        <label class="fld">vRouter gateway IP / CIDR<input type="text" name="gateway" placeholder="10.60.0.1/24" required></label>
+        <label class="vdx-chk" style="display:inline-flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;font-weight:500"><input type="checkbox" name="dhcp" value="1"> Serve DHCP on this segment</label>
+        <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.60.0.100,10.60.0.200"></label>
+        <label class="fld">DNS servers (handed out via DHCP, comma-separated)<input type="text" name="dns" placeholder="1.1.1.1,8.8.8.8"></label>
+        <p class="muted" style="margin:0">Creates an isolated port group VMs attach to; the gateway IP is their default route.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Attach</button></div>
+      </form>
+    </div></div>
+
+    <div class="modal" id="m-sr-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Add static route — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/static">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Destination<input type="text" name="dest" placeholder="0.0.0.0/0 or default" required></label>
+        <label class="fld">Next hop<input type="text" name="next_hop" placeholder="10.50.0.2" required></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add route</button></div>
+      </form>
+    </div></div>
+
+    <div class="modal" id="m-on-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Add OSPF network — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/ospf/net">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Network CIDR<input type="text" name="cidr" placeholder="10.60.0.0/24" required></label>
+        <label class="fld">Area<input type="text" name="area" placeholder="0"></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add network</button></div>
+      </form>
+    </div></div>
+
+    <div class="modal" id="m-bn-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Add BGP neighbor — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/bgp/neighbor">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Neighbor IP<input type="text" name="addr" placeholder="10.50.0.2" required></label>
+        <label class="fld">Remote AS<input type="number" name="remote_as" placeholder="65000" required></label>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add neighbor</button></div>
+      </form>
+    </div></div>
+
+    <div class="modal" id="m-ba-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Advertise a network (BGP) — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/bgp/network">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <label class="fld">Prefix (CIDR)<input type="text" name="cidr" placeholder="203.0.113.0/24" required></label>
+        <p class="muted" style="margin:0">Injects <code>network &lt;prefix&gt;</code> into BGP so it's advertised to your neighbors. The prefix must be in the routing table (e.g. a connected internal port group carrying that subnet).</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Advertise</button></div>
+      </form>
+    </div></div>
+  {{end}}
+</div>
+{{else}}
+<div class="card"><div class="empty">No vRouters yet. Click <strong>+ New vRouter</strong> to create one.</div></div>
+{{end}}
+
+<!-- New vRouter modal -->
+<div class="modal" id="m-vr"><div class="modal-card">
+  <div class="modal-head"><h3>New vRouter</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/vrouters">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="edge-1" required></label>
+    <label class="fld">Runtime
+      <select name="runtime" required>
+        {{if index .Runtimes "lxc"}}<option value="lxc">LXC container + FRR (recommended)</option>{{end}}
+        {{if index .Runtimes "netns"}}<option value="netns">Network namespace + FRR (lightweight)</option>{{end}}
+        <option value="vm" disabled>VM appliance (coming soon)</option>
+      </select>
+    </label>
+    <div class="row" style="gap:10px">
+      <label class="fld">vCPUs<input type="number" name="cpus" value="1" min="1" max="8" style="width:90px"></label>
+      <label class="fld">Memory (MB)<input type="number" name="mem_mb" value="512" min="128" style="width:120px"></label>
+    </div>
+    <p class="muted" style="margin:0">The runtime provisions FRR in the background. Add a transit link and internal port groups once it's ready.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create</button></div>
+  </form>
+</div></div>
+{{template "topochart" .}}
+<script>
+// While a vRouter is still provisioning, reload to pick up its final status.
+(function(){ if(document.querySelector('[data-creating]')) setTimeout(function(){ location.reload(); }, 4000); })();
+// Live-refresh each running vRouter's route table + BGP/OSPF neighbors (no full reload).
+(function(){
+  var cards = document.querySelectorAll('[data-vr]');
+  if(!cards.length) return;
+  function set(id, txt, empty){ var el=document.getElementById(id); if(el) el.textContent=(txt&&txt.trim())?txt:empty; }
+  function poll(){
+    cards.forEach(function(c){
+      var id=c.getAttribute('data-vr');
+      fetch('/vrouters/'+id+'/status',{credentials:'same-origin'})
+        .then(function(r){return r.ok?r.json():null;})
+        .then(function(d){ if(!d) return;
+          set('rt-'+id, d.route_table, '(no routes)');
+          set('bgp-'+id, d.bgp, '(BGP not enabled)');
+          set('ospf-'+id, d.ospf, '(OSPF not enabled)');
+          set('adv-'+id, d.advertised, '(nothing advertised)');
+        }).catch(function(){});
+    });
+  }
+  poll(); setInterval(poll, 5000);
+})();
+
+// ---- vRouter diagram: the SAME renderer as the Networks page (shared partial) ----
+(function(){
+  function render(topo){
+    document.querySelectorAll('.vr-diagram').forEach(function(host){
+      var nm=host.getAttribute('data-vrname');
+      var vr=((topo&&topo.vrouters)||[]).filter(function(v){return v.name===nm;})[0];
+      if(vr){ window.VXChart.drawTopo({switches:[],vrouters:[vr]}, host); window.VXChart.installTooltip(host); }
+      else { host.innerHTML='<div class="muted" style="font-size:12px">diagram unavailable (vRouter not ready)</div>'; }
+    });
+  }
+  function load(){ fetch('/api/topology',{credentials:'same-origin'}).then(function(r){return r.ok?r.json():null;})
+    .then(function(t){ if(t) render(t); }).catch(function(){}); }
+  load(); setInterval(function(){ if(!document.hidden) load(); }, 5000);
+})();
+</script>
+{{template "foot" .}}{{end}}

@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -105,15 +108,20 @@ type importLogger struct {
 }
 
 func (s *Service) newImportLogger(id string) *importLogger {
+	return newFileLogger(id, s.importLogDir(), "vmware-")
+}
+
+// newFileLogger opens a durable per-job log file <dir>/<prefix><id>.log, degrading
+// to journal-only if the file can't be opened. Shared by import and export.
+func newFileLogger(id, dir, prefix string) *importLogger {
 	lg := &importLogger{id: id}
-	dir := s.importLogDir()
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		log.Printf("vmware-import %s: cannot create log dir %s: %v (journal-only)", id, dir, err)
+		log.Printf("%s%s: cannot create log dir %s: %v (journal-only)", prefix, id, dir, err)
 		return lg
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "vmware-"+id+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	f, err := os.OpenFile(filepath.Join(dir, prefix+id+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {
-		log.Printf("vmware-import %s: cannot open log file: %v (journal-only)", id, err)
+		log.Printf("%s%s: cannot open log file: %v (journal-only)", prefix, id, err)
 		return lg
 	}
 	lg.f = f
@@ -229,22 +237,160 @@ func (s *Service) VMwareConnectList(p *Principal, c vmware.Creds, ip string) ([]
 	return vms, nil
 }
 
-// VMwareImport runs an import asynchronously and returns a tracking id.
-func (s *Service) VMwareImport(p *Principal, c vmware.Creds, moid, osType string, ip string) (string, error) {
+// VMwareImport runs an import asynchronously and returns a tracking id. The
+// imported instance's disk lands on targetPoolID (0 = default disk directory);
+// the backend is derived from that pool's kind, so a VM can be imported onto any
+// registered storage — dir(qcow2) / ZFS zvol / LVM thin / Ceph RBD.
+func (s *Service) VMwareImport(p *Principal, c vmware.Creds, moid, osType, transport string, targetPoolID int64, ip string) (string, error) {
 	if !p.IsAdmin {
 		return "", ErrUnauthorized
 	}
 	if strings.TrimSpace(moid) == "" {
 		return "", fmt.Errorf("select a VM to import")
 	}
+	switch transport {
+	case "", "nfc":
+		transport = "nfc"
+	case "datastore", "vddk":
+		// ok
+	default:
+		return "", fmt.Errorf("unknown transfer method %q", transport)
+	}
+	// Validate the target pool up front so the user gets an immediate error
+	// instead of a failure 40 minutes into the transfer.
+	backend, zvolPool, err := s.ResolveDiskTarget(p, targetPoolID)
+	if err != nil {
+		return "", err
+	}
 	id := uuid.NewString()
 	s.vmwimp.set(id, func(st *VMwareImportState) { st.Status = "connecting"; st.Step = "queued" })
-	s.audit(p, p.OrgID, "vmware.import_start", "vmware", moid, ip, map[string]any{"host": vcHost(c.URL), "user": c.User})
-	go s.runVMwareImport(id, c, moid, osType, p, ip)
+	s.audit(p, p.OrgID, "vmware.import_start", "vmware", moid, ip, map[string]any{"host": vcHost(c.URL), "user": c.User, "pool_id": targetPoolID, "backend": backend, "transport": transport})
+	go s.runVMwareImport(id, c, moid, osType, transport, backend, zvolPool, targetPoolID, importOverride{}, p, ip)
 	return id, nil
 }
 
-func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string, p *Principal, ip string) {
+// importOverride carries per-VM settings from the migration wizard that replace
+// the source-derived defaults. Zero/empty fields mean "keep as source".
+type importOverride struct {
+	Name      string
+	CPUs      int
+	MemMB     int
+	Firmware  string // "" | bios | uefi
+	NetworkID int64  // target port group; 0 = default/NAT
+}
+
+// VDDKLibDir / SetVDDKLibDir read and write the operator-supplied path to the
+// (proprietary, non-bundleable) VMware VDDK library tree used by the fastest
+// import transport. Stored in the settings kv table.
+const vddkLibDirKey = "vddk_libdir"
+
+func (s *Service) VDDKLibDir() string {
+	var v string
+	_ = s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, vddkLibDirKey).Scan(&v)
+	return v
+}
+
+func (s *Service) SetVDDKLibDir(p *Principal, dir, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	dir = strings.TrimSpace(dir)
+	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, vddkLibDirKey, dir)
+	if err == nil {
+		s.audit(p, p.OrgID, "vmware.vddk_libdir", "setting", vddkLibDirKey, ip, map[string]any{"dir": dir})
+	}
+	return err
+}
+
+// UploadVDDK takes the operator-supplied VMware VDDK archive (vmware-vix-disklib
+// .tar.gz, proprietary and not bundleable), unpacks it into a managed directory
+// under DataDir, locates the vix-disklib "distrib" tree (the dir holding
+// lib64/libvixDiskLib.so*), and records it as the VDDK libdir — so the operator
+// can enable the fastest import transport by uploading the tarball through the UI
+// instead of unpacking it on the host by hand. Admin only. Returns the resolved
+// libdir on success. The archive is trusted operator input but is still extracted
+// into an isolated, freshly-emptied directory.
+func (s *Service) UploadVDDK(p *Principal, src io.Reader, ip string) (string, error) {
+	if !p.IsAdmin {
+		return "", ErrUnauthorized
+	}
+	base := filepath.Join(s.cfg.Paths.DataDir, "vddk")
+	// Fresh each time: a re-upload fully replaces the previous tree.
+	_ = os.RemoveAll(base)
+	tree := filepath.Join(base, "tree")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		return "", err
+	}
+	tgz := filepath.Join(base, ".upload.tar.gz")
+	f, err := os.Create(tgz)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		_ = f.Close()
+		_ = os.RemoveAll(base)
+		return "", fmt.Errorf("receive VDDK upload: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.RemoveAll(base)
+		return "", err
+	}
+	defer os.Remove(tgz)
+	// GNU tar auto-detects gzip/bzip2/xz on read, so -xf handles .tar.gz and .tar.
+	cmd := exec.Command("tar", "-xf", tgz, "-C", tree)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(base)
+		return "", fmt.Errorf("extract VDDK archive (expected a vmware-vix-disklib .tar.gz): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	dir, err := findVDDKDistrib(tree)
+	if err != nil {
+		_ = os.RemoveAll(base)
+		return "", err
+	}
+	if err := s.SetVDDKLibDir(p, dir, ip); err != nil {
+		return "", err
+	}
+	s.audit(p, p.OrgID, "vmware.vddk_upload", "setting", vddkLibDirKey, ip, map[string]any{"dir": dir})
+	return dir, nil
+}
+
+// findVDDKDistrib walks an unpacked VDDK tree and returns the directory that
+// contains lib64/libvixDiskLib.so* — that parent directory is what nbdkit's VDDK
+// plugin wants as libdir=.
+func findVDDKDistrib(root string) (string, error) {
+	var found string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || found != "" {
+			return nil
+		}
+		if d.IsDir() && d.Name() == "lib64" {
+			if m, _ := filepath.Glob(filepath.Join(path, "libvixDiskLib.so*")); len(m) > 0 {
+				found = filepath.Dir(path)
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if found == "" {
+		return "", fmt.Errorf("that archive does not look like a VMware VDDK distribution (no lib64/libvixDiskLib.so found) — download the vmware-vix-disklib .tar.gz matching your vSphere version")
+	}
+	return found, nil
+}
+
+// VDDKReady reports whether the VDDK "fastest" transport can be offered: nbdkit +
+// plugin installed AND the operator has set a libdir.
+func (s *Service) VDDKReady(p *Principal) bool {
+	return p != nil && p.IsAdmin && vmware.VDDKAvailable() && strings.TrimSpace(s.VDDKLibDir()) != ""
+}
+
+// VDDKInstalled reports whether the nbdkit VDDK wrapper is present (regardless of
+// whether a libdir is set) — for the Storage-page hint.
+func (s *Service) VDDKInstalled(p *Principal) bool {
+	return p != nil && p.IsAdmin && vmware.VDDKAvailable()
+}
+
+func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, transport, diskBackend, zvolPool string, targetPoolID int64, ov importOverride, p *Principal, ip string) {
 	lg := s.newImportLogger(id)
 	defer lg.close()
 	hasLog := lg.f != nil
@@ -313,10 +459,18 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		return
 	}
 
-	lg.logf("exporting %q (%d disk(s), ~%d GiB) read-only", vm.Name, len(vm.Disks), need/(1<<30))
-	s.vmwimp.set(id, func(st *VMwareImportState) { st.Status = "exporting"; st.Step = "downloading disks (read-only)" })
+	transportLabel := map[string]string{
+		"nfc":       "NFC export (compressed stream)",
+		"datastore": "datastore direct download (fast, raw flat)",
+		"vddk":      "VDDK over NBD (fastest, allocated blocks)",
+	}[transport]
+	lg.logf("exporting %q (%d disk(s), ~%d GiB) read-only via %s", vm.Name, len(vm.Disks), need/(1<<30), transportLabel)
+	s.vmwimp.set(id, func(st *VMwareImportState) {
+		st.Status = "exporting"
+		st.Step = "downloading disks (read-only) — " + transportLabel
+	})
 	var lastLog time.Time
-	vmdks, err := cli.ExportVM(ctx, moid, destDir, lg.logf, func(ep vmware.ExportProgress) {
+	progFn := func(ep vmware.ExportProgress) {
 		s.vmwimp.set(id, func(st *VMwareImportState) {
 			st.DoneBytes = ep.DoneBytes
 			// A stream-optimized export is compressed: the true total is unknown
@@ -329,13 +483,22 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 			st.Pct = 0
 		})
 		// Throttle periodic progress to one line every ~15s (per-disk start/finish
-		// lines come from ExportVM itself).
+		// lines come from the transport itself).
 		if time.Since(lastLog) >= 15*time.Second {
 			lastLog = time.Now()
-			lg.logf("export progress: %d MiB pulled @ %d MiB/s (source nominal %d MiB; compressed, total unknown until done)",
+			lg.logf("export progress: %d MiB pulled @ %d MiB/s (source nominal %d MiB; total unknown until done)",
 				ep.DoneBytes/(1<<20), ep.BytesPerSec/(1<<20), ep.NominalBytes/(1<<20))
 		}
-	})
+	}
+	var vmdks []string
+	switch transport {
+	case "datastore":
+		vmdks, err = cli.ExportVMDatastore(ctx, moid, destDir, lg.logf, progFn)
+	case "vddk":
+		vmdks, err = cli.ExportVMVDDK(ctx, moid, destDir, s.VDDKLibDir(), c.User, c.Pass, lg.logf, progFn)
+	default:
+		vmdks, err = cli.ExportVM(ctx, moid, destDir, lg.logf, progFn)
+	}
 	if err != nil {
 		fail("export", err.Error())
 		return
@@ -417,6 +580,20 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 	if mem < 512 {
 		mem = 1024
 	}
+	// Apply per-VM wizard overrides (empty/zero = keep source value).
+	instName := vm.Name
+	if n := strings.TrimSpace(ov.Name); n != "" {
+		instName = n
+	}
+	if ov.CPUs > 0 {
+		cpus = ov.CPUs
+	}
+	if ov.MemMB > 0 {
+		mem = ov.MemMB
+	}
+	if ov.Firmware == "bios" || ov.Firmware == "uefi" {
+		firmware = ov.Firmware
+	}
 	diskBus := "" // default (virtio-blk)
 	busNote := ""
 	if osType == "windows" {
@@ -425,8 +602,23 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		diskBus = "sata"
 		busNote = " Disk bus set to SATA for first boot — install virtio-win drivers, then switch to virtio."
 	}
+	// Preserve the source VM's primary NIC MAC so the migrated guest keeps its
+	// L2 identity (DHCP reservations, MAC-bound licenses). VXVisor models one NIC
+	// per instance, so only the first adapter's MAC carries over; any additional
+	// source NICs are noted below. Reusing the MAC is safe because the source is
+	// powered off for this migration — leaving it running would duplicate the MAC.
+	srcMAC := ""
+	if len(vm.NICs) > 0 {
+		srcMAC = strings.TrimSpace(vm.NICs[0].MAC)
+	}
+	if srcMAC != "" {
+		lg.logf("preserving source MAC %s on the primary NIC", srcMAC)
+	}
+	if len(vm.NICs) > 1 {
+		lg.logf("note: source has %d NICs; VXVisor instances have one NIC, so only the primary MAC (%s) is preserved — add extra NICs manually if needed", len(vm.NICs), srcMAC)
+	}
 	in := CreateInput{
-		Name:     vm.Name,
+		Name:     instName,
 		Image:    firstImage,
 		Kind:     "server",
 		Firmware: firmware,
@@ -436,13 +628,25 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 		OSType:   osType,
 		DiskBus:  diskBus,
 		Display:  "vnc",
+		MAC:       srcMAC,       // preserve the source primary-NIC MAC
+		NetworkID: ov.NetworkID, // target port group (wizard); 0 = default/NAT
+		// Place the instance's boot disk on the chosen storage pool (backend
+		// derived from the pool kind). The base image stays a qcow2 template in
+		// the image dir; CreateSession converts it onto the target backend.
+		StoragePoolID: targetPoolID,
+		DiskBackend:   diskBackend,
+		ZvolPool:      zvolPool,
 	}
 	busLog := diskBus
 	if busLog == "" {
 		busLog = "virtio-blk (default)"
 	}
-	lg.logf("creating instance %q from image %q (kind=server firmware=%s cpu=%d memMB=%d disk-bus=%s net=default/NAT, stopped)",
-		vm.Name, firstImage, firmware, cpus, mem, busLog)
+	storeLog := diskBackend
+	if targetPoolID <= 0 {
+		storeLog = "qcow2 (default disk dir)"
+	}
+	lg.logf("creating instance %q from image %q (kind=server firmware=%s cpu=%d memMB=%d disk-bus=%s storage=%s net=default/NAT, stopped)",
+		instName, firstImage, firmware, cpus, mem, busLog, storeLog)
 
 	extra := ""
 	if len(vmdks) > 1 {
@@ -467,13 +671,98 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType string
 	s.vmwimp.set(id, func(st *VMwareImportState) {
 		st.Status = "done"
 		st.Step = fmt.Sprintf("instance %q created (%d vCPU, %d MiB, %s) from image %q — stopped, ready to start.%s%s",
-			vm.Name, cpus, mem, firmware, firstImage, efiNote, busNote) + extra
+			instName, cpus, mem, firmware, firstImage, efiNote, busNote) + extra
 		st.FinishedAt = time.Now().UnixMilli()
 	})
-	lg.logf("DONE → instance %q (id=%s) created from image %q (%d disk(s))", vm.Name, sess.ID, firstImage, len(vmdks))
+	lg.logf("DONE → instance %q (id=%s) created from image %q (%d disk(s))", instName, sess.ID, firstImage, len(vmdks))
 	s.audit(p, p.OrgID, "vmware.import_instance", "session", sess.ID, ip, map[string]any{
 		"vm": vm.Name, "image": firstImage, "cpus": cpus, "memory_mb": mem, "firmware": firmware,
 	})
+}
+
+// PlanItem is one row of a migration plan: a source VM plus the per-VM target
+// settings chosen in the wizard. Order in the slice is the import order.
+type PlanItem struct {
+	MOID         string
+	Name         string // target instance name ("" = keep source)
+	OSType       string // linux | windows
+	Transport    string // nfc | datastore | vddk ("" = nfc)
+	TargetPoolID int64  // storage pool (0 = default disk dir)
+	NetworkID    int64  // target port group (0 = default/NAT)
+	CPUs         int    // 0 = keep source
+	MemMB        int    // 0 = keep source
+	Firmware     string // "" = keep source
+}
+
+// MigratePlan starts a batch import of several VMs in the given order. Each VM
+// becomes its own entry in the import progress tracker (so the existing progress
+// table shows them all). Imports run SEQUENTIALLY — the link/host is the
+// bottleneck, so running them in parallel would only thrash the same pipe — and
+// the batch CONTINUES past a failed VM rather than aborting the whole plan. Admin
+// only. Returns a plan id (for audit/flash); progress is polled via the import
+// states endpoint.
+func (s *Service) MigratePlan(p *Principal, c vmware.Creds, items []PlanItem, ip string) (string, error) {
+	if !p.IsAdmin {
+		return "", ErrUnauthorized
+	}
+	if len(items) == 0 {
+		return "", fmt.Errorf("select at least one VM to migrate")
+	}
+	// Validate transports + target pools up front so the user gets an immediate
+	// error instead of one surfacing mid-batch.
+	for i := range items {
+		if strings.TrimSpace(items[i].MOID) == "" {
+			return "", fmt.Errorf("plan row %d has no VM selected", i+1)
+		}
+		switch items[i].Transport {
+		case "", "nfc":
+			items[i].Transport = "nfc"
+		case "datastore", "vddk":
+		default:
+			return "", fmt.Errorf("plan row %d: unknown transfer method %q", i+1, items[i].Transport)
+		}
+		if _, _, err := s.ResolveDiskTarget(p, items[i].TargetPoolID); err != nil {
+			return "", fmt.Errorf("plan row %d: %w", i+1, err)
+		}
+	}
+	planID := uuid.NewString()
+	s.audit(p, p.OrgID, "vmware.migrate_plan_start", "vmware", planID, ip, map[string]any{
+		"host": vcHost(c.URL), "user": c.User, "count": len(items),
+	})
+	go s.runMigratePlan(planID, c, items, p, ip)
+	return planID, nil
+}
+
+func (s *Service) runMigratePlan(planID string, c vmware.Creds, items []PlanItem, p *Principal, ip string) {
+	log.Printf("vmware-migrate: plan %s started: %d VM(s), sequential", planID, len(items))
+	for i, it := range items {
+		backend, zvolPool, err := s.ResolveDiskTarget(p, it.TargetPoolID)
+		id := uuid.NewString()
+		display := it.Name
+		if strings.TrimSpace(display) == "" {
+			display = it.MOID
+		}
+		s.vmwimp.set(id, func(st *VMwareImportState) {
+			st.VMName = display
+			st.Status = "connecting"
+			st.Step = fmt.Sprintf("queued — migration plan (%d/%d)", i+1, len(items))
+		})
+		if err != nil {
+			// Pool vanished between validation and run — mark this one failed, go on.
+			s.vmwimp.set(id, func(st *VMwareImportState) {
+				st.Status = "failed"
+				st.Step = "precheck"
+				st.Err = err.Error()
+				st.FinishedAt = time.Now().UnixMilli()
+			})
+			continue
+		}
+		ov := importOverride{Name: it.Name, CPUs: it.CPUs, MemMB: it.MemMB, Firmware: it.Firmware, NetworkID: it.NetworkID}
+		// Synchronous: one VM at a time, in order. A failure is recorded in the
+		// tracker by runVMwareImport itself and does not stop the plan.
+		s.runVMwareImport(id, c, it.MOID, it.OSType, it.Transport, backend, zvolPool, it.TargetPoolID, ov, p, ip)
+	}
+	log.Printf("vmware-migrate: plan %s finished", planID)
 }
 
 // SweepImportTemps removes orphaned transient export files from the image dir.

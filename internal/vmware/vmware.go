@@ -8,6 +8,7 @@ package vmware
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -49,6 +50,15 @@ type DiskInfo struct {
 	Thin       bool
 }
 
+// NICInfo describes one virtual NIC on a source VM, captured structurally so the
+// migration wizard can show the source port-group and map it to a target network.
+type NICInfo struct {
+	Label     string // e.g. "Network adapter 1"
+	MAC       string // source MAC (informational; not reused on import)
+	Type      string // e1000 | e1000e | vmxnet3 | vmxnet2 | pcnet32 | sriov | vnic
+	PortGroup string // standard-vSwitch port-group name, DVS portgroup key, or opaque net id
+}
+
 // VMInfo is read-only inventory for a source VM.
 type VMInfo struct {
 	MOID          string
@@ -60,10 +70,49 @@ type VMInfo struct {
 	MemMB         int32
 	Firmware      string // bios | efi
 	Disks         []DiskInfo
-	Nets          []string
+	Nets          []string  // human-readable NIC summaries (kept for display)
+	NICs          []NICInfo // structured per-NIC detail (type/MAC/port-group)
 	HasSnapshots  bool
 	Importable    bool   // false → we refuse before touching anything
 	ImportNote    string // why not importable, or a caveat
+}
+
+// nicType maps a govmomi virtual-NIC device to a short model name.
+func nicType(d types.BaseVirtualDevice) string {
+	switch d.(type) {
+	case *types.VirtualVmxnet3:
+		return "vmxnet3"
+	case *types.VirtualVmxnet2:
+		return "vmxnet2"
+	case *types.VirtualVmxnet:
+		return "vmxnet"
+	case *types.VirtualE1000e:
+		return "e1000e"
+	case *types.VirtualE1000:
+		return "e1000"
+	case *types.VirtualPCNet32:
+		return "pcnet32"
+	case *types.VirtualSriovEthernetCard:
+		return "sriov"
+	default:
+		return "vnic"
+	}
+}
+
+// nicPortGroup resolves a NIC's backing to a port-group identifier: the standard
+// vSwitch port-group name, the DVS portgroup key, or an NSX opaque-network id.
+// Read-only — inspects the backing govmomi already fetched with config.hardware.
+func nicPortGroup(card *types.VirtualEthernetCard) string {
+	switch b := card.Backing.(type) {
+	case *types.VirtualEthernetCardNetworkBackingInfo:
+		return b.DeviceName
+	case *types.VirtualEthernetCardDistributedVirtualPortBackingInfo:
+		return b.Port.PortgroupKey
+	case *types.VirtualEthernetCardOpaqueNetworkBackingInfo:
+		return b.OpaqueNetworkId
+	default:
+		return ""
+	}
 }
 
 // normalizeURL turns a bare host or partial URL into an https .../sdk URL with
@@ -172,9 +221,13 @@ func toVMInfo(vm *mo.VirtualMachine) VMInfo {
 				info.Disks = append(info.Disks, di)
 			case types.BaseVirtualEthernetCard:
 				card := dev.GetVirtualEthernetCard()
+				n := NICInfo{MAC: card.MacAddress, Type: nicType(d)}
 				if card.DeviceInfo != nil {
+					n.Label = card.DeviceInfo.GetDescription().Label
 					info.Nets = append(info.Nets, card.DeviceInfo.GetDescription().Summary)
 				}
+				n.PortGroup = nicPortGroup(card)
+				info.NICs = append(info.NICs, n)
 			}
 		}
 	}
@@ -314,7 +367,11 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 			go func() { errCh <- lease.DownloadFile(ctx, local, item, soap.Download{}) }()
 			tick := time.NewTicker(time.Second)
 			defer tick.Stop()
-			lastBytes, lastT := completedBytes, time.Now()
+			// Cumulative-average rate (total bytes this disk / total elapsed) rather
+			// than an instantaneous delta: the transport writes in bursts, so a
+			// per-tick delta frequently samples 0 and the UI rate flickers to "—".
+			// The average is stable and always non-zero once data is flowing.
+			startBytes, startT := completedBytes, time.Now()
 			for {
 				select {
 				case derr := <-errCh:
@@ -325,13 +382,11 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 						cur += fi.Size()
 					}
 					if prog != nil {
-						dt := now.Sub(lastT).Seconds()
 						var bps int64
-						if dt > 0 {
-							bps = int64(float64(cur-lastBytes) / dt)
+						if el := now.Sub(startT).Seconds(); el > 0 {
+							bps = int64(float64(cur-startBytes) / el)
 						}
 						prog(ExportProgress{DoneBytes: cur, NominalBytes: nominalBytes, BytesPerSec: bps})
-						lastBytes, lastT = cur, now
 					}
 				}
 			}
@@ -379,6 +434,212 @@ func (c *Client) ExportVM(ctx context.Context, moid, destDir string, logf func(s
 	}
 	logf("export finished: %d disk file(s), %d MiB total", len(files), completedBytes/(1<<20))
 	return files, nil
+}
+
+// ExportVMDatastore downloads a powered-off VM's disks by GETting the flat VMDK
+// data extents straight off the datastore over the ESXi/vCenter `/folder` HTTPS
+// file service. Unlike ExportVM (NFC) there is NO stream-optimized recompression
+// on the host, so the transfer is link-bound and typically several times faster
+// on a LAN. It is strictly READ-ONLY on the source (plain GETs; nothing is
+// powered, snapshotted, or reconfigured). It REFUSES a powered-on VM (the flat
+// file is locked / inconsistent) or one with snapshots (a raw flat copy would
+// miss the live delta chain), and handles single-extent flat disks (the common
+// case) — a split/multi-extent disk errors so the caller can fall back to NFC.
+// The downloaded extent is a raw image; the caller's existing qemu-img pipeline
+// converts it to qcow2 (which also re-sparsifies the zeroed regions the flat GET
+// necessarily transfers). Returns local raw-disk paths in device order.
+func (c *Client) ExportVMDatastore(ctx context.Context, moid, destDir string, logf func(string, ...any), prog func(ExportProgress)) ([]string, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	ref := types.ManagedObjectReference{Type: "VirtualMachine", Value: moid}
+	var vm mo.VirtualMachine
+	pc := property.DefaultCollector(c.gc.Client)
+	if err := pc.RetrieveOne(ctx, ref, []string{"config.hardware", "runtime.powerState", "snapshot"}, &vm); err != nil {
+		return nil, fmt.Errorf("read VM layout: %w", err)
+	}
+	if vm.Runtime.PowerState != types.VirtualMachinePowerStatePoweredOff {
+		return nil, fmt.Errorf("the datastore transport requires the source powered OFF (it is %s) — power it off on vCenter, or use the NFC transport", vm.Runtime.PowerState)
+	}
+	if vm.Snapshot != nil && len(vm.Snapshot.RootSnapshotList) > 0 {
+		return nil, fmt.Errorf("the datastore transport can't be used on a VM with snapshots (a raw flat copy would miss the delta chain) — remove snapshots on the source, or use the NFC transport")
+	}
+	disks, err := flatDisksOf(&vm)
+	if err != nil {
+		return nil, err
+	}
+
+	var nominalBytes int64
+	for _, d := range disks {
+		nominalBytes += d.capBytes
+	}
+
+	var files []string
+	cleanup := func() {
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+	}
+	var completedBytes int64
+	for _, d := range disks {
+		ds := object.NewDatastore(c.gc.Client, *d.ds)
+		// Read the (tiny) descriptor to find the real data extent filename(s).
+		rc, _, err := ds.Download(ctx, d.desc, &soap.Download{Method: "GET"})
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("read descriptor %s: %w", d.desc, err)
+		}
+		descBytes, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		extents := parseVMDKExtents(string(descBytes))
+		if len(extents) == 0 {
+			cleanup()
+			return nil, fmt.Errorf("could not parse a data extent from descriptor %s", d.desc)
+		}
+		if len(extents) > 1 {
+			cleanup()
+			return nil, fmt.Errorf("disk %q is split into %d extents — the datastore transport handles single-extent disks only; use the NFC transport", d.label, len(extents))
+		}
+		extName := extents[0]
+		extRel := extName
+		if d.dir != "" {
+			extRel = d.dir + "/" + extName
+		}
+		local := filepath.Join(destDir, "."+sanitizeName(extName))
+		logf("downloading %q data extent %s (~%d MiB) direct from datastore → %s", d.label, extRel, d.capBytes/(1<<20), filepath.Base(local))
+		diskStart := time.Now()
+
+		// Stream the flat file to disk while polling its size for a live rate.
+		errCh := make(chan error, 1)
+		dlCtx, dlCancel := context.WithCancel(ctx)
+		go func() { errCh <- ds.DownloadFile(dlCtx, extRel, local, &soap.Download{Method: "GET"}) }()
+		tick := time.NewTicker(time.Second)
+		lastBytes, lastT := completedBytes, time.Now()
+		var derr error
+	poll:
+		for {
+			select {
+			case derr = <-errCh:
+				break poll
+			case now := <-tick.C:
+				cur := completedBytes
+				if fi, e := os.Stat(local); e == nil {
+					cur += fi.Size()
+				}
+				if prog != nil {
+					dt := now.Sub(lastT).Seconds()
+					var bps int64
+					if dt > 0 {
+						bps = int64(float64(cur-lastBytes) / dt)
+					}
+					prog(ExportProgress{DoneBytes: cur, NominalBytes: nominalBytes, BytesPerSec: bps})
+					lastBytes, lastT = cur, now
+				}
+			}
+		}
+		tick.Stop()
+		dlCancel()
+		if derr != nil {
+			_ = os.Remove(local)
+			cleanup()
+			logf("datastore download of %q FAILED after %s: %v", d.label, time.Since(diskStart).Round(time.Second), derr)
+			return nil, fmt.Errorf("download %s: %w", extRel, derr)
+		}
+		var wrote int64
+		if fi, e := os.Stat(local); e == nil {
+			wrote = fi.Size()
+			completedBytes += wrote
+		}
+		elapsed := time.Since(diskStart)
+		var avg int64
+		if sec := elapsed.Seconds(); sec > 0 {
+			avg = int64(float64(wrote) / sec)
+		}
+		logf("downloaded %q: %d MiB in %s (avg %d MiB/s, raw flat) — will convert to qcow2 (zeros re-sparsified on convert)",
+			d.label, wrote/(1<<20), elapsed.Round(time.Second), avg/(1<<20))
+		files = append(files, local)
+		if prog != nil {
+			prog(ExportProgress{DoneBytes: completedBytes, NominalBytes: nominalBytes})
+		}
+	}
+	logf("datastore export finished: %d disk file(s), %d MiB total", len(files), completedBytes/(1<<20))
+	return files, nil
+}
+
+// parseVMDKExtents pulls the data-extent filename(s) out of a VMDK descriptor.
+// Extent lines look like: RW 83886080 VMFS "MyVM-flat.vmdk". Returns the quoted
+// names in order (usually one for a monolithicFlat disk).
+func parseVMDKExtents(desc string) []string {
+	var out []string
+	for _, line := range strings.Split(desc, "\n") {
+		line = strings.TrimSpace(line)
+		if !(strings.HasPrefix(line, "RW ") || strings.HasPrefix(line, "RDONLY ") || strings.HasPrefix(line, "NOACCESS ")) {
+			continue
+		}
+		a := strings.IndexByte(line, '"')
+		if a < 0 {
+			continue
+		}
+		b := strings.IndexByte(line[a+1:], '"')
+		if b < 0 {
+			continue
+		}
+		if name := line[a+1 : a+1+b]; name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// flatDisk describes one flat-backed virtual disk of a source VM, shared by the
+// datastore and VDDK transports.
+type flatDisk struct {
+	ds       *types.ManagedObjectReference
+	dir      string // datastore-relative directory of the vmdk
+	desc     string // datastore-relative path of the descriptor .vmdk
+	fileName string // full "[dsName] dir/x.vmdk" as VMware reports it (VDDK needs this)
+	capBytes int64
+	label    string
+}
+
+// flatDisksOf extracts the flat virtual disks from a retrieved VM (config.hardware
+// must be populated). Errors on a non-flat backing so the caller can fall back to
+// the NFC transport, which can read any backing.
+func flatDisksOf(vm *mo.VirtualMachine) ([]flatDisk, error) {
+	if vm.Config == nil {
+		return nil, fmt.Errorf("source VM has no hardware config")
+	}
+	var disks []flatDisk
+	for _, d := range vm.Config.Hardware.Device {
+		vd, ok := d.(*types.VirtualDisk)
+		if !ok {
+			continue
+		}
+		b, ok := vd.Backing.(*types.VirtualDiskFlatVer2BackingInfo)
+		if !ok {
+			return nil, fmt.Errorf("disk has a non-flat backing (%T) this transport can't read — use the NFC transport", vd.Backing)
+		}
+		if b.Datastore == nil {
+			return nil, fmt.Errorf("disk backing has no datastore reference")
+		}
+		rel := b.FileName // "[dsName] dir/name.vmdk"
+		if i := strings.Index(rel, "] "); i >= 0 {
+			rel = rel[i+2:]
+		}
+		dir := ""
+		if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+			dir = rel[:i]
+		}
+		lbl := ""
+		if vd.DeviceInfo != nil {
+			lbl = vd.DeviceInfo.GetDescription().Label
+		}
+		disks = append(disks, flatDisk{ds: b.Datastore, dir: dir, desc: rel, fileName: b.FileName, capBytes: vd.CapacityInKB * 1024, label: lbl})
+	}
+	if len(disks) == 0 {
+		return nil, fmt.Errorf("source VM has no flat disks")
+	}
+	return disks, nil
 }
 
 func sanitizeName(p string) string {

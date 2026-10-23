@@ -1,0 +1,536 @@
+{{define "topochart"}}
+<script>
+window.VXChart = (function(){
+  var ESC=function(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+  function drawTopo(topo, hostEl){
+    var host=hostEl||document.getElementById('topo');
+    var sws=(topo&&topo.switches)||[];
+    var vrsAll=(topo&&topo.vrouters)||[];
+    if(!sws.length && !vrsAll.length){ host.innerHTML='<div class="empty">No vSwitches or networks yet. Create a port group to see the diagram.</div>'; return; }
+    var cs=getComputedStyle(document.documentElement);
+    function v(n,f){var x=cs.getPropertyValue(n).trim();return x||f;}
+    var C={panel:v('--panel','#121722'),panel2:v('--panel2','#1a2130'),line:v('--line','#27303f'),
+      fg:v('--fg','#e6e9ef'),muted:v('--muted','#8a93a6'),primary:v('--primary','#3b82f6'),
+      accent:v('--accent','#f59e0b'),ok:v('--ok','#34d399'),bad:v('--bad','#f87171')};
+
+    // text measuring (canvas) so boxes size to their content instead of clipping
+    var _mctx=document.createElement('canvas').getContext('2d');
+    function measure(s,px,wt){ _mctx.font=(wt||400)+' '+px+"px 'Fira Sans',system-ui,sans-serif"; return _mctx.measureText(String(s==null?'':s)).width; }
+    function fit(s,px,wt,maxw){ s=String(s==null?'':s); if(measure(s,px,wt)<=maxw) return s; var t=s; while(t.length>1 && measure(t+'…',px,wt)>maxw) t=t.slice(0,-1); return t+'…'; }
+    function kindOf(sw){ return sw.kind==='standard'?'Standard Switch':sw.kind==='overlay'?'Overlay (VXLAN)':sw.kind==='management'?'Management':'User-mode (NAT)'; }
+
+    // geometry
+    var pad=18, pgW=330, upW=210, colGap=84, pgColGap=170, blkGap=34; // pgColGap: wider PG→vSwitch/vRouter gap so the transit-subnet label on that line is readable
+    var pgHdr=44, vmRow=42, pgFoot=14, pgGap=14;        // port group box (vmRow leaves padding between name borders)
+    var vmIpExtra=22;                                   // extra row height when a VM shows its IP (keeps border roomy)
+    var vmkH=48;                                        // host-adapter (host IP) box (1 IP)
+    // One host-adapter box grows to hold all its IPs (IPv4 + IPv6 on one adapter).
+    function vmkHeight(vmk){ return 24+Math.max((vmk.ips||[]).length,1)*15+9; }
+    var nicH=48, bondHdr=34, bondRow=22, bondFoot=12, upGap=14; // uplink / LAG box
+    // Center column width = the widest vSwitch label it must hold (name, kind,
+    // address — IPv6 can be long — and the counts line), clamped to a sane max.
+    var swW=140;
+    sws.forEach(function(sw){
+      swW=Math.max(swW, measure(sw.name,14,700)+28, measure(kindOf(sw),11,400)+24,
+        measure(((sw.port_groups||[]).length)+' PG · '+((sw.uplinks||[]).length)+' uplink',10,400)+24);
+      (sw.addrs||[]).forEach(function(a){ swW=Math.max(swW, measure(a,10,400)+22); });
+    });
+    swW=Math.min(Math.round(swW),420);
+    // Is any uplink wired to an upstream switch we've heard via LLDP/CDP? If so,
+    // reserve a right-hand column for the "Switch" boxes.
+    var hasNbr=sws.some(function(sw){return (sw.uplinks||[]).some(function(u){return (u.neighbors||[]).length;});});
+    var switchW=236;
+    var pgX=pad, swX=pgX+pgW+pgColGap, upX=swX+swW+colGap;
+    var switchX=upX+upW+colGap;
+    var W=(hasNbr?switchX+switchW:upX+upW)+pad;
+
+    function rect(x,y,w,h,fill,stroke,r,dash,sw){return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="'+(r||9)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="'+(sw||1)+'"'+(dash?' stroke-dasharray="5 4"':'')+'/>';}
+    function txt(x,y,s,fill,anchor,wt,sz){return '<text x="'+x+'" y="'+y+'" fill="'+(fill||C.fg)+'" text-anchor="'+(anchor||'start')+'"'+(wt?' font-weight="'+wt+'"':'')+(sz?' font-size="'+sz+'"':'')+'>'+ESC(s)+'</text>';}
+    function conn(x1,y1,x2,y2,col,on){var dx=Math.max(30,(x2-x1)/2);return '<path d="M'+x1+' '+y1+' C'+(x1+dx)+' '+y1+' '+(x2-dx)+' '+y2+' '+x2+' '+y2+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+(on?'.85':'.4')+'"'+(on?'':' stroke-dasharray="5 4"')+'/>';}
+    function dot(x,y,running){return '<circle cx="'+x+'" cy="'+y+'" r="4" fill="'+(running?C.ok:C.muted)+'"/>';}
+    function monitor(x,y,col){ // tiny VM/monitor glyph, top-left at x,y (14x12)
+      return '<rect x="'+x+'" y="'+y+'" width="14" height="10" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+             '<rect x="'+(x+5)+'" y="'+(y+10)+'" width="4" height="2.5" fill="'+col+'"/>';
+    }
+    function nicGlyph(x,y,col){ // tiny ethernet-port glyph (14x12)
+      return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+             '<rect x="'+(x+4)+'" y="'+(y+9)+'" width="6" height="3" fill="'+col+'"/>';
+    }
+    function ctGlyph(x,y,col){ // tiny container/box glyph (14x12) — distinguishes LXC
+      return '<rect x="'+x+'" y="'+y+'" width="14" height="12" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
+             '<path d="M'+x+' '+(y+4)+' h14 M'+(x+7)+' '+y+' v12" stroke="'+col+'" stroke-width="1.1"/>';
+    }
+    // Cisco-style ROUTER icon (circle/puck + two opposing arrows: routes both ways), centered at cx,cy.
+    function iconRouter(cx,cy,col){
+      function head(x,y,dir){ var d=dir>0?-1:1; // arrowhead at (x,y) pointing in dir (+1 right / -1 left)
+        return '<path d="M'+(x+d*3)+' '+(y-2.3)+' L'+x+' '+y+' L'+(x+d*3)+' '+(y+2.3)+'" fill="none" stroke="'+col+'" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/>'; }
+      var r=9;
+      return '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+col+'" stroke-width="1.6"/>'
+        +'<path d="M'+(cx-4.5)+' '+(cy-3)+' H'+(cx+4.5)+'" stroke="'+col+'" stroke-width="1.3"/>'+head(cx+4.5,cy-3,1)
+        +'<path d="M'+(cx+4.5)+' '+(cy+3)+' H'+(cx-4.5)+'" stroke="'+col+'" stroke-width="1.3"/>'+head(cx-4.5,cy+3,-1);
+    }
+    // Cisco-style SWITCH icon (flat chassis + two bidirectional arrows: switches ports), centered at cx,cy.
+    function iconSwitch(cx,cy,col){
+      function bi(x1,x2,y){ return '<path d="M'+x1+' '+y+' H'+x2+'" stroke="'+col+'" stroke-width="1.2"/>'
+        +'<path d="M'+(x1+2.8)+' '+(y-2.1)+' L'+x1+' '+y+' L'+(x1+2.8)+' '+(y+2.1)+'" fill="none" stroke="'+col+'" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round"/>'
+        +'<path d="M'+(x2-2.8)+' '+(y-2.1)+' L'+x2+' '+y+' L'+(x2-2.8)+' '+(y+2.1)+'" fill="none" stroke="'+col+'" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round"/>'; }
+      var bw=22, bh=14, bx=cx-bw/2, by=cy-bh/2;
+      return '<rect x="'+bx+'" y="'+by+'" width="'+bw+'" height="'+bh+'" rx="3" fill="none" stroke="'+col+'" stroke-width="1.5"/>'
+        +bi(bx+5,bx+bw-5,cy-3)+bi(bx+5,bx+bw-5,cy+3);
+    }
+
+    function pgHeight(pg){ var vms=pg.vms||[]; if(!vms.length) return pgHdr+vmRow+pgFoot; var h=pgHdr+pgFoot; vms.forEach(function(vm){ h+=vmRow+(vm.ip?vmIpExtra:0); }); return h; }
+    function upHeight(up){return up.kind==='bond'?(bondHdr+Math.max((up.members||[]).length,1)*bondRow+bondFoot):nicH;}
+
+    function pgBox(x,y,pg,col){
+      var o='';
+        var vms=pg.vms||[], h=pgHeight(pg);
+        o+=rect(x,y,pgW,h,C.panel,col,9,false,1.4);
+        // left accent spine on the port group
+        o+='<rect x="'+x+'" y="'+y+'" width="4" height="'+h+'" fill="'+col+'"/>';
+        // VLAN badge (drawn first so the name can be fit to the space left of it)
+        var badge=pg.vlan?('VLAN '+pg.vlan):'untagged';
+        var bw=measure(badge,11,600)+16;
+        o+='<rect x="'+(x+pgW-bw-10)+'" y="'+(y+9)+'" width="'+bw+'" height="18" rx="9" fill="none" stroke="'+col+'"/>';
+        o+=txt(x+pgW-10-bw/2,y+22,badge,col,'middle',600,11);
+        o+='<text x="'+(x+14)+'" y="'+(y+22)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(pg.name)+'</title>'+ESC(fit(pg.name,13,700,pgW-bw-36))+'</text>';
+        if(pg.cidr) o+=txt(x+14,y+36,fit(pg.cidr,11,400,pgW-28),C.muted,'start',400,11);
+        var exitY=y+h/2; // where the main line leaves the port-group box
+        if(vms.length){
+          // Mini network bus: a tight square enclosing every VM's state dot. Each VM
+          // (and a container's veth) draws a line INTO this bus; the bus then runs out
+          // of the box on the main line to the vSwitch — the port group's internal bus.
+          // Rows have variable height: a VM with a known IP gets an extra line below it.
+          var rowY=[], cur=y+pgHdr; vms.forEach(function(vm){ rowY.push(cur); cur+=vmRow+(vm.ip?vmIpExtra:0); });
+          var mids=rowY.map(function(ry){return ry+9;});
+          var busHalf=9, dotX=x+pgW-20, busX=dotX-busHalf, busR=dotX+busHalf;
+          var bTop=mids[0]-busHalf, bBot=mids[mids.length-1]+busHalf, bMid=(bTop+bBot)/2;
+          exitY=bMid; // the box exit aligns with the bus, so the bus→edge line is straight
+          o+=rect(busX,bTop,busHalf*2,bBot-bTop,C.panel2,col,6,false,1.3);
+          // bus → box edge: a STRAIGHT horizontal segment (then the curve to the vSwitch)
+          o+='<line x1="'+busR+'" y1="'+bMid+'" x2="'+(x+pgW)+'" y2="'+bMid+'" stroke="'+col+'" stroke-width="1.6" opacity=".6"/>';
+          vms.forEach(function(vm,i){
+            var ry=rowY[i], mid=mids[i];
+            var col=vm.state==='running'?C.ok:C.muted;
+            o+=(vm.kind==='container'?ctGlyph(x+16,ry+2,col):monitor(x+16,ry+3,col));
+            var nmR; // right edge of the VM-name text (for the enclosing border)
+            if(vm.kind==='container' && vm.veth){
+              // name ——— [veth] ——— bus
+              var chipW=Math.min(96, measure(vm.veth,9,600)+14);
+              var chipRight=busX-10, chipX=chipRight-chipW;
+              var label=vm.name+' (lxc)';
+              var lbl=fit(label,12,400,chipX-12-(x+40));
+              o+='<text x="'+(x+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(label)+'</title>'+ESC(lbl)+'</text>';
+              nmR=x+40+measure(lbl,12,400);
+              o+='<line x1="'+(nmR+8)+'" y1="'+mid+'" x2="'+chipX+'" y2="'+mid+'" stroke="'+col+'" stroke-width="1.3" opacity=".6"/>';
+              o+=rect(chipX,ry+1,chipW,16,C.panel2,col,8,false,1.1);
+              o+='<text x="'+(chipX+chipW/2)+'" y="'+(mid+3.5)+'" fill="'+col+'" text-anchor="middle" font-size="9" font-weight="600"><title>veth pair · host side '+ESC(vm.veth)+'</title>'+ESC(fit(vm.veth,9,600,chipW-8))+'</text>';
+              o+='<line x1="'+(chipX+chipW)+'" y1="'+mid+'" x2="'+busX+'" y2="'+mid+'" stroke="'+col+'" stroke-width="1.3" opacity=".6"/>';
+            } else {
+              // name ——— bus
+              var label=(vm.name||vm.tap)+(vm.kind==='container'?' (lxc)':'');
+              var lbl2=fit(label,12,400,busX-16-(x+40));
+              o+='<text x="'+(x+40)+'" y="'+(ry+14)+'" fill="'+C.fg+'" font-size="12"><title>'+ESC(label)+'</title>'+ESC(lbl2)+'</text>';
+              nmR=x+40+measure(lbl2,12,400);
+              o+='<line x1="'+(nmR+8)+'" y1="'+mid+'" x2="'+busX+'" y2="'+mid+'" stroke="'+col+'" stroke-width="1.2" opacity=".45"/>';
+            }
+            // DHCP/guest IP under the VM name: a little └ then the address
+            var bBotY=ry+24; // border bottom when there's no IP line (generous bottom pad)
+            if(vm.ip){
+              var lx=x+46, lt=ry+18, lb=ry+30;
+              o+='<path d="M'+lx+' '+lt+' V'+lb+' H'+(lx+8)+'" fill="none" stroke="'+C.muted+'" stroke-width="1.3"/>';
+              var ipFit=fit(vm.ip,11,600,busX-(lx+13)-10);
+              o+='<text x="'+(lx+13)+'" y="'+(lb+4)+'" fill="'+C.fg+'" font-size="11" font-weight="600"><title>'+ESC(vm.ip)+'</title>'+ESC(ipFit)+'</text>';
+              nmR=Math.max(nmR,(lx+13)+measure(ipFit,11,600)); // IP may be wider than the name
+              bBotY=lb+11;
+            }
+            // very thin border wrapping the whole VM name (and its IP, when shown),
+            // with generous inner padding on every side
+            var bX=x+32, bY=ry-3;
+            o+=rect(bX,bY,(nmR+12)-bX,bBotY-bY,'none',C.line,6,false,1);
+            o+=dot(dotX,mid,vm.state==='running'); // the dot sits inside the bus square
+          });
+        } else {
+          o+=txt(x+40,y+pgHdr+14,'(no VMs attached)',C.muted,'start',400,12);
+        }
+      return {svg:o,exitY:exitY,h:h};
+    }
+
+    // Reusable vSwitch/vRouter center box (title + glyph + centered lines + footer).
+    // ---- shared styled-HTML tooltip helpers (used by the LLDP box + the vRouter) ----
+    var TIPMONO="font-family:'Fira Code',ui-monospace,SFMono-Regular,monospace";
+    function tipChip(s){ return s? '<span style="'+TIPMONO+';font-size:11px;background:var(--panel3,#212a3a);'
+      +'border:1px solid var(--line,#39414f);border-radius:5px;padding:1px 6px;white-space:nowrap">'+ESC(s)+'</span>':''; }
+    function tipPill(s,bg,fg){ return '<span style="font-size:11px;background:'+bg+';color:'+fg+';border-radius:5px;'
+      +'padding:1px 7px;font-weight:600">'+ESC(s)+'</span>'; }
+    function tipSect(t){ return '<div style="margin:11px 0 6px;color:var(--muted,#8a93a6);font-size:10px;font-weight:700;'
+      +'letter-spacing:.09em;border-top:1px solid var(--line,#39414f);padding-top:8px">'+ESC(t)+'</div>'; }
+    function tipKV(k,vhtml){ return '<div style="display:flex;gap:10px;margin:3px 0;align-items:baseline">'
+      +'<span style="color:var(--muted,#8a93a6);min-width:54px;flex:none;font-size:11px">'+ESC(k)+'</span>'
+      +'<span style="'+TIPMONO+';font-size:12px">'+vhtml+'</span></div>'; }
+    function tipHeader(name,rightHTML){ return '<div style="display:flex;align-items:center;gap:10px">'
+      +'<span style="font-weight:700;font-size:14px;color:var(--fg,#e7ecf3)">'+ESC(name)+'</span>'
+      +'<span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px">'+(rightHTML||'')+'</span></div>'; }
+    function tipWrap(inner){ return encodeURIComponent('<div style="min-width:248px;max-width:360px">'+inner+'</div>'); }
+    // A labelled arrow chain, e.g. vRouter(eth0) → Bridge(vr4-wan) → Port group(bgp-test).
+    // pairs = [[label,value],...]; empty-value hops are dropped.
+    function tipRel(pairs){
+      var parts=pairs.filter(function(p){return p[1];}).map(function(p){
+        return '<span style="color:var(--muted,#8a93a6);font-size:11px">'+ESC(p[0])+'(</span>'
+          +'<span style="'+TIPMONO+';font-size:11px;color:var(--fg,#e7ecf3)">'+ESC(p[1])+'</span>'
+          +'<span style="color:var(--muted,#8a93a6);font-size:11px">)</span>'; });
+      var arrow='<span style="color:var(--muted,#8a93a6);margin:0 5px">→</span>';
+      return '<div style="margin:5px 0;line-height:1.7">'+parts.join(arrow)+'</div>';
+    }
+    // Styled LLDP/CDP neighbour tooltip. s={name,descr,mgmt,via,conns:[{local,remote,vlan}]}.
+    function lldpTipHTML(s,via){
+      var conns=s.conns||[];
+      var h=tipHeader(s.name||'(unknown switch)', tipPill(via,'var(--panel3,#212a3a)','var(--muted,#8a93a6)'));
+      h+='<div style="height:2px"></div>';
+      if(s.mgmt) h+=tipKV('mgmt IP', ESC(s.mgmt));
+      if(s.descr) h+=tipKV('platform', ESC(s.descr));
+      if(!s.mgmt && !s.descr && !conns.length) h+='<div style="color:var(--muted,#8a93a6);font-size:12px;margin-top:4px">no neighbour detail</div>';
+      if(conns.length){
+        h+=tipSect('LINKS ('+conns.length+')');
+        conns.forEach(function(c){
+          var line=tipChip(c.local||'?')+'<span style="color:var(--muted,#8a93a6)">→</span>'+tipChip(c.remote||'?');
+          if(c.vlan) line+='<span style="color:var(--muted,#8a93a6);font-size:11px">vlan '+ESC(c.vlan)+'</span>';
+          h+='<div style="margin:5px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap">'+line+'</div>';
+        });
+      }
+      return tipWrap(h);
+    }
+    function spineBox(x,top,w,h,title,accent,glyph,lines,footer){
+      var o='', col=accent?C.accent:C.muted, ty, lineYs=[]; // lineYs[i] = vertical MID of lines[i] (for exact link alignment)
+      o+=rect(x,top,w,h,C.panel2,col,10,false,accent?2:1.5);
+      if(glyph==='router'){
+        // vRouter box: Cisco router icon on top, title below, then lines.
+        o+=iconRouter(x+w/2,top+16,col);
+        o+=txt(x+w/2,top+38,title,col,'middle',700,11); ty=top+56;
+        (lines||[]).forEach(function(ln){ var sz=ln.sz||12; o+='<text x="'+(x+w/2)+'" y="'+ty+'" fill="'+(ln.fill||C.fg)+'" text-anchor="middle" font-weight="'+(ln.wt||400)+'" font-size="'+sz+'"><title>'+ESC(ln.t)+'</title>'+ESC(fit(ln.t,sz,ln.wt||400,w-16))+'</text>'; lineYs.push(ty-sz/3); ty+=sz+4; });
+      } else {
+        // vSwitch box: Cisco switch icon + title + lines, centered as ONE group (both axes).
+        var rows=[{t:title,sz:11,wt:600,fill:C.muted}].concat(lines||[]);
+        var gap=7, iconH=(glyph==='switch')?18:0, iconGap=(iconH?9:0);
+        var blockH=rows.reduce(function(a,r){return a+(r.sz||12);},0)+gap*(rows.length-1)+iconH+iconGap;
+        var topY=top+(h-blockH)/2;
+        if(iconH){ o+=iconSwitch(x+w/2,topY+iconH/2,col); }
+        var by=topY+iconH+iconGap+(rows[0].sz||12); // first baseline after the icon
+        rows.forEach(function(r){ var sz=r.sz||12; o+='<text x="'+(x+w/2)+'" y="'+by+'" fill="'+(r.fill||C.fg)+'" text-anchor="middle" font-weight="'+(r.wt||400)+'" font-size="'+sz+'"><title>'+ESC(r.t)+'</title>'+ESC(fit(r.t,sz,r.wt||400,w-16))+'</text>'; lineYs.push(by-sz/3); by+=sz+gap; });
+      }
+      if(footer) o+=txt(x+w/2,top+h-12,footer,C.muted,'middle',400,10);
+      return {svg:o,lineYs:lineYs};
+    }
+    // Reusable upstream-switch (LLDP/CDP) box. s={name,descr,mgmt,via,conns:[{local,remote,vlan}]}.
+    function upBox(x,y,w,s){
+      var o='', via=s.via||'LLDP', vw=measure(via,9,600)+14;
+      var boxH=36+(s.descr?15:0)+(s.mgmt?15:0)+((s.conns||[]).length)*15+14;
+      o+=rect(x,y,w,boxH,C.panel,C.muted,9,false,1.4);
+      o+='<rect x="'+(x+w-4)+'" y="'+y+'" width="4" height="'+boxH+'" fill="'+C.muted+'"/>';
+      o+='<rect x="'+(x+12)+'" y="'+(y+12)+'" width="16" height="5" rx="1" fill="none" stroke="'+C.fg+'" stroke-width="1.2"/>';
+      o+='<rect x="'+(x+12)+'" y="'+(y+19)+'" width="16" height="5" rx="1" fill="none" stroke="'+C.fg+'" stroke-width="1.2"/>';
+      o+='<rect x="'+(x+w-vw-10)+'" y="'+(y+10)+'" width="'+vw+'" height="16" rx="8" fill="none" stroke="'+C.muted+'"/>';
+      o+=txt(x+w-10-vw/2,y+21,via,C.muted,'middle',600,9);
+      // Hostname is hover-able: a rich styled tooltip shows the FULL LLDP/CDP neighbour info.
+      o+='<text x="'+(x+36)+'" y="'+(y+24)+'" class="lldptip" data-tiphtml="'+lldpTipHTML(s,via)+'" style="cursor:help" fill="'+C.fg+'" font-weight="700" font-size="13">'+ESC(fit(s.name||'(unknown switch)',13,700,w-vw-54))+'</text>';
+      var ly=y+40;
+      if(s.descr){ o+='<text x="'+(x+14)+'" y="'+ly+'" fill="'+C.muted+'" font-size="11"><title>'+ESC(s.descr)+'</title>'+ESC(fit(s.descr,11,400,w-28))+'</text>'; ly+=15; }
+      if(s.mgmt){ o+=txt(x+14,ly,'mgmt '+fit(s.mgmt,11,400,w-70),C.muted,'start',400,11); ly+=15; }
+      (s.conns||[]).forEach(function(c){ var line=(c.local||'?')+' → '+(c.remote||'?')+(c.vlan?(' · vlan '+c.vlan):''); o+='<text x="'+(x+14)+'" y="'+ly+'" fill="'+C.fg+'" font-size="11"><title>'+ESC(line)+'</title>'+ESC(fit(line,11,400,w-28))+'</text>'; ly+=15; });
+      return {svg:o,h:boxH};
+    }
+
+    var y=pad, svg='', H=pad;
+    // Upstream switches collapse by identity (mgmt IP, else chassis name): all the
+    // uplinks landing on ONE physical switch share ONE box, drawn after the blocks.
+    var upSwitches={}, upOrder=[];
+    sws.forEach(function(sw){
+      var pgs=sw.port_groups||[], ups=sw.uplinks||[];
+      var vmks=sw.vmks||[];
+      var leftH=0; vmks.forEach(function(vmk){leftH+=vmkHeight(vmk);}); pgs.forEach(function(pg){leftH+=pgHeight(pg);}); leftH+=pgGap*Math.max(vmks.length+pgs.length-1,0);
+      var rightH=0; ups.forEach(function(up){rightH+=upHeight(up);}); rightH+=upGap*Math.max(ups.length-1,0);
+      var blkH=Math.max(leftH,rightH,130);
+      var top=y, cy=top+blkH/2;
+
+      // vSwitch spine (center) — reusable box (also used for vRouter nodes below)
+      // No IP on the vSwitch box itself — the host's IP is shown under its host-adapter box.
+      var slines=[{t:sw.name,fill:C.fg,sz:14,wt:700},{t:kindOf(sw),fill:C.muted,sz:11}];
+      svg+=spineBox(swX,top,swW,blkH,'vSwitch',false,'switch',slines,pgs.length+' PG · '+ups.length+' uplink').svg;
+
+      // host adapters (host IPs — management/storage) then port groups (left)
+      var py=top+(blkH-leftH)/2;
+      vmks.forEach(function(vmk){
+        var vh=vmkHeight(vmk), ips=vmk.ips||[];
+        svg+=rect(pgX,py,pgW,vh,C.panel,C.ok,9,false,1.4);
+        svg+='<rect x="'+pgX+'" y="'+py+'" width="4" height="'+vh+'" fill="'+C.ok+'"/>';
+        svg+=nicGlyph(pgX+16,py+16,C.ok);
+        var vb=measure('host adapter',11,600)+16;
+        svg+='<rect x="'+(pgX+pgW-vb-10)+'" y="'+(py+9)+'" width="'+vb+'" height="18" rx="9" fill="none" stroke="'+C.ok+'"/>';
+        svg+=txt(pgX+pgW-10-vb/2,py+22,'host adapter',C.ok,'middle',600,11);
+        svg+='<text x="'+(pgX+40)+'" y="'+(py+20)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(vmk.iface)+'</title>'+ESC(fit(vmk.label,13,700,pgW-vb-60))+'</text>';
+        // all IPs on this one adapter, one line each (IPv4 then IPv6)
+        ips.forEach(function(ip,i){ svg+=txt(pgX+40,py+36+i*15,fit(ip,11,400,pgW-60),C.muted,'start',400,11); });
+        svg+=conn(pgX+pgW,py+vh/2,swX,cy,C.ok,true);
+        py+=vh+pgGap;
+      });
+      pgs.forEach(function(pg){
+        var r=pgBox(pgX,py,pg,C.primary); svg+=r.svg;
+        svg+=conn(pgX+pgW,r.exitY,swX,cy,C.primary,true);
+        py+=r.h+pgGap;
+      });
+
+      // Uplinks / LAGs (right)
+      var uy=top+(blkH-rightH)/2;
+      ups.forEach(function(up){
+        var h=upHeight(up), on=up.state!=='down';
+        svg+=conn(swX+swW,cy,upX,uy+h/2,C.accent,on);
+        if(up.kind==='bond'){
+          var mem=up.members||[];
+          svg+=rect(upX,uy,upW,h,C.panel,C.accent,9,false,1.6);
+          svg+='<rect x="'+(upX+upW-4)+'" y="'+uy+'" width="4" height="'+h+'" fill="'+C.accent+'"/>';
+          var mode=(up.mode==='lacp'?'LACP (802.3ad)':up.mode==='etherchannel'?'Etherchannel':up.mode||'bond');
+          var mw=measure(mode,10,600);
+          svg+=txt(upX+upW-12,uy+21,mode,C.accent,'end',600,10);
+          svg+=txt(upX+12,uy+21,fit('LAG · '+up.name,13,700,upW-mw-30),C.fg,'start',700,13);
+          mem.forEach(function(m,i){
+            var ry=uy+bondHdr+i*bondRow;
+            svg+=nicGlyph(upX+14,ry-1,C.muted);
+            svg+=txt(upX+36,ry+10,fit(m,12,400,upW-48),C.fg,'start',400,12);
+          });
+          if(!mem.length) svg+=txt(upX+36,uy+bondHdr+10,'(no members)',C.muted,'start',400,12);
+        }else{
+          svg+=rect(upX,uy,upW,h,C.panel,C.accent,9,false,1.4);
+          svg+='<rect x="'+(upX+upW-4)+'" y="'+uy+'" width="4" height="'+h+'" fill="'+C.accent+'"/>';
+          svg+=nicGlyph(upX+14,uy+12,C.accent);
+          svg+=txt(upX+38,uy+22,fit(up.name,13,700,upW-64),C.fg,'start',700,13);
+          var meta=(up.speed?(up.speed>=1000?(up.speed/1000)+' GbE':up.speed+' Mb/s'):'')+(up.speed&&up.state?' · ':'')+(up.state||'');
+          svg+=txt(upX+38,uy+38,meta||'physical adapter',C.muted,'start',400,11);
+          svg+=dot(upX+upW-16,uy+h/2,on);
+        }
+        // Record the upstream switch(es) this uplink's port(s) learned via LLDP/CDP.
+        // We do NOT draw per-port boxes — several uplinks on the SAME physical switch
+        // collapse into one box (drawn after all blocks). Each neighbor contributes a
+        // connection line (local port → remote port · vlan) and an anchor to wire from.
+        var anchor={x:upX+upW, y:uy+h/2};
+        (up.neighbors||[]).forEach(function(nb){
+          var k=nb.mgmt_ip||nb.switch_name||'?';
+          var s=upSwitches[k];
+          if(!s){ s=upSwitches[k]={name:nb.switch_name,descr:nb.switch_descr,mgmt:nb.mgmt_ip,via:nb.via,conns:[],anchors:[],akeys:{}}; upOrder.push(k); }
+          s.conns.push({local:nb.local||up.name, remote:nb.port_id, vlan:nb.vlan});
+          var ak=anchor.x+','+anchor.y;
+          if(!s.akeys[ak]){ s.akeys[ak]=1; s.anchors.push(anchor); }
+        });
+        uy+=h+upGap;
+      });
+      if(!ups.length){
+        svg+=rect(upX,cy-20,upW,40,C.panel,C.line,9,true,1.2);
+        svg+=txt(upX+upW/2,cy+4,'no uplink (internal only)',C.muted,'middle',400,12);
+        svg+=conn(swX+swW,cy,upX,cy,C.muted,false);
+      }
+
+      // column captions on the first block, centered over each column
+      if(sw===sws[0]){
+        svg+=txt(pgX+pgW/2,top-8,'PORT GROUPS',C.muted,'middle',700,10);
+        svg+=txt(swX+swW/2,top-8,'VSWITCH',C.muted,'middle',700,10);
+        svg+=txt(upX+upW/2,top-8,'PHYSICAL ADAPTERS',C.muted,'middle',700,10);
+        if(hasNbr) svg+=txt(switchX+switchW/2,top-8,'UPSTREAM SWITCH',C.muted,'middle',700,10);
+      }
+      y=top+blkH+blkGap; H=y;
+    });
+
+    // Consolidated upstream-switch boxes: one per distinct physical switch, listing
+    // every uplink port that lands on it, wired from each contributing uplink.
+    if(upOrder.length){
+      var floor=pad+14;
+      upOrder.forEach(function(k){
+        var s=upSwitches[k], h=upBox(switchX,0,switchW,s).h;
+        // Center the box on its uplink anchor(s) so the wire runs 100% horizontal
+        // (single uplink → exact; multiple → their mean). Never ride above the box before it.
+        var want=s.anchors.reduce(function(a,b){return a+b.y;},0)/Math.max(s.anchors.length,1)-h/2;
+        var boxY=Math.max(floor,want), cy=boxY+h/2;
+        s.anchors.forEach(function(a){ svg+='<line x1="'+a.x+'" y1="'+a.y+'" x2="'+switchX+'" y2="'+cy+'" stroke="'+C.muted+'" stroke-width="2" opacity=".6"/>'; });
+        svg+=upBox(switchX,boxY,switchW,s).svg;
+        floor=boxY+h+16;
+      });
+      H=Math.max(H, floor+pad);
+    }
+    // ---- Virtual routers: single-flow chains (port groups → vRouter → transit → external) ----
+    var VRP=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#ec4899','#14b8a6','#f97316','#22c55e'];
+    var vrs=(topo&&topo.vrouters)||[];
+      if(vrs.length){
+        var hdrY=H+30; if(sws.length) svg+=txt(pad,hdrY,'VIRTUAL ROUTERS',C.muted,'start',700,10);
+        var cy0=hdrY+16, vrW2=swW, trW2=150, exW2=switchW, cg1=swX-(pgX+pgW);
+        // Columns line up with the top map: vRouter under the vSwitch column, external
+        // LLDP box under the upstream-switch column; the transit box centers in between.
+        var pgX2=pgX, vrX2=swX, exX2=switchX, trX2=(vrX2+vrW2+exX2)/2-trW2/2;
+        W=Math.max(W, exX2+exW2+pad);
+        // Faint monospace "cable tag" for a bridge/device name, left-anchored on a wire.
+        function devTag(x,y,name,avail){ if(!name) return '';
+          return '<text x="'+x+'" y="'+y+'" fill="'+C.muted+'" text-anchor="start" '
+            +'font-family="\'Fira Code\',ui-monospace,SFMono-Regular,monospace" font-size="10.5" '
+            +'font-weight="500" opacity=".9" style="cursor:default"><title>'+ESC(name)+'</title>'
+            +ESC(fit(name,10.5,500,avail))+'</text>'; }
+        // Router-detail breakdown for the vRouter hover tooltip — styled HTML (URI-encoded).
+        // Every dynamic value is ESC'd before it reaches innerHTML (decode+innerHTML would
+        // otherwise execute injected markup).
+        function vrTipHTML(vr){
+          var t=vr.transit||{}, intl=vr.internal||[], e=ESC;
+          var MONO="font-family:'Fira Code',ui-monospace,SFMono-Regular,monospace";
+          function chip(s){ return s? '<span style="'+MONO+';font-size:11px;background:var(--panel3,#212a3a);'
+            +'border:1px solid var(--line,#39414f);border-radius:5px;padding:1px 6px;white-space:nowrap">'+e(s)+'</span>':''; }
+          function sect(title){ return '<div style="margin:11px 0 6px;color:var(--muted,#8a93a6);font-size:10px;'
+            +'font-weight:700;letter-spacing:.09em;border-top:1px solid var(--line,#39414f);padding-top:8px">'+e(title)+'</div>'; }
+          function kv(k,vhtml){ return '<div style="display:flex;gap:10px;margin:3px 0;align-items:baseline">'
+            +'<span style="color:var(--muted,#8a93a6);min-width:54px;flex:none;font-size:11px">'+e(k)+'</span>'
+            +'<span style="'+MONO+';font-size:12px">'+vhtml+'</span></div>'; }
+          var st=vr.health==='up'?['healthy','var(--ok,#34d399)']
+                 :vr.health==='down'?['peer down','var(--danger,#f87171)']
+                 :['idle','var(--muted,#8a93a6)'];
+          var h='<div style="min-width:248px;max-width:360px">';
+          // header: name + status dot
+          h+='<div style="display:flex;align-items:center;gap:10px">'
+            +'<span style="font-weight:700;font-size:14px;color:var(--fg,#e7ecf3)">'+e(vr.name||'vRouter')+'</span>'
+            +'<span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;color:'+st[1]+'">'
+            +'<span style="width:8px;height:8px;border-radius:50%;background:'+st[1]+'"></span>'+st[0]+'</span></div>';
+          // meta: runtime chip + routing pills
+          var pills=[]; if(vr.runtime) pills.push(chip(vr.runtime));
+          (vr.routing||[]).forEach(function(r){ pills.push('<span style="font-size:11px;background:var(--primary-soft,#14213d);'
+            +'color:var(--primary,#3b82f6);border-radius:5px;padding:1px 7px;font-weight:600">'+e(r)+'</span>'); });
+          if(!(vr.routing||[]).length) pills.push('<span style="font-size:11px;color:var(--muted,#8a93a6)">no routing</span>');
+          h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">'+pills.join('')+'</div>';
+          // transit
+          h+=sect('TRANSIT');
+          h+=tipRel([['vRouter',t.iface||'eth0'],['Bridge',t.bridge||'—']]);
+          if(t.cidr) h+=kv('address', e(t.cidr));
+          if(t.phys){ var up=e(t.phys); if(t.switch){ up+=' <span style="color:var(--muted,#8a93a6)">→</span> '+e(t.switch)+(t.port?' '+e(t.port):''); } h+=kv('uplink', up); }
+          if(!t.cidr && !t.phys) h+='<div style="color:var(--muted,#8a93a6);font-size:12px">no transit link</div>';
+          // internal segments
+          h+=sect('INTERNAL SEGMENTS ('+intl.length+')');
+          if(!intl.length) h+='<div style="color:var(--muted,#8a93a6);font-size:12px">none</div>';
+          intl.forEach(function(pg){
+            h+=tipRel([['Port group',pg.name||''],['Bridge',pg.bridge||''],['vRouter',pg.iface||'']]);
+            var d='<span style="color:var(--muted,#8a93a6)">gw</span> '+e(pg.gw||'—');
+            if(pg.subnet) d+='  <span style="color:var(--muted,#8a93a6)">net</span> '+e(pg.subnet);
+            var nv=(pg.vms||[]).length; if(nv) d+='  <span style="color:var(--muted,#8a93a6)">·</span> '+nv+' VM'+(nv>1?'s':'');
+            h+='<div style="'+MONO+';font-size:11px;padding-left:1px">'+d+'</div>';
+          });
+          h+='</div>';
+          return encodeURIComponent(h);
+        }
+        vrs.forEach(function(vr){
+          var intl=vr.internal||[], t=vr.transit, multi=intl.length>1;
+          var stackH=0; intl.forEach(function(pg){stackH+=pgHeight(pg);}); stackH+=pgGap*Math.max(intl.length-1,0);
+          var exConns=(t&&(t.phys||t.port))?1:0, exH=36+((t&&t.descr)?15:0)+((t&&t.mgmt)?15:0)+exConns*15+14;
+          var vrH2=Math.max(96, 54+(1+intl.length)*16+14)+26; // compact box (+26 for the routing tag)
+          var rowH=Math.max(stackH,vrH2,exH,pgHdr+vmRow+pgFoot)+10, top=cy0, mid=top+rowH/2;
+          // Lay the port-group stack out first so we know each PG's exit height.
+          var py=mid-stackH/2, pgSvg='', exits=[];
+          intl.forEach(function(pg,i){ var c=multi?VRP[i%VRP.length]:C.primary;
+            var r=pgBox(pgX2,py,pg,c); pgSvg+=r.svg;
+            // subnet pill in the port group's BOTTOM-RIGHT corner, styled like the VLAN
+            // badge (outlined pill + colored text), instead of a label over the link.
+            var sub=pg.subnet||pg.gw||'';
+            if(sub){ var sbw=measure(sub,11,600)+16, sbx=pgX2+pgW-sbw-10, sby=py+r.h-27;
+              pgSvg+='<rect x="'+sbx+'" y="'+sby+'" width="'+sbw+'" height="18" rx="9" fill="none" stroke="'+c+'"/>';
+              pgSvg+=txt(sbx+sbw/2,sby+13,sub,c,'middle',600,11); }
+            // firewall zone badge in the port group's BOTTOM-LEFT corner (filled pill).
+            if(pg.zone){ var zbw=measure(pg.zone,10,700)+24, zbx=pgX2+10, zby=py+r.h-27;
+              pgSvg+='<rect x="'+zbx+'" y="'+zby+'" width="'+zbw+'" height="18" rx="9" fill="'+c+'" opacity=".9"><title>firewall zone</title></rect>';
+              pgSvg+='<text x="'+(zbx+9)+'" y="'+(zby+13)+'" font-size="10">🛡</text>';
+              pgSvg+=txt(zbx+zbw/2+6,zby+13,pg.zone,'#fff','middle',700,10); }
+            exits.push({y:r.exitY,c:c,gw:(pg.gw||''),bridge:(pg.bridge||'')});
+            py+=r.h+pgGap;
+          });
+          var n=exits.length, midIdx=Math.round((n-1)/2);
+          // Anchor the chain on the MIDDLE port group so its link (and the whole
+          // vRouter→transit→external line) is 100% horizontal; off-center PGs curve in.
+          var spineY=(n?exits[midIdx].y:mid), vrY=spineY-vrH2/2;
+          // Compact vRouter box: title/glyph on top, routing tag at the bottom. The GW IPs
+          // are NOT stacked inside — each one is placed next to its own link where it enters
+          // the box (a little vertical room between them so they don't collide).
+          svg+=spineBox(vrX2,vrY,vrW2,vrH2,'vRouter',true,'router',[],null).svg;
+          // Zone-firewall shield pill in the box's top-right corner when armed.
+          if(vr.firewall){ svg+='<rect x="'+(vrX2+vrW2-32)+'" y="'+(vrY+7)+'" width="24" height="16" rx="8" fill="'+C.ok+'" opacity=".92"><title>zone firewall on</title></rect>';
+            svg+='<text x="'+(vrX2+vrW2-20)+'" y="'+(vrY+19)+'" text-anchor="middle" font-size="9.5" font-weight="700" fill="#06121a">FW</text>'; }
+          // Entry points fan around the middle (which stays dead level with its PG).
+          var sp=17, gy0=spineY-midIdx*sp;
+          // Routing-protocol tag + status light at the bottom.
+          // Light: green = all peers up/working, red = a BGP peer is down.
+          var rtags=(vr.routing||[]), rtxt=rtags.length?rtags.join(' · '):'no routing',
+              hc=(vr.health==='up')?C.ok:((vr.health==='down')?C.bad:C.muted),
+              tw=measure(rtxt,11,700)+40, tgx=vrX2+vrW2/2-tw/2, tgy=vrY+vrH2-26;
+          svg+=rect(tgx,tgy,tw,20,C.panel,hc,10,false,1.3);
+          svg+='<circle cx="'+(tgx+14)+'" cy="'+(tgy+10)+'" r="4.5" fill="'+hc+'"><title>'+(vr.health==='down'?'a BGP peer is down':(vr.health==='up'?'routing healthy':'idle'))+'</title></circle>';
+          svg+=txt(tgx+26,tgy+14,rtxt,C.fg,'start',700,11);
+          svg+=pgSvg;
+          // Fan each PG link into the box, then drop its GW IP right next to the line.
+          // The MIDDLE link is drawn 100% horizontal; the rest curve into their entry row.
+          exits.forEach(function(e,i){
+            var pr=pgX2+pgW, gy=gy0+i*sp, col=multi?e.c:C.primary;
+            if(i===midIdx){ svg+='<line x1="'+pr+'" y1="'+e.y+'" x2="'+vrX2+'" y2="'+e.y+'" stroke="'+e.c+'" stroke-width="2" opacity=".9"/>'; }
+            else { svg+=conn(pr,e.y,vrX2,gy,e.c,true); }
+            // bridge/device name as a faint cable tag at the PG (left) end, where the
+            // links are still separated & horizontal — so it stays readable at any PG count.
+            svg+=devTag(pr+10,e.y-6,e.bridge,vrX2-pr-20);
+            // GW IP next to the line, just inside the box left edge
+            svg+='<text x="'+(vrX2+10)+'" y="'+(gy+4)+'" fill="'+col+'" font-weight="700" font-size="12"><title>'+ESC(e.gw)+'</title>'+ESC(fit(e.gw,12,700,vrW2-20))+'</text>';
+          });
+          if(!intl.length){ svg+=rect(pgX2,spineY-30,pgW,60,C.panel,C.line,9,false,1.4); svg+=txt(pgX2+14,spineY+4,'(no port groups)',C.muted,'start',400,12); }
+          if(t){
+            // vRouter → transit → external: all on spineY, drawn as STRAIGHT horizontal lines
+            svg+='<line x1="'+(vrX2+vrW2)+'" y1="'+spineY+'" x2="'+trX2+'" y2="'+spineY+'" stroke="'+C.muted+'" stroke-width="2" opacity=".85"/>';
+            // transit bridge/device name as a cable tag at the vRouter (source) end.
+            svg+=devTag(vrX2+vrW2+10,spineY-6,t.bridge,trX2-(vrX2+vrW2)-20);
+            svg+=rect(trX2,spineY-28,trW2,56,C.panel,C.muted,9,false,1.4);
+            svg+=txt(trX2+trW2/2,spineY-4,'transit',C.muted,'middle',600,10);
+            svg+='<text x="'+(trX2+trW2/2)+'" y="'+(spineY+15)+'" fill="'+C.fg+'" text-anchor="middle" font-weight="700" font-size="13">'+ESC(fit(t.cidr||'',13,700,trW2-20))+'</text>';
+            // external port — reuses the upstream-switch LLDP box (hostname + local→remote port)
+            var es={name:(t.switch||'(external)'),descr:t.descr,mgmt:t.mgmt,via:'LLDP',conns:(exConns?[{local:t.phys,remote:t.port}]:[])};
+            svg+='<line x1="'+(trX2+trW2)+'" y1="'+spineY+'" x2="'+exX2+'" y2="'+spineY+'" stroke="'+C.muted+'" stroke-width="2" opacity=".85"/>';
+            svg+=upBox(exX2,spineY-exH/2,exW2,es).svg;
+          } else { svg+=txt(vrX2+vrW2+20,spineY+4,'no transit link',C.muted,'start',400,11); }
+          // Transparent overlay over the whole vRouter box → hover shows the router-detail
+          // breakdown (interfaces, bridges, addresses, routing/health). Drawn LAST so it
+          // reliably captures the hover across the entire box.
+          svg+='<rect x="'+vrX2+'" y="'+vrY+'" width="'+vrW2+'" height="'+vrH2+'" rx="12" '
+            +'fill="#fff" fill-opacity="0" pointer-events="all" class="lldptip" '
+            +'data-tiphtml="'+vrTipHTML(vr)+'" style="cursor:help"/>';
+          cy0=Math.max(top+rowH, py)+blkGap; H=cy0;
+        });
+      }
+    host.innerHTML='<svg width="'+W+'" height="'+(H+pad)+'" viewBox="0 0 '+W+' '+(H+pad)+'" style="font:12px \'Fira Sans\',system-ui;min-width:'+W+'px">'+svg+'</svg>';
+    var ts=document.getElementById('topots'); if(ts) ts.textContent='updated '+new Date().toLocaleTimeString();
+  }
+  function installTooltip(host){
+    if(!host) return;
+    var tip=document.getElementById('lldptip');
+    if(!tip){ tip=document.createElement('div'); tip.id='lldptip';
+      tip.style.cssText='position:fixed;z-index:9999;display:none;max-width:460px;'
+        +'padding:12px 14px;border-radius:8px;background:var(--panel2,#1b2130);'
+        +'border:1px solid var(--line,#39414f);color:var(--fg,#e7ecf3);'
+        +'font:12px/1.55 "Fira Sans",system-ui;white-space:pre-line;'
+        +'box-shadow:0 8px 28px rgba(0,0,0,.45);pointer-events:none';
+      document.body.appendChild(tip); }
+    function place(e){ var m=14, w=tip.offsetWidth, h=tip.offsetHeight;
+      var x=e.clientX+m, y=e.clientY+m;
+      if(x+w>window.innerWidth-8) x=e.clientX-m-w;
+      if(y+h>window.innerHeight-8) y=e.clientY-m-h;
+      tip.style.left=Math.max(8,x)+'px'; tip.style.top=Math.max(8,y)+'px'; }
+    host.addEventListener('mouseover', function(e){
+      var t=e.target.closest ? e.target.closest('.lldptip') : null;
+      if(!t){ return; }
+      var html=t.getAttribute('data-tiphtml');
+      if(html){ tip.style.whiteSpace='normal'; tip.innerHTML=decodeURIComponent(html); tip.style.display='block'; place(e); return; }
+      var d=t.getAttribute('data-tip'); if(!d) return;
+      tip.style.whiteSpace='pre-line'; tip.textContent=decodeURIComponent(d); tip.style.display='block'; place(e);
+    });
+    host.addEventListener('mousemove', function(e){ if(tip.style.display==='block') place(e); });
+    host.addEventListener('mouseout', function(e){
+      var t=e.target.closest ? e.target.closest('.lldptip') : null;
+      if(t){ tip.style.display='none'; }
+    });
+  }
+  return { drawTopo: drawTopo, installTooltip: installTooltip };
+})();
+</script>
+{{end}}

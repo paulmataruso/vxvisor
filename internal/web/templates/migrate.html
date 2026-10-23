@@ -1,0 +1,482 @@
+{{define "migrate.html"}}{{template "head" .}}
+
+<div class="card">
+  <div class="card-head"><h2>Import / Export</h2></div>
+  <p class="muted" style="margin:0">Move VMs in and out of VXVisor. <strong>Import</strong> pulls VMs from vCenter/ESXi read-only (single VM, or a batch with the <em>Plan Migration</em> wizard). <strong>Export</strong> copies a stopped VXVisor VM out as a disk image, an OVA, or pushes it straight into a vCenter/ESXi.</p>
+</div>
+
+<!-- ===================== PLAN MIGRATION (batch) ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Plan Migration <span class="pill" title="Batch import, in your chosen order">wizard</span></h2>
+    <button class="btn primary" data-modal="m-plan">+ Plan a migration</button>
+  </div>
+  <p class="muted" style="margin:0">Select several VMs, order them, and set each one's name, CPU/RAM, firmware, transfer method, target storage, and <strong>network port group</strong> — pre-filled from VMware, override any cell. Imports run one at a time in your order; each becomes a ready-to-run instance as it finishes.</p>
+  {{if .VDDKReady}}<p class="muted" style="margin:6px 0 0;font-size:12px"><span class="pill running">VDDK ready</span> The fastest transfer method (VDDK over NBD) is the default for each VM.</p>
+  {{else}}<p class="muted" style="margin:6px 0 0;font-size:12px"><strong>Tip:</strong> install VMware VDDK below for the fastest imports — it's the quickest transfer method for large, sparse disks. Datastore-direct is the default until then.</p>{{end}}
+</div>
+
+<!-- ===================== QUICK IMPORT (single VM) ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Quick Import <span class="pill" title="Validated for connect+list; export needs a real vCenter">experimental</span></h2>
+    <button class="btn primary" data-modal="m-vmware">+ Connect &amp; import one VM</button>
+  </div>
+  <p class="muted" style="margin:0">Import a single VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong>. Creates a ready-to-run instance (matching CPU/memory/firmware) plus a reusable base image.</p>
+</div>
+
+<!-- ===================== IMPORT A VM DISK (file/URL) ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Import a VM disk</h2>
+    <button class="btn primary" data-modal="m-import">+ Import disk</button>
+  </div>
+  <p class="muted" style="margin:0">Converts a foreign disk (VMDK/VHD/raw/qcow2) to qcow2 and registers it as a base image. Also available as <span class="mono">vdxd import &lt;name&gt; &lt;file&gt;</span>.</p>
+</div>
+
+<!-- ===================== VDDK ACCELERATOR ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Accelerate import &mdash; VMware VDDK</h2>
+    {{if .VDDKInstalled}}<button class="btn primary" data-modal="m-vddk">{{if .VDDKReady}}Replace VDDK{{else}}+ Install VDDK{{end}}</button>{{end}}
+  </div>
+  {{if .VDDKReady}}
+    <p class="muted" style="margin:0"><span class="pill running">installed</span> VDDK library in use at <span class="mono">{{.VDDKLibDir}}</span>. <strong>VDDK over NBD</strong> is available as a transfer method — the fastest way to import large, sparse disks (reads only allocated blocks).</p>
+  {{else if .VDDKInstalled}}
+    <p class="muted" style="margin:0">nbdkit + VDDK plugin are installed, but the VMware VDDK library itself is <strong>not</strong> loaded yet (it's proprietary — we can't bundle it). Download the <strong>Virtual Disk Development Kit</strong> (<span class="mono">vmware-vix-disklib-*.tar.gz</span>) matching your vSphere version from the Broadcom/VMware portal, then upload it here — no SSH needed. <strong>VDDK is the fastest import method.</strong></p>
+  {{else}}
+    <p class="muted" style="margin:0">nbdkit's VDDK plugin isn't present on this host, so the VDDK transport can't be enabled. The NFC and Datastore-direct transfer methods still work without it.</p>
+  {{end}}
+</div>
+
+<!-- ===================== EXPORT ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Export a VM</h2>
+    <button class="btn primary" data-modal="m-export">+ Export VM</button>
+  </div>
+  <div id="vmexpprog"></div>
+  <p class="muted" style="margin:8px 0 0">Export a <strong>stopped</strong> VXVisor VM as a downloadable <strong>disk image</strong> (qcow2/raw/VMDK) or <strong>OVA</strong>, or <strong>push</strong> it into a target vCenter/ESXi. The source VM is only read, never changed.</p>
+  <p class="muted" style="margin:4px 0 0;font-size:12px"><strong>Note:</strong> an exported disk is faithful at the block level, but guest <em>bootability</em> on another hypervisor depends on drivers (e.g. virtio vs VMware). It may need a driver fixup to boot elsewhere.</p>
+</div>
+
+<!-- ===================== IMPORT PROGRESS ===================== -->
+<div class="card">
+  <div class="card-head"><h2>Import progress</h2></div>
+  <div id="vmwprog"><p class="muted" style="margin:0">No imports yet.</p></div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Imported base images</h2></div>
+  {{if .ImportedImages}}
+  <p class="muted" style="margin:0 0 8px">Each import registers a base-image template. Once you've created the instances you need, delete the leftover template to reclaim disk. Deleting is blocked while any instance still uses it.</p>
+  <table>
+    <tr><th>Image</th><th>Source</th><th>Size</th><th>Status</th><th></th></tr>
+    {{range .ImportedImages}}
+    <tr>
+      <td class="mono" style="font-size:12px">{{.Name}}</td>
+      <td class="muted" style="font-size:12px">{{.Source}}</td>
+      <td class="muted">{{humanBytes .SizeBytes}}</td>
+      <td><span class="pill {{if eq .Status "ready"}}running{{end}}">{{.Status}}</span></td>
+      <td style="text-align:right">
+        <form method="post" action="/images/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete base image {{.Name}} and its disk file? This cannot be undone.')">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="btn sm danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No imported base images.</div>{{end}}
+</div>
+
+<!-- ========================================================= MODALS ========================================================= -->
+
+<!-- Plan Migration wizard -->
+<div class="modal" id="m-plan"><div class="modal-card lg">
+  <div class="modal-head"><h3>Plan a migration</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="planform" method="post" action="/migrate/plan/start">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="plan" id="planjson">
+    <label class="fld">vCenter / ESXi host or URL<input type="text" name="vc_url" placeholder="vcenter.example.com or https://host/sdk" required></label>
+    <label class="fld">Username (read-only role)<input type="text" name="vc_user" autocomplete="off" placeholder="readonly@vsphere.local" required></label>
+    <label class="fld">Password<input type="password" name="vc_pass" autocomplete="new-password" required></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="vc_insecure" value="1"> Trust self-signed TLS certificate (LAN only)</label>
+    <div class="modal-actions"><button type="button" class="btn" id="planconnect">Connect &amp; list VMs</button></div>
+
+    <div id="plan-select" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+      <p class="muted" style="margin:0 0 6px">Tick the <strong>powered-off</strong> VMs to migrate:</p>
+      <div id="plan-vmlist" style="max-height:220px;overflow:auto"></div>
+      <div class="modal-actions"><button type="button" class="btn primary" id="planbuild">Build plan &rarr;</button></div>
+    </div>
+
+    <div id="plan-table" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+      <p class="muted" style="margin:0 0 6px">Review and edit each VM. Values are pre-filled from VMware — override any cell. Use &uarr;/&darr; to set import order.</p>
+      <div style="overflow:auto;max-height:340px"><table id="plan-rows" style="font-size:12px"></table></div>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="plango">Start migration</button></div>
+    </div>
+  </form>
+</div></div>
+
+<!-- Quick single-VM import -->
+<div class="modal" id="m-vmware"><div class="modal-card lg">
+  <div class="modal-head"><h3>Import from vCenter / ESXi</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="vmwform" method="post" action="/import/vmware/start">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">vCenter / ESXi host or URL<input type="text" name="vc_url" placeholder="vcenter.example.com or https://host/sdk" required></label>
+    <label class="fld">Username (read-only role)<input type="text" name="vc_user" autocomplete="off" placeholder="readonly@vsphere.local" required></label>
+    <label class="fld">Password<input type="password" name="vc_pass" autocomplete="new-password" required></label>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="vc_insecure" value="1"> Trust self-signed TLS certificate (LAN only)</label>
+    <div class="modal-actions"><button type="button" class="btn" id="vmwconnect">Connect &amp; list VMs</button></div>
+    <div id="vmwlist" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+      <p class="muted" style="margin:0 0 6px">Pick a <strong>powered-off</strong> VM to import:</p>
+      <div id="vmwtable" style="max-height:260px;overflow:auto"></div>
+      <label class="fld">OS type (for launch defaults)
+        <select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option></select>
+      </label>
+      <label class="fld">Transfer method
+        <select name="transport">
+          {{if .VDDKReady}}<option value="vddk">VDDK over NBD — fastest for sparse disks; VM OFF, no snapshots</option>{{end}}
+          <option value="datastore"{{if not .VDDKReady}} selected{{end}}>Datastore direct — fast raw copy; VM must be OFF, no snapshots</option>
+          <option value="nfc">NFC export — compressed stream, any power state (slowest)</option>
+        </select>
+      </label>
+      <p class="muted" style="margin:-2px 0 8px;font-size:11px">VDDK is the fastest; Datastore direct is fast but moves full logical size; NFC is CPU-throttled on the host (~single-digit MB/s) but works on any VM.{{if not .VDDKReady}} (Install VDDK above to unlock the fastest method.){{end}}</p>
+      <label class="fld">Target storage (where the imported disk lands)
+        <select name="target_pool_id">
+          <option value="0">— default disk directory (qcow2) —</option>
+          {{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}
+        </select>
+      </label>
+      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="vmwgo" disabled>Import selected VM</button></div>
+    </div>
+  </form>
+</div></div>
+
+<!-- Import a disk by URL -->
+<div class="modal" id="m-import"><div class="modal-card">
+  <div class="modal-head"><h3>Import a VM disk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/cluster/import">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Image name<input type="text" name="name" placeholder="imported-esxi-vm" required></label>
+    <label class="fld">Disk URL (VMDK/VHD/raw/qcow2)<input type="text" name="url" placeholder="http://…/disk.vmdk" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Import</button></div>
+  </form>
+</div></div>
+
+<!-- VDDK upload -->
+{{if .VDDKInstalled}}
+<div class="modal" id="m-vddk"><div class="modal-card">
+  <div class="modal-head"><h3>Install VMware VDDK</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/cluster/vddk-upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p class="muted" style="margin:0 0 4px">Upload the VMware <strong>Virtual Disk Development Kit</strong> archive (<span class="mono">vmware-vix-disklib-8.x.y-*.tar.gz</span>) matching your ESXi/vCenter. VXVisor unpacks it and wires up the library automatically.</p>
+    <label class="fld">VDDK archive<input type="file" name="vddk" accept=".gz,.tgz,.tar,.bz2,.xz" required></label>
+    <p class="muted" style="margin:0;font-size:11px">Proprietary (VMware/Broadcom EULA); stored only on this host — never uploaded anywhere else.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Upload &amp; install</button></div>
+  </form>
+</div></div>
+{{end}}
+
+<!-- Export VM -->
+<div class="modal" id="m-export"><div class="modal-card lg">
+  <div class="modal-head"><h3>Export a VM</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="expform" method="post" action="/export/start">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">VM to export (must be stopped)
+      <select name="session_id" required>
+        <option value="">— select a stopped VM —</option>
+        {{range .Sessions}}<option value="{{.ID}}"{{if eq .State "running"}} disabled{{end}}>{{.Name}}{{if eq .State "running"}} (running — stop it first){{end}}</option>{{end}}
+      </select>
+    </label>
+    <label class="fld">Export as
+      <select name="target" id="exp-target">
+        <option value="download-ova">OVA download (OVF + VMDK) — importable by VMware/VirtualBox</option>
+        <option value="download-image">Disk image download</option>
+        <option value="push">Push into a vCenter / ESXi</option>
+      </select>
+    </label>
+    <label class="fld" id="exp-format-wrap" style="display:none">Disk image format
+      <select name="format">
+        <option value="qcow2">qcow2 (VXVisor/KVM native)</option>
+        <option value="vmdk">VMDK (stream-optimized; VMware)</option>
+        <option value="raw">raw</option>
+      </select>
+    </label>
+    <div id="exp-push" style="display:none">
+      <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
+      <p class="muted" style="margin:0 0 6px">Target vCenter/ESXi — needs an account that can <strong>create</strong> a VM. Blank placement fields use the environment defaults.</p>
+      <label class="fld">Target host or URL<input type="text" name="pvc_url" placeholder="vcenter.example.com"></label>
+      <label class="fld">Username<input type="text" name="pvc_user" autocomplete="off" placeholder="administrator@vsphere.local"></label>
+      <label class="fld">Password<input type="password" name="pvc_pass" autocomplete="new-password"></label>
+      <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="pvc_insecure" value="1"> Trust self-signed TLS certificate</label>
+      <label class="fld">New VM name (optional)<input type="text" name="pvc_name" placeholder="defaults to the source name"></label>
+      <label class="fld">Datacenter (optional)<input type="text" name="pvc_datacenter" placeholder="(default)"></label>
+      <label class="fld">Cluster / resource pool (optional)<input type="text" name="pvc_pool" placeholder="(default)"></label>
+      <label class="fld">Datastore (optional)<input type="text" name="pvc_datastore" placeholder="(default)"></label>
+      <label class="fld">VM folder (optional)<input type="text" name="pvc_folder" placeholder="(datacenter VM folder)"></label>
+      <label class="fld">Target network / port group<input type="text" name="pvc_network" placeholder="VM Network"></label>
+    </div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Start export</button></div>
+  </form>
+</div></div>
+
+<!-- Import log viewer -->
+<div class="modal" id="m-implog"><div class="modal-card lg">
+  <div class="modal-head"><h3>Import log &mdash; <span id="implog-vm"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="mform">
+    <p class="muted" style="margin:0 0 6px">Live while the import runs; refreshes every few seconds.</p>
+    <pre id="implog-body" style="max-height:60vh;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:6px;font-size:12px;line-height:1.45;white-space:pre-wrap;margin:0">Loading&#8230;</pre>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+  </div>
+</div></div>
+
+<!-- Export log viewer -->
+<div class="modal" id="m-explog"><div class="modal-card lg">
+  <div class="modal-head"><h3>Export log &mdash; <span id="explog-vm"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="mform">
+    <p class="muted" style="margin:0 0 6px">Live while the export runs; refreshes every few seconds.</p>
+    <pre id="explog-body" style="max-height:60vh;overflow:auto;background:var(--panel2,#1a1a1a);padding:10px;border-radius:6px;font-size:12px;line-height:1.45;white-space:pre-wrap;margin:0">Loading&#8230;</pre>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+  </div>
+</div></div>
+
+<script>
+// Pools + networks available for the wizard, from the server.
+var MIG_POOLS=[{{range $i,$p := .Pools}}{{if $i}},{{end}}{"id":{{$p.ID}},"name":"{{$p.Name}}","kind":"{{$p.Kind}}"}{{end}}];
+var MIG_NETS=[{{range $i,$n := .Networks}}{{if $i}},{{end}}{"id":{{$n.ID}},"name":"{{$n.Name}}"}{{end}}];
+var MIG_DEFTRANSPORT="{{.DefaultTransport}}";
+var MIG_VDDK={{if .VDDKReady}}true{{else}}false{{end}};
+
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function gb(b){b=b||0; if(b>=1073741824)return (b/1073741824).toFixed(2)+' GB'; if(b>=1048576)return (b/1048576).toFixed(0)+' MB'; return (b/1024).toFixed(0)+' KB';}
+function rate(b){b=b||0; return b>=1048576?(b/1048576).toFixed(1)+' MB/s':(b/1024).toFixed(0)+' KB/s';}
+function badge(s){var c=(s==='done')?'running':((s==='failed')?'error':'');return '<span class="pill '+c+'">'+esc(s)+'</span>';}
+
+// vSphere connect+list helper shared by the quick-import and the wizard.
+function vsphereConnect(form, onVMs, onErr){
+  var fd=new FormData(form);
+  return fetch('/import/vmware/connect',{method:'POST',body:fd,credentials:'same-origin'})
+    .then(function(r){return r.json();})
+    .then(function(d){ if(d.error){onErr(d.error);return;} onVMs(d.vms||[]); })
+    .catch(function(e){ onErr(String(e)); });
+}
+
+// ---------- Quick single-VM import ----------
+(function(){
+  var form=document.getElementById('vmwform'); if(!form) return;
+  var btn=document.getElementById('vmwconnect'), list=document.getElementById('vmwlist'),
+      tbl=document.getElementById('vmwtable'), go=document.getElementById('vmwgo');
+  btn.addEventListener('click',function(){
+    btn.disabled=true; btn.textContent='Connecting…';
+    vsphereConnect(form,function(vms){
+      btn.disabled=false; btn.textContent='Connect & list VMs'; list.style.display='';
+      if(!vms.length){ tbl.innerHTML='<p class="muted">No VMs visible to this account.</p>'; return; }
+      var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th><th>Disks</th></tr>';
+      vms.forEach(function(v){
+        var ok=v.Importable && v.PowerState==='poweredOff';
+        var disks=(v.Disks||[]).length, cap=(v.Disks||[]).reduce(function(a,x){return a+(x.CapacityGB||0);},0);
+        h+='<tr><td>'+(ok?'<input type="radio" name="moid" value="'+esc(v.MOID)+'">':'<span title="'+esc(v.ImportNote||'')+'">—</span>')+'</td>'+
+           '<td><strong>'+esc(v.Name)+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+esc(v.ImportNote)+'</span>':'')+'</td>'+
+           '<td><span class="pill '+(v.PowerState==='poweredOff'?'':'error')+'">'+esc(v.PowerState)+'</span></td>'+
+           '<td class="muted" style="font-size:12px">'+esc(v.GuestFullName||'')+'</td>'+
+           '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td>'+
+           '<td class="muted">'+disks+' · '+cap+'G</td></tr>';
+      });
+      tbl.innerHTML=h+'</table>';
+      tbl.addEventListener('change',function(){ go.disabled=!form.querySelector('input[name=moid]:checked'); });
+    },function(err){ btn.disabled=false; btn.textContent='Connect & list VMs'; list.style.display=''; tbl.innerHTML='<p style="color:var(--bad,#e55)">'+esc(err)+'</p>'; });
+  });
+})();
+
+// ---------- Plan Migration wizard ----------
+(function(){
+  var form=document.getElementById('planform'); if(!form) return;
+  var btn=document.getElementById('planconnect'), sel=document.getElementById('plan-select'),
+      vmlist=document.getElementById('plan-vmlist'), build=document.getElementById('planbuild'),
+      tableWrap=document.getElementById('plan-table'), rows=document.getElementById('plan-rows'),
+      go=document.getElementById('plango'), hidden=document.getElementById('planjson');
+  var vmsCache=[];
+  btn.addEventListener('click',function(){
+    btn.disabled=true; btn.textContent='Connecting…';
+    vsphereConnect(form,function(vms){
+      btn.disabled=false; btn.textContent='Connect & list VMs'; sel.style.display='';
+      vmsCache=vms;
+      if(!vms.length){ vmlist.innerHTML='<p class="muted">No VMs visible to this account.</p>'; return; }
+      var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th></tr>';
+      vms.forEach(function(v,i){
+        var ok=v.Importable && v.PowerState==='poweredOff';
+        h+='<tr><td>'+(ok?'<input type="checkbox" class="plan-pick" data-i="'+i+'">':'<span title="'+esc(v.ImportNote||'')+'">—</span>')+'</td>'+
+           '<td><strong>'+esc(v.Name)+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+esc(v.ImportNote)+'</span>':'')+'</td>'+
+           '<td><span class="pill '+(v.PowerState==='poweredOff'?'':'error')+'">'+esc(v.PowerState)+'</span></td>'+
+           '<td class="muted" style="font-size:12px">'+esc(v.GuestFullName||'')+'</td>'+
+           '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td></tr>';
+      });
+      vmlist.innerHTML=h+'</table>';
+    },function(err){ btn.disabled=false; btn.textContent='Connect & list VMs'; sel.style.display=''; vmlist.innerHTML='<p style="color:var(--bad,#e55)">'+esc(err)+'</p>'; });
+  });
+
+  function poolOptions(){ var o='<option value="0">default dir (qcow2)</option>'; MIG_POOLS.forEach(function(p){o+='<option value="'+p.id+'">'+esc(p.name)+' ('+esc(p.kind)+')</option>';}); return o; }
+  function netOptions(srcPG){
+    var o='<option value="0">default / NAT</option>', matched=0;
+    MIG_NETS.forEach(function(n){ var sel=(srcPG&&n.name&&n.name.toLowerCase()===String(srcPG).toLowerCase())?' selected':''; if(sel)matched=1; o+='<option value="'+n.id+'"'+sel+'>'+esc(n.name)+'</option>'; });
+    return o;
+  }
+  function transportOptions(){
+    var o='';
+    if(MIG_VDDK) o+='<option value="vddk"'+(MIG_DEFTRANSPORT==='vddk'?' selected':'')+'>VDDK (fastest)</option>';
+    o+='<option value="datastore"'+(MIG_DEFTRANSPORT==='datastore'?' selected':'')+'>Datastore</option>';
+    o+='<option value="nfc"'+(MIG_DEFTRANSPORT==='nfc'?' selected':'')+'>NFC</option>';
+    return o;
+  }
+  function moveRow(tr,dir){ if(dir<0&&tr.previousElementSibling&&tr.previousElementSibling.classList.contains('planrow')){tr.parentNode.insertBefore(tr,tr.previousElementSibling);} else if(dir>0&&tr.nextElementSibling){tr.parentNode.insertBefore(tr.nextElementSibling,tr);} }
+
+  build.addEventListener('click',function(){
+    var picks=Array.prototype.slice.call(form.querySelectorAll('.plan-pick:checked'));
+    if(!picks.length){ alert('Tick at least one powered-off VM.'); return; }
+    var h='<tr><th>#</th><th>Source</th><th>Name</th><th>vCPU</th><th>RAM MB</th><th>Firmware</th><th>OS</th><th>Transfer</th><th>Storage</th><th>Network</th><th>Src port-group</th></tr>';
+    picks.forEach(function(cb){
+      var v=vmsCache[parseInt(cb.getAttribute('data-i'),10)];
+      var fw=(v.Firmware==='efi')?'uefi':'bios';
+      var os=(/win/i.test(v.GuestFullName||v.GuestID||''))?'windows':'linux';
+      var srcPG=(v.NICs&&v.NICs[0]&&v.NICs[0].PortGroup)||((v.Nets&&v.Nets[0])||'');
+      h+='<tr class="planrow" data-moid="'+esc(v.MOID)+'">'+
+        '<td style="white-space:nowrap"><button type="button" class="btn up" style="padding:0 6px">&uarr;</button><button type="button" class="btn down" style="padding:0 6px">&darr;</button></td>'+
+        '<td class="muted" style="font-size:11px">'+esc(v.Name)+'</td>'+
+        '<td><input class="f-name" value="'+esc(v.Name)+'" style="width:120px"></td>'+
+        '<td><input class="f-cpu" type="number" min="1" value="'+(v.NumCPU||1)+'" style="width:52px"></td>'+
+        '<td><input class="f-mem" type="number" min="256" step="256" value="'+(v.MemMB||1024)+'" style="width:72px"></td>'+
+        '<td><select class="f-fw"><option value="bios"'+(fw==='bios'?' selected':'')+'>BIOS</option><option value="uefi"'+(fw==='uefi'?' selected':'')+'>UEFI</option></select></td>'+
+        '<td><select class="f-os"><option value="linux"'+(os==='linux'?' selected':'')+'>Linux</option><option value="windows"'+(os==='windows'?' selected':'')+'>Windows</option></select></td>'+
+        '<td><select class="f-tr">'+transportOptions()+'</select></td>'+
+        '<td><select class="f-pool">'+poolOptions()+'</select></td>'+
+        '<td><select class="f-net">'+netOptions(srcPG)+'</select></td>'+
+        '<td class="muted" style="font-size:11px">'+esc(srcPG||'—')+'</td></tr>';
+    });
+    rows.innerHTML=h;
+    Array.prototype.forEach.call(rows.querySelectorAll('.up'),function(b){b.addEventListener('click',function(){moveRow(b.closest('tr'),-1);});});
+    Array.prototype.forEach.call(rows.querySelectorAll('.down'),function(b){b.addEventListener('click',function(){moveRow(b.closest('tr'),1);});});
+    tableWrap.style.display='';
+  });
+
+  form.addEventListener('submit',function(e){
+    var plan=[];
+    Array.prototype.forEach.call(rows.querySelectorAll('tr.planrow'),function(tr){
+      plan.push({
+        moid: tr.getAttribute('data-moid'),
+        name: tr.querySelector('.f-name').value.trim(),
+        cpus: parseInt(tr.querySelector('.f-cpu').value,10)||0,
+        mem_mb: parseInt(tr.querySelector('.f-mem').value,10)||0,
+        firmware: tr.querySelector('.f-fw').value,
+        os_type: tr.querySelector('.f-os').value,
+        transport: tr.querySelector('.f-tr').value,
+        target_pool_id: parseInt(tr.querySelector('.f-pool').value,10)||0,
+        network_id: parseInt(tr.querySelector('.f-net').value,10)||0
+      });
+    });
+    if(!plan.length){ e.preventDefault(); alert('Build the plan first.'); return; }
+    hidden.value=JSON.stringify(plan);
+  });
+})();
+
+// ---------- Export form: show/hide fields by target ----------
+(function(){
+  var sel=document.getElementById('exp-target'); if(!sel) return;
+  var fmt=document.getElementById('exp-format-wrap'), push=document.getElementById('exp-push');
+  function sync(){ fmt.style.display=(sel.value==='download-image')?'':'none'; push.style.display=(sel.value==='push')?'':'none'; }
+  sel.addEventListener('change',sync); sync();
+})();
+
+// ---------- Import progress poller + log viewer ----------
+(function(){
+  var box=document.getElementById('vmwprog'); if(!box) return;
+  function poll(){
+    fetch('/api/vmware-import',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      var l=(d&&d.imports)||[]; if(!l.length){box.innerHTML='<p class="muted" style="margin:0">No imports yet.</p>';return;}
+      var h='<table style="margin:0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th><th>Log</th></tr>';
+      l.forEach(function(j){
+        var xfer,pctcell;
+        if(j.status==='exporting'){ xfer=gb(j.done_bytes)+' pulled'+(j.nominal?(' <span class="muted" style="font-size:11px">(src up to '+gb(j.nominal)+', thin)</span>'):''); pctcell='—'; }
+        else { xfer=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—'); pctcell=(j.pct||0)+'%'; }
+        var spd=j.rate?rate(j.rate):'—';
+        var logcell=j.has_log?('<a href="#" class="implog" data-modal="m-implog" data-id="'+encodeURIComponent(j.id)+'" data-vm="'+esc(j.vm)+'">view</a>'):'—';
+        h+='<tr><td><strong>'+esc(j.vm)+'</strong></td><td>'+badge(j.status)+'</td>'+
+           '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+esc(j.err)+'</span>'):esc(j.step))+'</td>'+
+           '<td class="muted">'+xfer+'</td><td class="muted">'+spd+'</td><td>'+pctcell+'</td><td>'+logcell+'</td></tr>';
+        if(j.status==='failed'&&j.log_tail&&j.log_tail.length){ h+='<tr><td colspan="7" style="padding:0 0 10px"><pre style="margin:4px 0;max-height:180px;overflow:auto;background:var(--panel2,#1a1a1a);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap">'+esc(j.log_tail.join('\n'))+'</pre></td></tr>'; }
+      });
+      box.innerHTML=h+'</table>';
+    }).catch(function(){});
+  }
+  poll(); setInterval(poll,3000);
+  var logTimer=null;
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('.implog'); if(!a) return;
+    var id=a.getAttribute('data-id'), vm=a.getAttribute('data-vm')||'';
+    var body=document.getElementById('implog-body'), title=document.getElementById('implog-vm');
+    if(title) title.textContent=vm;
+    function load(){ var m=document.getElementById('m-implog'); if(!m||!m.classList.contains('open')){ if(logTimer){clearInterval(logTimer);logTimer=null;} return; }
+      fetch('/api/vmware-import/'+id+'/log',{credentials:'same-origin'}).then(function(r){return r.ok?r.text():Promise.reject(r.status);})
+        .then(function(t){ var stick=body.scrollTop+body.clientHeight>=body.scrollHeight-24; body.textContent=t; if(stick) body.scrollTop=body.scrollHeight; })
+        .catch(function(err){ body.textContent='Could not load log ('+err+').'; }); }
+    if(body) body.textContent='Loading…'; load(); if(logTimer) clearInterval(logTimer); logTimer=setInterval(load,3000);
+  });
+})();
+
+// ---------- Export progress poller + log viewer ----------
+(function(){
+  var box=document.getElementById('vmexpprog'); if(!box) return;
+  function poll(){
+    fetch('/api/vm-export',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+      var l=(d&&d.exports)||[]; if(!l.length){box.innerHTML='';return;}
+      var h='<table style="margin:8px 0"><tr><th>VM</th><th>Target</th><th>Status</th><th>Step</th><th>Progress</th><th>Rate</th><th></th></tr>';
+      l.forEach(function(j){
+        var prog=j.total_bytes?(gb(j.done_bytes)+' / '+gb(j.total_bytes)):(j.done_bytes?gb(j.done_bytes):'—');
+        var spd=j.rate?rate(j.rate):'—';
+        var act='';
+        if(j.status==='done'&&j.file){ act='<a href="/export/'+encodeURIComponent(j.id)+'/download">download '+esc(j.file)+'</a>'; }
+        else if(j.has_log){ act='<a href="#" class="explog" data-modal="m-explog" data-id="'+encodeURIComponent(j.id)+'" data-vm="'+esc(j.vm)+'">view log</a>'; }
+        // A finished/failed export leaves a file (or log) on disk — offer to remove it.
+        if(j.status==='done'||j.status==='failed'){ act+=(act?' · ':'')+'<a href="#" class="expdel" data-id="'+encodeURIComponent(j.id)+'" data-file="'+esc(j.file||'')+'" style="color:var(--bad,#e55)">delete</a>'; }
+        h+='<tr><td><strong>'+esc(j.vm)+'</strong></td><td class="muted" style="font-size:12px">'+esc(j.target)+(j.format&&j.target==='download-image'?(' · '+esc(j.format)):'')+'</td>'+
+           '<td>'+badge(j.status)+'</td>'+
+           '<td class="muted" style="font-size:12px">'+(j.err?('<span style="color:var(--bad,#e55)">'+esc(j.err)+'</span>'):esc(j.step))+'</td>'+
+           '<td class="muted">'+prog+'</td><td class="muted">'+spd+'</td><td>'+act+'</td></tr>';
+        if(j.status==='failed'&&j.log_tail&&j.log_tail.length){ h+='<tr><td colspan="7" style="padding:0 0 10px"><pre style="margin:4px 0;max-height:160px;overflow:auto;background:var(--panel2,#1a1a1a);padding:8px;border-radius:6px;font-size:11px;white-space:pre-wrap">'+esc(j.log_tail.join('\n'))+'</pre></td></tr>'; }
+      });
+      box.innerHTML=h+'</table>';
+    }).catch(function(){});
+  }
+  poll(); setInterval(poll,3000);
+  // Delete an exported image from disk (so it doesn't linger after download).
+  document.addEventListener('click',function(e){
+    var d=e.target.closest('.expdel'); if(!d) return;
+    e.preventDefault();
+    var id=d.getAttribute('data-id'), file=d.getAttribute('data-file')||'this export';
+    if(!confirm('Delete '+file+' from disk? This cannot be undone.')) return;
+    var csrfEl=document.querySelector('input[name="csrf"]');
+    var fd=new FormData(); if(csrfEl) fd.append('csrf',csrfEl.value);
+    d.textContent='deleting…';
+    fetch('/export/'+id+'/delete',{method:'POST',credentials:'same-origin',body:fd})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){return Promise.reject(t||r.status);}); return poll(); })
+      .catch(function(err){ alert('Delete failed: '+err); poll(); });
+  });
+  var logTimer=null;
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('.explog'); if(!a) return;
+    var id=a.getAttribute('data-id'), vm=a.getAttribute('data-vm')||'';
+    var body=document.getElementById('explog-body'), title=document.getElementById('explog-vm');
+    if(title) title.textContent=vm;
+    function load(){ var m=document.getElementById('m-explog'); if(!m||!m.classList.contains('open')){ if(logTimer){clearInterval(logTimer);logTimer=null;} return; }
+      fetch('/api/vm-export/'+id+'/log',{credentials:'same-origin'}).then(function(r){return r.ok?r.text():Promise.reject(r.status);})
+        .then(function(t){ var stick=body.scrollTop+body.clientHeight>=body.scrollHeight-24; body.textContent=t; if(stick) body.scrollTop=body.scrollHeight; })
+        .catch(function(err){ body.textContent='Could not load log ('+err+').'; }); }
+    if(body) body.textContent='Loading…'; load(); if(logTimer) clearInterval(logTimer); logTimer=setInterval(load,3000);
+  });
+})();
+</script>
+
+{{template "foot" .}}{{end}}

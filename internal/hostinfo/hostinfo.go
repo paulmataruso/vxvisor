@@ -8,11 +8,14 @@
 package hostinfo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +27,41 @@ func run(name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+var (
+	reKmsgNvme  = regexp.MustCompile(`nvme (nvme\d+): .*(Disabling device|disable controller|reset failure|Removing after probe failure)`)
+	reKmsgIOErr = regexp.MustCompile(`I/O error, dev ([a-z0-9]+)`)
+)
+
+// KernelDiskErrors scans the kernel ring buffer for block-device failure markers
+// — an NVMe controller disabled after a failed reset (a drive that dropped off
+// the bus), or logged I/O errors — and returns a map of device name (sda,
+// nvme0n1) OR NVMe controller name (nvme0) → a human reason. Best-effort and
+// bounded by run()'s timeout; an empty map on any error. READ-ONLY.
+func KernelDiskErrors() map[string]string {
+	out := map[string]string{}
+	b, err := run("dmesg")
+	if err != nil {
+		return out
+	}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	sc.Buffer(make([]byte, 256*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if m := reKmsgNvme.FindStringSubmatch(line); m != nil {
+			out[m[1]] = "NVMe controller " + m[1] + " was disabled after a reset failure — the drive dropped off the bus"
+			continue
+		}
+		if m := reKmsgIOErr.FindStringSubmatch(line); m != nil {
+			if dev := m[1]; !strings.HasPrefix(dev, "dm-") {
+				if _, ok := out[dev]; !ok {
+					out[dev] = "the kernel logged I/O errors on this device"
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ---- interfaces ----------------------------------------------------------
@@ -38,6 +76,7 @@ type Iface struct {
 	Type      string   `json:"type"`      // physical | bridge | vxlan | tap | bond | vlan | loopback | other
 	Master    string   `json:"master"`    // bridge/bond this iface is enslaved to, if any
 	Carrier   bool     `json:"carrier"`   // link detected
+	Group     string   `json:"group"`     // UI grouping label, filled by the service layer (DB-aware); empty here
 }
 
 // ipLink mirrors the fields we read from `ip -j -d link`.
@@ -183,6 +222,7 @@ type BlockDev struct {
 	Name     string     `json:"name"`      // e.g. sdc
 	Path     string     `json:"path"`      // /dev/sdc
 	Size     string     `json:"size"`      // human, e.g. 447.1G
+	Bytes    int64      `json:"bytes"`     // raw size; 0 = offline/dropped device
 	Model    string     `json:"model"`
 	Type     string     `json:"type"`      // disk | part | lvm | ...
 	FSType   string     `json:"fstype"`
@@ -228,8 +268,9 @@ func BlockDevices() ([]BlockDev, error) {
 }
 
 func toBlockDev(d lsblkDev) BlockDev {
+	nbytes, _ := d.Size.Int64()
 	bd := BlockDev{
-		Name: d.Name, Path: d.Path, Size: humanSize(d.Size.String()), Model: strings.TrimSpace(d.Model),
+		Name: d.Name, Path: d.Path, Size: humanSize(d.Size.String()), Bytes: nbytes, Model: strings.TrimSpace(d.Model),
 		Type: d.Type, FSType: d.FSType, Mount: d.MountPoint,
 	}
 	note := ""

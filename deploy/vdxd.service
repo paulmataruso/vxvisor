@@ -1,11 +1,8 @@
 [Unit]
-Description=VDXClone VM/VDI control plane (vdxd)
+Description=VXVisor VM control plane (vdxd)
 Documentation=https://github.com/ (internal)
 After=network-online.target
 Wants=network-online.target
-# guacd backs the browser-desktop gateway; start it first when present.
-After=guacd.service
-Wants=guacd.service
 
 [Service]
 Type=simple

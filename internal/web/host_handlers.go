@@ -281,3 +281,60 @@ func (s *Server) rtDelEIGRPNetwork(w http.ResponseWriter, r *http.Request, p *se
 }
 
 func atoiInt(s string) int { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
+
+// apiDriveAlerts returns active physical-drive failures as JSON for the global
+// toast poller (admin only; empty list otherwise).
+func (s *Server) apiDriveAlerts(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		writeJSON(w, []service.DriveAlert{})
+		return
+	}
+	writeJSON(w, s.svc.DriveAlerts(p))
+}
+
+// hostRestart reboots the physical host (admin only). Returns a plain "going
+// down" page since the connection will drop moments later.
+func (s *Server) hostRestart(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.HostRestart(p, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	hostPowerPage(w, "Restarting", "The host is rebooting now. This page will stop responding; reconnect in a minute or two.")
+}
+
+// hostShutdown powers off the physical host (admin only).
+func (s *Server) hostShutdown(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.HostShutdown(p, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	hostPowerPage(w, "Shutting down", "The host is powering off now. This page will stop responding, and the server must be powered back on by hand.")
+}
+
+func hostPowerPage(w http.ResponseWriter, title, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8"><title>` + title + `</title>` +
+		`<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;` +
+		`align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}` +
+		`.box{max-width:420px;padding:28px}h1{font-size:22px;margin:0 0 10px}p{color:#aaa;line-height:1.5}</style>` +
+		`<div class="box"><h1>` + title + `…</h1><p>` + msg + `</p></div>`))
+}
+
+// apiNICAlerts returns active physical-NIC link failures as JSON for the global
+// toast poller (admin only; empty list otherwise).
+func (s *Server) apiNICAlerts(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		writeJSON(w, []service.NICAlert{})
+		return
+	}
+	writeJSON(w, s.svc.NICAlerts(p))
+}

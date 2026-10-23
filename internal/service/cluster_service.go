@@ -148,7 +148,9 @@ func (s *Service) MoveSessionStorage(p *Principal, sessionID string, targetPoolI
 	s.audit(p, p.OrgID, "session.storage.move.start", "session", sessionID, ip, map[string]any{"pool": targetPoolID})
 	go func() {
 		s.migtr.update(sessionID, "active", 0, 0)
-		merr := s.mgr.MoveStorage(sessionID, targetPoolID)
+		merr := s.mgr.MoveStorage(sessionID, targetPoolID, func(done, total int64) {
+			s.migtr.update(sessionID, "active", total-done, total)
+		})
 		if merr != nil {
 			s.migtr.finish(sessionID, "failed", merr.Error())
 		} else {

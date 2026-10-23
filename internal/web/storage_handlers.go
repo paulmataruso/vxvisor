@@ -428,6 +428,9 @@ func (s *Server) storagePools(w http.ResponseWriter, r *http.Request, p *service
 	zfsPools, _ := s.svc.ZFSPools(p)
 	lvmPools, _ := s.svc.LVMThinPools(p)
 	disks, _ := s.svc.HostBlockDevices(p)
+	// md arrays are selectable backing devices for LVM/ZFS/filesystem pools.
+	mdArrays := s.svc.ListMDArrays(p)
+	disks = append(disks, s.svc.MDArraysAsDisks(p)...)
 	// ZFS datasets across all pools (so a dataset the admin created is visible and
 	// can be registered as a storage pool for VM disks), plus a parsed status tree
 	// per pool for the health view.
@@ -449,8 +452,46 @@ func (s *Server) storagePools(w http.ResponseWriter, r *http.Request, p *service
 		"LVMPools":    lvmPools,
 		"Disks":       disks,
 		"DiskStatus":  s.svc.DiskStatus(p),
+		"RAIDCtrls":   s.svc.RAIDControllers(p),
+		"CtrlHints":   s.svc.ControllerHints(p),
 		"ZFSReady":    s.svc.ZFSAvailable(p),
 		"LVMReady":    s.svc.LVMAvailable(p),
+		"MDArrays":    mdArrays,
+		"MDReady":     s.svc.MDAvailable(p),
+		"MDLevels":    s.svc.MDLevels(),
+		"FSTypes":     s.svc.FSTypes(),
+		"VDDKInstalled": s.svc.VDDKInstalled(p),
+		"VDDKLibDir":    s.svc.VDDKLibDir(),
+	})
+}
+
+// setVDDKLibDir saves the operator-supplied VMware VDDK library path used by the
+// fastest vCenter import transport (the library is proprietary and can't be
+// bundled). Admin only.
+func (s *Server) setVDDKLibDir(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.SetVDDKLibDir(p, r.FormValue("vddk_libdir"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/storage", http.StatusSeeOther)
+}
+
+// apiBrowsePool returns the contents of one storage pool as JSON for the
+// datastore/filesystem browser modal (read-only). Admin only (enforced in the
+// service).
+func (s *Server) apiBrowsePool(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	pool, entries, err := s.svc.BrowsePool(p, int64(atoi(r.PathValue("id"))))
+	if err != nil {
+		w.WriteHeader(statusFor(err))
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"name": pool.Name, "kind": pool.Kind, "path": pool.Path, "entries": entries,
 	})
 }
 

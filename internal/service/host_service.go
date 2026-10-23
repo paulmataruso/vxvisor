@@ -1,13 +1,86 @@
 package service
 
 import (
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/lldp"
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/raidctl"
+	"vdxclone/internal/session"
+	"vdxclone/internal/vrouter"
 )
+
+// bgpDownStates are the FRR "State/PfxRcd" values that mean a BGP peer is NOT
+// established (an established peer shows a numeric prefix count there instead).
+var bgpDownStates = map[string]bool{
+	"Idle": true, "Connect": true, "Active": true, "OpenSent": true,
+	"OpenConfirm": true, "Clearing": true, "Deleted": true,
+}
+
+// bgpAnyDown reports whether any BGP peer in an FRR "show ip bgp summary" output
+// is NOT established. The summary's trailing "Desc" column can be free text
+// (e.g. "N/A"), so we look for a known down-state token on a neighbour row rather
+// than inspecting a fixed column.
+func bgpAnyDown(summary string) bool {
+	for _, ln := range strings.Split(summary, "\n") {
+		f := strings.Fields(ln)
+		if len(f) < 2 || net.ParseIP(f[0]) == nil {
+			continue // not a neighbour row
+		}
+		for _, tok := range f[1:] {
+			if bgpDownStates[tok] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// netAddr returns the network address for an "ip/prefix" CIDR (e.g.
+// 10.111.100.2/30 → 10.111.100.0/30); returns the input unchanged if unparseable.
+func netAddr(cidr string) string {
+	if _, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr)); err == nil {
+		return ipnet.String()
+	}
+	return cidr
+}
+
+// vrouterLeases returns the MAC→IP map from a vRouter's dnsmasq lease file(s).
+func (s *Service) vrouterLeases(name string) map[string]string {
+	out := map[string]string{}
+	var id int64
+	var runtime, container, lxcpath string
+	if s.db.QueryRow(`SELECT id,runtime,container_name,lxcpath FROM vrouters WHERE name=?`, name).Scan(&id, &runtime, &container, &lxcpath) != nil {
+		return out
+	}
+	var files []string
+	if runtime == "netns" {
+		files, _ = filepath.Glob("/var/lib/vdxclone/vrouter/" + strconv.FormatInt(id, 10) + "/dnsmasq-*.leases")
+	} else {
+		files = []string{filepath.Join(lxc.RootfsPath(container, lxcpath), "var/lib/misc/dnsmasq.leases")}
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			// dnsmasq lease: "<expiry> <mac> <ip> <hostname> <clientid>"
+			if fields := strings.Fields(line); len(fields) >= 3 {
+				out[strings.ToLower(fields[1])] = fields[2]
+			}
+		}
+	}
+	return out
+}
 
 // HostInterfaces returns the host's network interfaces (admin only). Backs the
 // create-network / storage-NIC interface pickers. Per-VM tap devices are filtered
@@ -22,14 +95,69 @@ func (s *Service) HostInterfaces(p *Principal) ([]hostinfo.Iface, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Classify bridges: a plain host bridge can be a vSwitch, a vRouter leg, a
+	// storage/VM overlay bridge, or something external we didn't create. Only the
+	// DB knows which, so the grouping label is assigned here (hostinfo can't).
+	vswBridge := map[string]bool{} // bridge device -> is a vSwitch
+	if rows, err := s.db.Query(`SELECT bridge FROM net_vswitches WHERE bridge<>''`); err == nil {
+		for rows.Next() {
+			var b string
+			if rows.Scan(&b) == nil {
+				vswBridge[b] = true
+			}
+		}
+		rows.Close()
+	}
+	vrBridge := map[string]bool{} // bridge device -> is a vRouter leg (transit or internal)
+	if rows, err := s.db.Query(`SELECT bridge FROM vrouter_legs WHERE bridge<>''`); err == nil {
+		for rows.Next() {
+			var b string
+			if rows.Scan(&b) == nil {
+				vrBridge[b] = true
+			}
+		}
+		rows.Close()
+	}
 	out := all[:0]
 	for _, i := range all {
 		if i.Type == "tap" {
 			continue // per-VM tap — hidden from the admin interface lists
 		}
+		i.Group = ifaceGroup(i, vswBridge, vrBridge)
 		out = append(out, i)
 	}
 	return out, nil
+}
+
+// ifaceGroup returns the UI section label for an interface. Bridges are
+// disambiguated with the DB (vSwitch vs vRouter leg); everything else maps
+// straight off the link type.
+func ifaceGroup(i hostinfo.Iface, vsw, vr map[string]bool) string {
+	switch i.Type {
+	case "physical":
+		return "Physical interfaces"
+	case "bond":
+		return "Bonds / LAGs"
+	case "vlan":
+		return "VLAN interfaces"
+	case "vxlan":
+		return "VXLAN overlays"
+	case "veth":
+		return "Container veth (LXC)"
+	case "loopback":
+		return "Loopback"
+	case "bridge":
+		switch {
+		case vsw[i.Name]:
+			return "vSwitch bridges"
+		case vr[i.Name]:
+			return "vRouter bridges"
+		default:
+			return "Other bridges"
+		}
+	default:
+		return "Other"
+	}
 }
 
 // EnsurePhysicalLinksUp administratively brings every physical NIC up, even ones
@@ -73,6 +201,25 @@ type TransitIface struct {
 // NOT enslaved to a bridge/bond. Enriched with link state, carrier, speed, any IPs
 // already assigned, and the LLDP/CDP neighbor so the admin can see which ports are
 // up, unused, and what they're wired to before assigning an IP.
+// LLDPDetail returns the full LLDP/CDP neighbor fields for one interface.
+func (s *Service) LLDPDetail(iface string) (sw, port, mgmt, descr string) {
+	if n, ok := lldp.Neighbors()[iface]; ok {
+		return n.SwitchName, n.PortID, n.MgmtIP, n.SwitchDescr
+	}
+	return "", "", "", ""
+}
+
+// LLDPNeighbors returns a simple iface → "switch port" label map for the UI.
+func (s *Service) LLDPNeighbors() map[string]string {
+	out := map[string]string{}
+	for ifc, n := range lldp.Neighbors() {
+		if lbl := strings.TrimSpace(n.SwitchName + " " + n.PortID); lbl != "" {
+			out[ifc] = lbl
+		}
+	}
+	return out
+}
+
 func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 	if !p.IsAdmin {
 		return nil, ErrUnauthorized
@@ -82,6 +229,7 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 		return nil, err
 	}
 	mgmt := s.mgmtIface()
+	storage := s.StorageIface()
 	nbrs := lldp.Neighbors()
 	var out []TransitIface
 	for _, it := range ifaces {
@@ -90,6 +238,9 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 		}
 		if it.Name == mgmt || it.Master != "" {
 			continue // mgmt NIC or already enslaved to a vSwitch/bond — not free
+		}
+		if storage != "" && it.Name == storage {
+			continue // the dedicated storage NIC (carries the Ceph/storage IP) — never a transit
 		}
 		ti := TransitIface{Name: it.Name, State: it.State, Carrier: it.Carrier, SpeedMbps: it.SpeedMbps, Addrs: it.Addrs}
 		if n, ok := nbrs[it.Name]; ok {
@@ -150,16 +301,67 @@ func deviceInUse(paths []string) (path, note string, used bool) {
 	return "", "", false
 }
 
+// diskMountNote returns a non-empty reason when the disk (or any child) is
+// currently mounted — the condition that must always block a reclaim wipe.
+func diskMountNote(disk string) string {
+	devs, err := hostinfo.BlockDevices()
+	if err != nil {
+		return ""
+	}
+	var walk func(hostinfo.BlockDev) string
+	walk = func(bd hostinfo.BlockDev) string {
+		if bd.Mount != "" {
+			return "mounted at " + bd.Mount
+		}
+		for _, c := range bd.Children {
+			if n := walk(c); n != "" {
+				return n
+			}
+		}
+		return ""
+	}
+	for _, d := range devs {
+		if d.Path == disk {
+			return walk(d)
+		}
+	}
+	return ""
+}
+
+// validDiskPath reports whether disk is a real whole-disk /dev path on this host.
+func validDiskPath(disk string) bool {
+	devs, err := hostinfo.BlockDevices()
+	if err != nil {
+		return false
+	}
+	for _, d := range devs {
+		if d.Path == disk {
+			return true
+		}
+	}
+	return false
+}
+
 // DiskStatusRow is one whole physical disk with its SMART health (admin view).
 type DiskStatusRow struct {
-	Path    string `json:"path"`
-	Model   string `json:"model"`
-	Size    string `json:"size"`
-	FSType  string `json:"fstype"`
-	InUse   bool   `json:"in_use"`
-	UseNote string `json:"use_note"`
-	Health  string `json:"health"` // PASSED | FAILED | unknown | n/a
+	Path        string `json:"path"`
+	Model       string `json:"model"`
+	Size        string `json:"size"`
+	FSType      string `json:"fstype"`
+	InUse       bool   `json:"in_use"`
+	UseNote     string `json:"use_note"`
+	Health      string `json:"health"` // PASSED | FAILED | unknown | n/a
+	Reclaim     bool   `json:"reclaim"` // can be cleared for reuse (Ceph remnants, not mounted)
+	ReclaimNote string `json:"reclaim_note"`
+	Failed      bool   `json:"failed"`    // the drive has failed / dropped off the bus
+	FailNote    string `json:"fail_note"` // why (for the UI + toast)
+	Behind      string `json:"behind"`    // RAID controller this drive sits behind ("" = direct/kernel disk)
+	State       string `json:"state"`     // controller's own drive state (Online/Rebuild/…) when Behind != ""
+	Degraded    bool   `json:"degraded"`  // rebuilding / predictive — warn, not a hard failure
 }
+
+// reNVMeCtrl extracts the controller (nvme0) from a namespace device (nvme0n1).
+var reNVMeCtrl = regexp.MustCompile(`^(nvme\d+)n\d+`)
 
 // DiskStatus lists whole disks with SMART health (admin only). Backs the storage
 // page "Disk status" card and the ZFS replace/cache/log device pickers.
@@ -172,19 +374,262 @@ func (s *Service) DiskStatus(p *Principal) []DiskStatusRow {
 		return nil
 	}
 	smart := hostinfo.SmartAvailable()
+	kerr := hostinfo.KernelDiskErrors()
 	var out []DiskStatusRow
 	for _, d := range devs {
 		if d.Type != "disk" {
 			continue
 		}
+		// Don't probe SMART on a dead device (0 bytes) — it only wastes the
+		// run() timeout and reports "unknown" anyway; the size check flags it.
 		h := "n/a"
-		if smart {
+		if smart && d.Bytes > 0 {
 			h = hostinfo.SmartHealth(d.Path)
 		}
-		out = append(out, DiskStatusRow{
+		row := DiskStatusRow{
 			Path: d.Path, Model: d.Model, Size: d.Size, FSType: d.FSType,
 			InUse: d.InUse, UseNote: d.UseNote, Health: h,
-		})
+		}
+		// Failure detection — three independent signals, so a drive that drops off
+		// the bus is caught even when SMART can't be read:
+		//   1) the device now reports 0 bytes (offline / disabled controller),
+		//   2) SMART overall-health self-assessment is FAILED,
+		//   3) the kernel logged I/O errors or disabled the NVMe controller.
+		switch {
+		case d.Bytes == 0:
+			row.Failed, row.FailNote = true, "device is offline — it reports 0 bytes (it dropped off the bus)"
+		case h == "FAILED":
+			row.Failed, row.FailNote = true, "SMART overall-health self-assessment: FAILED"
+		}
+		if r, ok := kerr[d.Name]; ok {
+			row.Failed = true
+			if row.FailNote == "" {
+				row.FailNote = r
+			}
+		} else if m := reNVMeCtrl.FindStringSubmatch(d.Name); m != nil {
+			if r, ok := kerr[m[1]]; ok {
+				row.Failed = true
+				if row.FailNote == "" {
+					row.FailNote = r
+				}
+			}
+		}
+		// Offer a reclaim (wipe) only for a disk stranded by a removed Ceph OSD.
+		if d.InUse {
+			row.Reclaim, row.ReclaimNote = s.CephDiskReclaimable(d.Path)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// RAIDGroupView is one virtual disk (disk group) behind a controller: the
+// /dev node it appears as, its RAID type, and its physical member drives. A
+// controller whose backend doesn't expose VD grouping yields a single group
+// titled "Physical drives".
+type RAIDGroupView struct {
+	Dev    string // /dev/sdX this group maps to ("" if unresolved)
+	RAID   string // "RAID 5", "RAID 0", … ("" for a plain physical-drive list)
+	Size   string
+	State  string // VD state, e.g. "Optimal"
+	Name   string // controller's VD label, e.g. "BOOT"
+	Group  int
+	Drives []DiskStatusRow
+}
+
+// RAIDControllerView is one hardware RAID controller and its virtual disks, for
+// the dedicated "RAID controller drives" card (kept separate from the kernel
+// /dev disks, which are the controller's VIRTUAL disks that pools bind to).
+type RAIDControllerView struct {
+	Name   string
+	Vendor string
+	Tool   string
+	Groups []RAIDGroupView
+}
+
+// raidMemberRow projects a raidctl.Drive onto a DiskStatusRow for the UI.
+func raidMemberRow(dr raidctl.Drive) DiskStatusRow {
+	loc := dr.Location
+	if loc == "" {
+		loc = "?"
+	}
+	row := DiskStatusRow{
+		Path: loc, Model: dr.Model, Size: dr.Size, Health: dr.Health,
+		Behind: dr.Controller, State: dr.State,
+	}
+	switch {
+	case dr.Failed:
+		row.Failed, row.FailNote = true, dr.Note
+	case dr.Degraded:
+		row.Degraded, row.FailNote = true, dr.Note
+	}
+	return row
+}
+
+// RAIDControllers lists the physical member drives behind each hardware RAID
+// controller, grouped by virtual disk (admin only). These disks never appear in
+// lsblk — the controller exposes only a virtual disk — so this is the only place
+// a member's health / failure / RAID membership shows.
+func (s *Service) RAIDControllers(p *Principal) []RAIDControllerView {
+	if !p.IsAdmin {
+		return nil
+	}
+	var out []RAIDControllerView
+	for _, c := range raidctl.Enumerate().Controllers {
+		v := RAIDControllerView{Name: c.Name, Vendor: c.Vendor, Tool: c.Tool}
+		if len(c.VDisks) > 0 {
+			for _, vd := range c.VDisks {
+				g := RAIDGroupView{Dev: vd.Dev, RAID: vd.RAID, Size: vd.Size, State: vd.State, Name: vd.Name, Group: vd.Group}
+				for _, dr := range vd.Members {
+					g.Drives = append(g.Drives, raidMemberRow(dr))
+				}
+				v.Groups = append(v.Groups, g)
+			}
+		} else {
+			// Backend without VD grouping (storcli/HPE/Adaptec) — flat list.
+			g := RAIDGroupView{}
+			for _, dr := range c.Drives {
+				g.Drives = append(g.Drives, raidMemberRow(dr))
+			}
+			v.Groups = append(v.Groups, g)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// HostRestart reboots the physical host (admin only). It audits the request and
+// then triggers `systemctl reboot` after a short delay so the HTTP response can
+// flush first; systemd stops vdxd in order, which runs the graceful-VM-shutdown
+// unit before the kernel reboots.
+func (s *Service) HostRestart(p *Principal, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	s.audit(p, p.OrgID, "host.restart", "host", "", ip, nil)
+	hostPowerAfterDelay("reboot")
+	return nil
+}
+
+// HostShutdown powers off the physical host (admin only). Same ordering as
+// HostRestart — graceful VM shutdown runs as vdxd is stopped.
+func (s *Service) HostShutdown(p *Principal, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	s.audit(p, p.OrgID, "host.shutdown", "host", "", ip, nil)
+	hostPowerAfterDelay("poweroff")
+	return nil
+}
+
+// hostPowerAfterDelay fires `systemctl <verb>` after a brief pause so the caller
+// can return an HTTP response before the connection drops.
+func hostPowerAfterDelay(verb string) {
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		_ = systemctl(verb)
+	}()
+}
+
+// ControllerHints returns one install hint per RAID controller detected on the
+// PCI bus whose management CLI is NOT installed — so the admin knows the single
+// package to add to unlock per-drive SMART. Admin only.
+func (s *Service) ControllerHints(p *Principal) []string {
+	if !p.IsAdmin {
+		return nil
+	}
+	var out []string
+	for _, m := range raidctl.Enumerate().Missing {
+		out = append(out, m.Vendor+" detected ("+m.PCI+") — "+m.Hint)
+	}
+	return out
+}
+
+// DriveAlert is a surfaced drive-failure, for the global toast poller.
+type DriveAlert struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Msg   string `json:"msg"`
+}
+
+// NICAlert is a surfaced physical-NIC link failure, for the global toast poller.
+type NICAlert struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Msg   string `json:"msg"`
+}
+
+// NICAlerts returns one alert per CONFIGURED physical NIC whose link is down — a
+// NIC that is enslaved to a vSwitch/bond or carries an IP but has lost carrier
+// (unplugged / switch-port down) or is admin-down. An unused, unconfigured NIC
+// (vdxd holds those admin-up with no cable) is NOT alerted. Admin only.
+func (s *Service) NICAlerts(p *Principal) []NICAlert {
+	if !p.IsAdmin {
+		return nil
+	}
+	ifs, err := s.HostInterfaces(p)
+	if err != nil {
+		return nil
+	}
+	var out []NICAlert
+	for _, it := range ifs {
+		if it.Type != "physical" {
+			continue
+		}
+		configured := it.Master != "" || len(it.Addrs) > 0
+		if !configured {
+			continue // a spare NIC with no role — not a failure
+		}
+		if it.State != "down" && it.Carrier {
+			continue // up with link — healthy
+		}
+		where := it.Master
+		if where == "" && len(it.Addrs) > 0 {
+			where = it.Addrs[0]
+		}
+		msg := it.Name
+		if where != "" {
+			msg += " (on " + where + ")"
+		}
+		if it.State == "down" {
+			msg += " — interface is down"
+		} else {
+			msg += " — link is down (cable unplugged or switch port down)"
+		}
+		out = append(out, NICAlert{ID: "nic:" + it.Name, Title: "Network adapter down", Msg: msg})
+	}
+	return out
+}
+
+// DriveAlerts returns one alert per failed physical disk (admin only). Backs the
+// /api/drive-alerts poller so a failure toasts from any page, not just /storage.
+func (s *Service) DriveAlerts(p *Principal) []DriveAlert {
+	if !p.IsAdmin {
+		return nil
+	}
+	var out []DriveAlert
+	for _, d := range s.DiskStatus(p) {
+		if !d.Failed {
+			continue
+		}
+		what := d.Path
+		if d.Model != "" {
+			what += " (" + d.Model + ")"
+		}
+		out = append(out, DriveAlert{ID: "disk:" + d.Path, Title: "Drive failure", Msg: what + " — " + d.FailNote})
+	}
+	// RAID controller member drives (hidden from lsblk, so scanned directly).
+	for _, c := range raidctl.Enumerate().Controllers {
+		for _, dr := range c.Drives {
+			if !dr.Failed {
+				continue
+			}
+			what := dr.Controller + " · " + dr.Location
+			if dr.Model != "" {
+				what += " (" + dr.Model + ")"
+			}
+			out = append(out, DriveAlert{ID: "raid:" + dr.Controller + ":" + dr.Location, Title: "RAID drive failure", Msg: what + " — " + dr.Note})
+		}
 	}
 	return out
 }
@@ -199,6 +644,7 @@ type TopoVM struct {
 	State string `json:"state"` // running | stopped | ""
 	Kind  string `json:"kind"`  // "" = VM, "container" = LXC container
 	Veth  string `json:"veth"`  // container only: its host-side veth (drawn as an inline node)
+	IP    string `json:"ip,omitempty"` // DHCP-assigned address (vRouter internal port groups)
 }
 
 // TopoPortGroup is a VMware-style port group (a network/VLAN) on a vSwitch.
@@ -240,12 +686,60 @@ type TopoSwitch struct {
 	Addrs      []string        `json:"addrs"`
 	VMKs       []TopoVMK       `json:"vmks"` // host IP adapters (host-adapter boxes)
 	PortGroups []TopoPortGroup `json:"port_groups"`
+	// When this bridge belongs to a vRouter, its name + role (internal|transit) so
+	// the diagram labels it as a vRouter component rather than a plain vSwitch.
+	VRouter     string `json:"vrouter,omitempty"`
+	VRouterRole string `json:"vrouter_role,omitempty"`
+}
+
+// TopoVRInternal is one internal port group served by a vRouter (diagram).
+type TopoVRInternal struct {
+	Name   string   `json:"name"`
+	GW     string   `json:"gw"`     // vRouter gateway IP/CIDR on this segment (IPv4)
+	Subnet string   `json:"subnet"` // the port-group subnet (networks.cidr)
+	Bridge string   `json:"bridge"` // host bridge device for this leg (e.g. vr4-bgp-test)
+	Iface  string   `json:"iface"`  // the vRouter's interface on this leg (e.g. eth1)
+	Zone   string   `json:"zone,omitempty"` // firewall zone this port group belongs to, if any
+	VMs    []TopoVM `json:"vms"`
+}
+
+// TopoVRTransit is a vRouter's transit link + what it connects to (LLDP/CDP).
+type TopoVRTransit struct {
+	CIDR   string `json:"cidr"`
+	Phys   string `json:"phys"`
+	Bridge string `json:"bridge"` // host bridge device for the transit leg (e.g. vr4-wan)
+	Iface  string `json:"iface"`  // the vRouter's transit interface (e.g. eth0)
+	Switch string `json:"switch"`
+	Port   string `json:"port"`
+	Mgmt   string `json:"mgmt"`
+	Descr  string `json:"descr"`
+}
+
+// TopoVRouter is a vRouter drawn as a single-flow chain: port groups → vRouter →
+// transit → external port.
+type TopoVRouter struct {
+	Name     string           `json:"name"`
+	Internal []TopoVRInternal `json:"internal"`
+	Transit  *TopoVRTransit   `json:"transit,omitempty"`
+	// Routing is the set of dynamic-routing protocols configured on this vRouter
+	// (e.g. ["BGP","OSPF"]), shown as a tag in the box.
+	Routing []string `json:"routing,omitempty"`
+	// Health drives the status light next to the routing tag: "up" (green) when
+	// every configured BGP peer is established, "down" (red) when a peer is down,
+	// "" when there's nothing dynamic to monitor / the runtime isn't running.
+	Health string `json:"health,omitempty"`
+	// Runtime is the vRouter backend (lxc|netns), shown in the hover detail view.
+	Runtime string `json:"runtime,omitempty"`
+	// Firewall is true when the zone firewall is armed on this vRouter (shows a
+	// shield pill on the box).
+	Firewall bool `json:"firewall,omitempty"`
 }
 
 // Topology is the whole host network picture for the VMware-style diagram.
 type Topology struct {
 	Switches []TopoSwitch     `json:"switches"`
 	FreeNICs []hostinfo.Iface `json:"free_nics"` // physical NICs not on any vSwitch (free uplinks)
+	VRouters []TopoVRouter    `json:"vrouters,omitempty"`
 }
 
 type netRow struct {
@@ -295,21 +789,33 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	var allVMs []TopoVM
 	netToVMs := map[int64][]TopoVM{} // port group id -> bound VMs
 	vmNetID := map[string]int64{}    // vm id -> its bound port group (0 = default/NAT)
-	if rows, err := s.db.Query(`SELECT id, name, state, COALESCE(network_id,0) FROM sessions WHERE deleted_at IS NULL`); err == nil {
+	vmMAC := map[string]string{}     // vm id -> MAC (for DHCP-lease / ARP IP lookup)
+	if rows, err := s.db.Query(`SELECT id, name, state, COALESCE(network_id,0), COALESCE(mac,'') FROM sessions WHERE deleted_at IS NULL`); err == nil {
 		for rows.Next() {
-			var id, name, state string
+			var id, name, state, mac string
 			var netID int64
-			if rows.Scan(&id, &name, &state, &netID) == nil {
+			if rows.Scan(&id, &name, &state, &netID, &mac) == nil {
 				vm := TopoVM{ID: id, Name: name, Tap: netdrv.TapName(id), State: state}
 				tapToVM[vm.Tap] = vm
 				allVMs = append(allVMs, vm)
 				vmNetID[vm.ID] = netID
+				vmMAC[vm.ID] = mac
 				if netID > 0 {
 					netToVMs[netID] = append(netToVMs[netID], vm)
 				}
 			}
 		}
 		rows.Close()
+	}
+	// vmIP resolves an internal VM's address: the vRouter's DHCP lease first, else
+	// the guest agent / ARP (for statically-addressed or non-DHCP guests).
+	vmIP := func(leases map[string]string, id, mac string) string {
+		if mac != "" {
+			if ip := leases[strings.ToLower(mac)]; ip != "" {
+				return ip
+			}
+		}
+		return s.guestPrimaryIP(&session.Session{ID: id, MAC: mac})
 	}
 
 	// LXC containers attach to a host bridge by name (containers.bridge), via a
@@ -571,6 +1077,181 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			})
 		} else {
 			topo.FreeNICs = append(topo.FreeNICs, it)
+		}
+	}
+	// Merge each vRouter's bridges into ONE vRouter node: its internal-bridge
+	// switch(es) (carrying the VM port groups) and its transit-bridge switch
+	// (carrying the uplink NIC) collapse into a single kind="vrouter" block so the
+	// diagram shows one vRouter — port groups on the left, transit NIC as the
+	// uplink — not two separate "vRouter" boxes.
+	type vrLeg struct{ name, role, bridge, cidr, iface string }
+	var legs []vrLeg
+	if rows, err := s.db.Query(`SELECT v.name, l.kind, l.bridge, COALESCE(l.cidr,''), COALESCE(l.iface_name,'') FROM vrouter_legs l JOIN vrouters v ON v.id=l.vrouter_id ORDER BY v.name, l.idx`); err == nil {
+		for rows.Next() {
+			var l vrLeg
+			if rows.Scan(&l.name, &l.role, &l.bridge, &l.cidr, &l.iface) == nil && l.bridge != "" {
+				legs = append(legs, l)
+			}
+		}
+		rows.Close()
+	}
+	if len(legs) > 0 {
+		bridgeVR := map[string]string{}      // bridge -> vRouter name
+		gwByBridge := map[string]string{}    // internal bridge -> gateway CIDR
+		ifaceByBridge := map[string]string{} // bridge -> vRouter interface (eth0/eth1..)
+		transitCIDR := map[string]string{}
+		var order []string
+		seen := map[string]bool{}
+		for _, l := range legs {
+			bridgeVR[l.bridge] = l.name
+			ifaceByBridge[l.bridge] = l.iface
+			if l.role == "internal" {
+				gwByBridge[l.bridge] = l.cidr
+			} else if l.role == "transit" {
+				transitCIDR[l.name] = netAddr(l.cidr) // show the subnet, not the vRouter's leg IP
+			}
+			if !seen[l.name] {
+				seen[l.name] = true
+				order = append(order, l.name)
+			}
+		}
+		// Per-vRouter routing protocols + health, for the box's routing tag + light.
+		type vrMeta struct {
+			routing  []string
+			health   string
+			runtime  string
+			firewall bool
+		}
+		metaByVR := map[string]vrMeta{}
+		var vrows []vrouter.VRouter
+		if rs, err := s.db.Query(`SELECT `+vrouterCols+` FROM vrouters WHERE org_id=?`, p.OrgID); err == nil {
+			for rs.Next() { // read all rows before any backend call (single-conn pool)
+				if v, e := scanVRouter(rs); e == nil {
+					vrows = append(vrows, v)
+				}
+			}
+			rs.Close()
+		}
+		for _, v := range vrows {
+			cfg := parseFRRJSON(v.FRRJSON)
+			var protos []string
+			if cfg.BGP.Enabled {
+				protos = append(protos, "BGP")
+			}
+			if cfg.OSPF.Enabled {
+				protos = append(protos, "OSPF")
+			}
+			if cfg.EIGRP.Enabled {
+				protos = append(protos, "EIGRP")
+			}
+			if len(cfg.Static) > 0 {
+				protos = append(protos, "Static")
+			}
+			health := ""
+			if len(protos) > 0 {
+				health = "up"
+				if v.Status == "creating" || v.Status == "error" {
+					health = "down"
+				} else if b, err := vrouter.For(v.Runtime); err == nil {
+					if ls, e := b.Status(v); e != nil || (ls.State != "" && ls.State != "running") {
+						health = "down"
+					} else if cfg.BGP.Enabled && bgpAnyDown(ls.BGPSummary) {
+						health = "down"
+					}
+				}
+			}
+			fw := parseFW(v.FWJSON)
+			metaByVR[v.Name] = vrMeta{routing: protos, health: health, runtime: v.Runtime, firewall: fw.Enabled}
+		}
+		// Port-group firewall badge: which VM Group (unified NSX-style model) a port
+		// group belongs to. Map bridge → network id → group name; the compiler's
+		// internal per-leg zone keys (leg1…) must never surface on the diagram.
+		zoneByBridge := map[string]string{}
+		{
+			f := s.loadOrgFW(p.OrgID)
+			namesByNet := map[int64][]string{}
+			for _, g := range f.Groups {
+				for _, nid := range g.Networks {
+					namesByNet[nid] = append(namesByNet[nid], g.Name)
+				}
+			}
+			if len(namesByNet) > 0 {
+				if nets, err := s.net.ListNetworks(p.OrgID); err == nil {
+					for _, n := range nets {
+						if n.Bridge == "" {
+							continue
+						}
+						switch names := namesByNet[n.ID]; len(names) {
+						case 0:
+						case 1:
+							zoneByBridge[n.Bridge] = names[0]
+						default:
+							zoneByBridge[n.Bridge] = itoa(len(names)) + " groups"
+						}
+					}
+				}
+			}
+		}
+		vrs := map[string]*TopoVRouter{}
+		leasesByVR := map[string]map[string]string{}
+		for _, nm := range order {
+			vrs[nm] = &TopoVRouter{Name: nm, Transit: &TopoVRTransit{CIDR: transitCIDR[nm]},
+				Routing: metaByVR[nm].routing, Health: metaByVR[nm].health, Runtime: metaByVR[nm].runtime,
+				Firewall: metaByVR[nm].firewall}
+			leasesByVR[nm] = s.vrouterLeases(nm)
+		}
+		// Pull the vRouter's port groups + transit uplink out of the raw switches,
+		// then drop those switches so the vRouter draws as ONE chain, not vSwitches.
+		var kept []TopoSwitch
+		for _, sw := range topo.Switches {
+			vr, ok := bridgeVR[sw.Name]
+			if !ok {
+				kept = append(kept, sw)
+				continue
+			}
+			v := vrs[vr]
+			if _, isInternal := gwByBridge[sw.Name]; isInternal {
+				// internal bridge → its port groups are the vRouter's segments
+				for _, pg := range sw.PortGroups {
+					vms := make([]TopoVM, len(pg.VMs))
+					copy(vms, pg.VMs)
+					for j := range vms {
+						vms[j].IP = vmIP(leasesByVR[vr], vms[j].ID, vmMAC[vms[j].ID])
+					}
+					v.Internal = append(v.Internal, TopoVRInternal{Name: pg.Name, GW: gwByBridge[sw.Name], Subnet: pg.CIDR, Bridge: sw.Name, Iface: ifaceByBridge[sw.Name], Zone: zoneByBridge[sw.Name], VMs: vms})
+				}
+			} else {
+				// transit bridge → its uplink is the external port (never a port group)
+				v.Transit.Bridge = sw.Name
+				v.Transit.Iface = ifaceByBridge[sw.Name]
+				for _, up := range sw.Uplinks {
+					v.Transit.Phys = up.Name
+					if len(up.Neighbors) > 0 {
+						n := up.Neighbors[0]
+						v.Transit.Switch, v.Transit.Port, v.Transit.Mgmt, v.Transit.Descr = n.SwitchName, n.PortID, n.MgmtIP, n.SwitchDescr
+					}
+				}
+			}
+		}
+		topo.Switches = kept
+		for _, nm := range order {
+			if vrs[nm].Transit != nil && vrs[nm].Transit.CIDR == "" && vrs[nm].Transit.Phys == "" {
+				vrs[nm].Transit = nil
+			}
+			topo.VRouters = append(topo.VRouters, *vrs[nm])
+		}
+	}
+	// A port group shows the same per-VM info no matter where it's connected: resolve
+	// every drawn VM's IP (guest-agent / ARP / DHCP lease) just like the vRouter
+	// segments do. (The vSwitch BOX itself shows no IP — that's the host-adapter box.)
+	for si := range topo.Switches {
+		for pi := range topo.Switches[si].PortGroups {
+			vms := topo.Switches[si].PortGroups[pi].VMs
+			for j := range vms {
+				if vms[j].IP == "" && vms[j].ID != "" {
+					vms[j].IP = vmIP(nil, vms[j].ID, vmMAC[vms[j].ID])
+				}
+			}
 		}
 	}
 	return topo, nil

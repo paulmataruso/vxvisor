@@ -55,12 +55,12 @@ const retentionGrace = 10 * time.Minute
 // gossiped capacity back into the nodes table (no central coordinator polls).
 func (s *Supervisor) SetGossip(g *gossip.Cluster) { s.g = g }
 
-// SetService attaches the service so broker-level loops (idle desktop reclaim)
+// SetService attaches the service so service-level background loops
 // can run. Optional — without it those loops are no-ops.
 func (s *Supervisor) SetService(svc *service.Service) { s.svc = svc }
 
-// SetRole attaches the cluster election role. Cluster-singleton loops (warm pool
-// / idle desktop reclaim, account sync, HA monitor) run ONLY on the leader so a
+// SetRole attaches the cluster election role. Cluster-singleton loops
+// (account sync, HA monitor) run ONLY on the leader so a
 // multi-node cluster does not double-provision or double-write. A nil role (the
 // single-host default) is treated as "always leader".
 func (s *Supervisor) SetRole(role *cluster.Role) { s.role = role }
@@ -98,6 +98,18 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// Remount any configured network backup targets (NFS/CIFS/CephFS) so
 		// scheduled + manual backups to shares work after a reboot.
 		s.svc.EnsureBackupMounts()
+		// Rebuild vRouters (NSX-lite): ensure their bridges/veths exist and the
+		// transit NIC is re-enslaved, then start each runtime. vdxd owns the start
+		// order (containers are lxc.start.auto=0) so veth legs never race their
+		// bridges at boot.
+		s.svc.ReensureVRouters()
+		// Rebuild the distributed-firewall (port-group microsegmentation) host
+		// bridge nftables table — the kernel clears it on reboot.
+		s.svc.ReensureNetFirewalls()
+		// Unified firewall: seed the org document from any legacy per-vRouter /
+		// per-network config on first upgrade, then recompile both planes so the
+		// NSX-style model is authoritative after a reboot.
+		s.svc.ReensureFirewall()
 	}
 	go s.loop(ctx, "reconciler", 5*time.Second, s.reconcile)
 	go s.loop(ctx, "session-gc", 1*time.Hour, s.gcWebSessions)
@@ -109,7 +121,6 @@ func (s *Supervisor) Run(ctx context.Context) {
 	go s.loop(ctx, "metrics-gc", 6*time.Hour, s.gcMetrics)
 	go s.loop(ctx, "metering", 60*time.Second, s.meter)
 	go s.loop(ctx, "node-health", 30*time.Second, s.nodeHealth)
-	go s.loop(ctx, "desktop-reclaim", 2*time.Minute, s.reclaimDesktops)
 	go s.loop(ctx, "account-sync", 10*time.Second, s.syncAccounts)
 	go s.loop(ctx, "guest-os", 60*time.Second, s.detectGuestOS)
 	<-ctx.Done()
@@ -365,18 +376,6 @@ func (s *Supervisor) nodeHealth() {
 		if n.Role != "local" && n.Address != "" && n.LastSeen == "" {
 			s.cl.Probe(n)
 		}
-	}
-}
-
-// reclaimDesktops stops and frees pooled desktops idle past the timeout, and
-// tops warm pools back up. Cluster-singleton: leader only, so warm pools are not
-// double-provisioned across nodes.
-func (s *Supervisor) reclaimDesktops() {
-	if s.svc == nil || !s.isLeader() {
-		return
-	}
-	if n := s.svc.ReclaimIdle(); n > 0 {
-		log.Printf("desktop-reclaim: freed %d idle pooled desktop(s)", n)
 	}
 }
 
