@@ -20,3 +20,7 @@
 
 # Go
 /vendor/
+
+# Local Claude session memory snapshot (host IPs/creds) — travels with a manual
+# folder copy, never pushed to the public repo.
+/.claude-memory/

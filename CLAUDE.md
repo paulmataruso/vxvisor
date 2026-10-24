@@ -65,8 +65,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **36**
-  (`vm-autostart`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **43**
+  (`vm-folders`). Add `{N, "name", "SQL"}`.
 - `ALTER TABLE sessions ADD COLUMN ...` is the pattern for new VM fields.
 
 ### `sessions` column discipline (`internal/session/manager.go`)
@@ -125,10 +125,32 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   `/var/lib/vdxclone/` (host) — **never commit them.** No host IPs/passwords/tokens in the repo.
 
 ## Current state (migrate when the new host is ready)
-- Feature set complete through M22 (see the session memory). The VDI feature
-  (desktop portal + pool/app broker + guacd gateway) was removed — VXVisor is now a pure
-  VM/host control plane.
-- The old test host was an **Intel Atom C2758** (weak; fine for servers/LXC/light desktops).
-  A faster host is being provisioned — on it, apply `docs/TUNING.md` §B (tuned, hugepages,
-  CPU pinning, ZFS ARC cap, bridged+multiqueue net; GPU passthrough via vfio for desktops).
+- The VDI feature (desktop portal + pool/app broker + guacd gateway) was removed — VXVisor
+  is a pure VM/host control plane.
 - Bootstrap a fresh host with `deploy/install.sh`, then `vdxd user add admin --admin`.
+- Deploy to a host over SSH as a normal user with sudo (NOT root login); the desktop client
+  is cross-built with `desktop/build.sh` (fyne-cross/Docker) and published to a host's
+  `<DataDir>/clients`.
+
+### Recent subsystems (not in the older notes above)
+- **Inventory folders** (migration 43): org-scoped nestable folder tree to organize
+  instances. `vm_folders` + `vm_folder_members` tables (separate from `sessions`),
+  `internal/service/folders_service.go`, REST + web (`/instances` List/Folders views with
+  drag-and-drop), and a desktop-client sidebar tree. Deleting a folder never deletes VMs.
+- **In-app updates** — two tiers: the desktop client self-updates from its server; vdxd
+  self-updates from GitHub Releases via the admin **Updates** page (Stable/Preview channels,
+  manual-only GitHub check — no automatic outbound calls). Releases are cut with
+  `deploy/release.sh` (bundles vdxd + both clients + `SHA256SUMS`). **Full details in
+  `docs/UPDATES.md` — read it before touching anything update-related.** Branch model:
+  `dev` → prereleases (Preview), `main` → stable. The repo is **public** so the server can
+  read releases anonymously.
+- **Desktop client** (`desktop/`, separate Go module `.../desktop`, CGO via fyne-cross):
+  VMRC-style Fyne app — VM list/folders, consoles (RFB over the WS proxy, local hardware
+  cursor), power ops, VxV branding, taskbar-icon integration, and the Tier-1 self-update.
+
+### Onboarding a NEW Claude on a migrated host
+When this project folder is moved to a new host, prior-session context from the previous
+host's Claude memory is snapshotted in **`.claude-memory/`** (gitignored — contains host
+IPs/creds, so it is NEVER committed; it travels only via a manual folder copy). Read
+`.claude-memory/MEMORY.md` first for the index, then the per-topic files. Treat anything in
+there about hosts/IPs/credentials as **stale** until re-verified on the new host.
