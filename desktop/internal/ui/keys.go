@@ -70,3 +70,20 @@ func runeKeysym(r rune) uint32 {
 	}
 	return 0x01000000 + uint32(r)
 }
+
+// runeNeedsShift reports whether a printable rune requires the Shift modifier on
+// a US layout. RFB/VNC servers (notably QEMU) map a shifted keysym to the base
+// key's scancode and expect the CLIENT to hold Shift — otherwise "!" arrives as
+// "1" and "A" as "a". Fyne's TypedRune already gives us the shifted character but
+// swallows the physical Shift, so we re-assert it here.
+func runeNeedsShift(r rune) bool {
+	if r >= 'A' && r <= 'Z' {
+		return true
+	}
+	switch r {
+	case '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')',
+		'_', '+', '{', '}', '|', ':', '"', '<', '>', '?':
+		return true
+	}
+	return false
+}

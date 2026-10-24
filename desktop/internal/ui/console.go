@@ -736,7 +736,37 @@ func buttonBit(b desktop.MouseButton) byte {
 func (v *vncView) FocusGained() {}
 func (v *vncView) FocusLost()   {}
 
-func (v *vncView) TypedRune(r rune) { v.sendKey(runeKeysym(r)) }
+func (v *vncView) TypedRune(r rune) { v.sendRune(runeKeysym(r), runeNeedsShift(r)) }
+
+// sendRune taps a printable keysym, holding Shift around it when the character
+// requires it (QEMU VNC needs the client to assert Shift for shifted keysyms).
+// Any sticky modifiers from the toolbar are applied too; Shift isn't doubled if
+// a sticky Shift is already active.
+func (v *vncView) sendRune(ks uint32, shift bool) {
+	if v.rfb == nil {
+		return
+	}
+	mods := v.takeSticky()
+	if shift {
+		already := false
+		for _, m := range mods {
+			if m == ksShiftL {
+				already = true
+				break
+			}
+		}
+		if !already {
+			mods = append([]uint32{ksShiftL}, mods...)
+		}
+	}
+	for _, m := range mods {
+		v.rfb.SendKey(m, true)
+	}
+	v.rfb.TapKey(ks)
+	for i := len(mods) - 1; i >= 0; i-- {
+		v.rfb.SendKey(mods[i], false)
+	}
+}
 
 func (v *vncView) TypedKey(e *fyne.KeyEvent) {
 	if ks, ok := specialKeysym[e.Name]; ok {
