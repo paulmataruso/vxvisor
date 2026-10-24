@@ -93,6 +93,7 @@ func (a *App) showConnect() {
 		container.NewCenter(brandWordmark(34)),
 		spacer(2),
 		container.NewCenter(mutedText("Management Console", 13)),
+		container.NewCenter(mutedText(Version, 11)),
 	)
 
 	field := func(label string, e fyne.CanvasObject) fyne.CanvasObject {
