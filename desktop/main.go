@@ -26,6 +26,7 @@ func main() {
 			Assets: assets,
 		},
 		BackgroundColour: &options.RGBA{R: 0x0f, G: 0x14, B: 0x20, A: 1},
+		Menu:             app.appMenu(),
 		OnStartup:        app.startup,
 		Bind:             []interface{}{app},
 	})

@@ -14,7 +14,10 @@
 #   vxconsole-<ver>-windows-amd64.exe          <- clients refresh + /clients/latest
 #   SHA256SUMS                                 <- platform.FetchSHA256SUMS
 #
-# Requires: go, docker (for fyne-cross), and the GitHub CLI `gh` (authenticated).
+# Requires: go; the Wails toolchain used by desktop/build.sh (wails CLI,
+#   libgtk-3-dev + libwebkit2gtk-4.1-dev for Linux, gcc-mingw-w64-x86-64 for
+#   Windows — both targets cross-build on a Linux host); and the GitHub CLI `gh`
+#   (authenticated), or publish the release via the GitHub REST API.
 #
 # Usage: deploy/release.sh vX.Y.Z-YYYYMMDD [notes-file] [--prerelease] [--target <branch>]
 #   --prerelease        mark the release as a GitHub pre-release (the "Preview"

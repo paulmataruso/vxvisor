@@ -1,72 +1,19 @@
-# VXVisor Console (desktop client)
+# README
 
-A small, VMRC-style desktop app for **Windows and Linux** that connects to a
-VXVisor host, lists its virtual machines, runs basic power operations
-(start / stop / restart / delete), and opens the VM **console** — a native VNC
-viewer built in, no browser required.
+## About
 
-It is a **separate Go module** from the server so the server binary never pulls
-in the GUI/OpenGL dependencies.
+This is the official Wails Vanilla template.
 
-```
-desktop/
-  cmd/vxconsole/      entry point
-  internal/client/    REST + login (cookie/CSRF) + console WebSocket dial   (pure Go)
-  internal/rfb/       native RFB (VNC) client over the console WebSocket     (pure Go)
-  internal/ui/        Fyne UI: connect -> inventory -> console               (CGO/OpenGL)
-```
+You can configure the project by editing `wails.json`. More information about the project settings can be found
+here: https://wails.io/docs/reference/project-config
 
-## How it connects
+## Live Development
 
-The app authenticates the same way the browser does — **host + username +
-password** — captures the `vdx_session` cookie, and reuses it for everything:
+To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
+server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
+and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
+to this in your browser, and you can call your Go code from devtools.
 
-- inventory via the REST API (`GET /api/v1/sessions`),
-- start / stop / delete via the REST API,
-- restart via the cookie-authed UI endpoint (the CSRF token is derived from the
-  session cookie, exactly as the server derives it),
-- the console over the authenticated WebSocket proxy (`/console/{id}/ws`), raw
-  RFB, using the VM's VNC password.
+## Building
 
-No server-side changes are required.
-
-## The console
-
-A from-scratch RFB 3.8 client that advertises only Raw, CopyRect, Zlib and
-DesktopSize encodings — QEMU honors the client's encoding list, so there is no
-Tight/ZRLE to decode. Pixel format is forced to 32bpp true-colour for a trivial
-decode path. The remote cursor is rendered by the server into the framebuffer.
-
-Input: mouse (absolute), scroll wheel, printable keys, and the special keys
-(arrows, function keys, Enter/Tab/Esc, etc.). Ctrl / Alt / Shift are **sticky**
-one-shot modifiers (tap the toolbar button, then press the next key), plus a
-dedicated **Ctrl+Alt+Del** button. Clipboard: **Paste** types the host clipboard
-into the guest (works without a guest agent); **Send clipboard** pushes it to the
-guest clipboard (needs a guest agent).
-
-## Build
-
-Builds use [`fyne-cross`](https://github.com/fyne-io/fyne-cross), which compiles
-inside Docker images that carry the OpenGL / MinGW toolchains, so you do **not**
-need GL headers or a Windows machine.
-
-```bash
-# one-time
-go install github.com/fyne-io/fyne-cross@latest
-
-# build both platforms (produces artifacts under fyne-cross/dist/)
-./build.sh v1.0.0
-```
-
-The resulting `vxconsole` (Linux) and `vxconsole.exe` (Windows) can be dropped
-into the server's `clients/` folder (inside its data directory, e.g.
-`/var/lib/vdxclone/clients/`) to appear on the server's **Desktop Client**
-download page.
-
-## Run
-
-Launch the binary, enter the host (`10.0.0.5` or `10.0.0.5:8766`), your username
-and password, and connect.
-
-> Over plain HTTP the console works on a LAN. For an encrypted link and one-click
-> clipboard, front the server with a TLS reverse proxy.
+To build a redistributable, production mode package, use `wails build`.

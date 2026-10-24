@@ -129,8 +129,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   is a pure VM/host control plane.
 - Bootstrap a fresh host with `deploy/install.sh`, then `vdxd user add admin --admin`.
 - Deploy to a host over SSH as a normal user with sudo (NOT root login); the desktop client
-  is cross-built with `desktop/build.sh` (fyne-cross/Docker) and published to a host's
-  `<DataDir>/clients`.
+  is cross-built (Linux + Windows, both on the build host) with `desktop/build.sh` (Wails)
+  and published to a host's `<DataDir>/clients`.
 
 ### Recent subsystems (not in the older notes above)
 - **Inventory folders** (migration 43): org-scoped nestable folder tree to organize
@@ -144,9 +144,19 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   `docs/UPDATES.md` — read it before touching anything update-related.** Branch model:
   `dev` → prereleases (Preview), `main` → stable. The repo is **public** so the server can
   read releases anonymously.
-- **Desktop client** (`desktop/`, separate Go module `.../desktop`, CGO via fyne-cross):
-  VMRC-style Fyne app — VM list/folders, consoles (RFB over the WS proxy, local hardware
-  cursor), power ops, VxV branding, taskbar-icon integration, and the Tier-1 self-update.
+- **Desktop client** (`desktop/`, a **Wails v2** app — Go + system webview, module `vxconsole`):
+  a thin branded shell. The connect screen (`frontend/dist/index.html`) navigates the webview
+  to the chosen VXVisor server, so the client renders the server's **actual web UI** (every
+  page incl. the topology diagram, and the noVNC consoles) — 100% parity by construction.
+  Native window menu (Server: connect-to-another / reload / fullscreen / quit) in `app.go`.
+  (Was a Fyne app that hand-ported each page; pivoted 2026-10-24 because matching a web UI in
+  native canvas is endless approximation.) **Cross-builds BOTH targets on a Linux build host**
+  via `desktop/build.sh`: Linux `wails build -s -tags webkit2_41`; Windows
+  `CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 wails build -s -platform windows/amd64`. Build-host
+  deps: wails CLI, `libgtk-3-dev` + `libwebkit2gtk-4.1-dev` (Linux), `gcc-mingw-w64-x86-64`
+  (Windows). Version baked via `-ldflags -X main.version` (Wails forwards it, unlike fyne-cross).
+  Shell self-update is not yet implemented (the UI lives server-side now, so the shell rarely
+  changes); until then a new client is downloaded from the `/clients` page.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

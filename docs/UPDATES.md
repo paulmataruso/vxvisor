@@ -68,16 +68,15 @@ whole flow; read it before touching anything under the "Code map" below.
 - The login screen shows the running version under "Management Console"
   (`ui/app.go`, from `ui.Version`) — the quickest way to confirm what you're on.
 
-**Gotcha that bit us:** `desktop/cmd/vxconsole/main.go` must NOT unconditionally do
-`ui.Version = version`. fyne-cross does **not** forward `-ldflags -X` to `go build`,
-so `main.version` stays `"dev"`; the real version is baked in by `build.sh` via a
-generated `internal/ui/version_gen.go` `init()`. If main overwrites it, the client
-reports `"dev"`, thinks every launch is outdated, and prompts forever. The guard is
-`if version != "dev" { ui.Version = version }`.
-
-**Important:** a client can only self-update if it already *contains* the self-update
-code (first shipped in client v1.13.0). Anything older must be downloaded once by hand
-from the `/clients` page; from v1.13.0+ onward it is automatic.
+> **Client is now Wails (pivoted 2026-10-24).** The desktop client is no longer a Fyne app
+> that implements each page; it is a thin **Wails** webview shell (`desktop/`, module
+> `vxconsole`) that navigates to the server and renders the server's own web UI. Version is
+> baked straight in with `-ldflags -X main.version=<ver>` (Wails forwards it — no
+> `version_gen.go` dance). The sections below about the Fyne client's in-app self-update
+> (`ui/update.go`, `update_apply_*.go`) describe the **retired** client; **client-side
+> self-update is not yet reimplemented in the Wails shell** (the UI lives server-side now, so
+> the shell rarely changes). Until it is, update a client by downloading it from the
+> `/clients` page. The **asset contract and the server←GitHub tier below are unchanged.**
 
 ## Tier 2 — server self-update (from GitHub Releases)
 
@@ -176,9 +175,9 @@ Safe only if no new DB migration ran since (migrations are forward-only; see CLA
 | Concern | File |
 | --- | --- |
 | Client latest/download endpoints | `internal/web/clients_handlers.go` |
-| Client self-update logic | `desktop/internal/ui/update.go`, `update_apply_*.go` |
-| Client http helpers | `desktop/internal/client/client.go` (`LatestClient`, `DownloadTo`) |
-| Client version stamp | `desktop/build.sh` (generates `internal/ui/version_gen.go`); `cmd/vxconsole/main.go` |
+| Client self-update logic | _(retired with the Fyne client; not yet reimplemented in the Wails shell)_ |
+| Client shell (Wails) | `desktop/main.go`, `desktop/app.go`, `desktop/frontend/dist/index.html` |
+| Client version stamp | `desktop/build.sh` → `-ldflags -X main.version=<ver>` |
 | GitHub release client | `internal/platform/github.go` |
 | Binary swap / feed | `internal/platform/platform.go` |
 | Update service (check/apply/channel) | `internal/service/update_service.go` |
