@@ -45,7 +45,7 @@ func (d *dashboard) update(sel *client.Session, vms []client.Session) {
 		spacer(8),
 	}
 	if sel != nil {
-		objs = append(objs, d.detailSection(*sel), spacer(8))
+		objs = append(objs, d.detailSection(*sel), spacer(8), d.actionsSection(*sel), spacer(8))
 	}
 	objs = append(objs, d.usageSection())
 
@@ -180,6 +180,25 @@ func (d *dashboard) detailSection(s client.Session) fyne.CanvasObject {
 	return titledCard("Machine detail", container.NewVBox(rows...))
 }
 
+// actionsSection exposes the per-VM management actions that mirror the web
+// instance page: hardware edit, network, snapshots, media, and autostart.
+func (d *dashboard) actionsSection(s client.Session) fyne.CanvasObject {
+	sh := d.sh
+	autoLabel := "Autostart: on"
+	if !s.Autostart {
+		autoLabel = "Autostart: off"
+	}
+	btns := container.NewThemeOverride(container.NewHBox(
+		plainBtn("Edit hardware", func() { sh.specDialog(s) }),
+		plainBtn("Network", func() { sh.networkDialog(s) }),
+		plainBtn("Snapshots", func() { sh.snapshotsDialog(s) }),
+		plainBtn("Media", func() { sh.mediaDialog(s) }),
+		plainBtn(autoLabel, func() { sh.toggleAutostart(s) }),
+	), compactTheme{})
+	note := mutedText("Hardware/network edits apply on next start for a running VM.", 11)
+	return titledCard("Manage", container.NewVBox(btns, spacer(4), note))
+}
+
 func (d *dashboard) guestLine(s client.Session) string {
 	if !isRunning(s.State) {
 		return "—"
@@ -237,7 +256,7 @@ func (d *dashboard) power(s client.Session, action string) {
 		case "stop":
 			err = d.sh.app.client.Stop(s.ID)
 		case "restart":
-			err = d.sh.app.client.Restart(s.ID)
+			err = d.sh.app.client.RestartSession(s.ID)
 		}
 		fyne.Do(func() {
 			if err != nil {

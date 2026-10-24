@@ -56,6 +56,19 @@ type Session struct {
 	NetworkID   int64  `json:"NetworkID"`
 	Autostart   bool   `json:"Autostart"`
 	CreatedAt   string `json:"CreatedAt"`
+
+	// Hardware profile (for the hardware-edit dialog pre-fill; applied on next
+	// start). Mirrors session.Session's launch-time knobs.
+	Firmware    string `json:"Firmware"`
+	MachineType string `json:"MachineType"`
+	DiskBus     string `json:"DiskBus"`
+	NICModel    string `json:"NICModel"`
+	VGA         string `json:"VGA"`
+	GuestAgent  bool   `json:"GuestAgent"`
+	TPM         bool   `json:"TPM"`
+	SecureBoot  bool   `json:"SecureBoot"`
+	PinCPUs     bool   `json:"PinCPUs"`
+	HugePages   bool   `json:"HugePages"`
 }
 
 // GuestInfo is the shape of GET /api/instances/{id}/guest (qemu.GuestInfo).
@@ -126,6 +139,64 @@ func (c *Client) Login(user, pass string) error {
 		}
 	}
 	return fmt.Errorf("login failed: check host, username, and password")
+}
+
+// Me is the identity of the logged-in principal plus the server build version,
+// from GET /api/v1/me. IsAdmin drives which management pages the desktop client
+// exposes; Version lets the client gate features on the server it is talking to.
+type Me struct {
+	Username string `json:"Username"`
+	Role     string `json:"Role"`
+	IsAdmin  bool   `json:"IsAdmin"`
+	OrgID    int64  `json:"OrgID"`
+	OrgRole  string `json:"OrgRole"`
+	Unified  bool   `json:"Unified"`
+	Version  string `json:"Version"`
+}
+
+// Me fetches the current principal's identity and the server version.
+func (c *Client) Me() (*Me, error) {
+	var m Me
+	if err := c.getJSON("/api/v1/me", &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// Image is a base image available to boot/clone from (GET /api/v1/images →
+// image.Image, PascalCase).
+type Image struct {
+	Name      string `json:"Name"`
+	Status    string `json:"Status"`
+	SizeBytes int64  `json:"SizeBytes"`
+}
+
+// Images lists the base images registered on the server.
+func (c *Client) Images() ([]Image, error) {
+	var out []Image
+	err := c.getJSON("/api/v1/images", &out)
+	return out, err
+}
+
+// CreateVMInput is the body for POST /api/v1/sessions (json-tagged, snake_case —
+// this endpoint predates the PascalCase convention and decodes snake_case).
+type CreateVMInput struct {
+	Name       string `json:"name"`
+	Image      string `json:"image"`
+	Kind       string `json:"kind,omitempty"`
+	Firmware   string `json:"firmware,omitempty"`
+	CPUs       int    `json:"cpus"`
+	MemoryMB   int    `json:"memory_mb"`
+	DiskGB     int    `json:"disk_gb"`
+	CloudInit  *bool  `json:"cloud_init,omitempty"`
+	CIUsername string `json:"ci_username,omitempty"`
+	CIPassword string `json:"ci_password,omitempty"`
+	CISSHKey   string `json:"ci_ssh_key,omitempty"`
+}
+
+// CreateVM provisions a new VM from a base image.
+func (c *Client) CreateVM(in CreateVMInput) error {
+	return c.apiPostJSON("/api/v1/sessions", in)
 }
 
 // Sessions returns all VMs visible to the logged-in user.

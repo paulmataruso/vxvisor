@@ -25,6 +25,19 @@ type shell struct {
 	app *App
 	win fyne.Window
 
+	// identity (admin flag + server version), loaded from /api/v1/me after login.
+	me *client.Me
+
+	// management nav rail + content stack
+	items      []navItem
+	content    *fyne.Container              // the page stack
+	realized   map[string]fyne.CanvasObject // page id -> realized content
+	navBox     *fyne.Container              // the rail's row container (rebuilt on identity)
+	navRows    map[string]*tapCard          // item id -> row (for highlight)
+	navVer     *canvas.Text                 // footer version line
+	activeItem string                       // currently selected nav item id
+	pageReload map[string]func()            // nav id -> page refresh hook
+
 	tabs     *container.DocTabs
 	overview *container.TabItem
 	dash     *dashboard
@@ -60,15 +73,41 @@ type shell struct {
 
 func (a *App) showShell() {
 	sh := &shell{
-		app:      a,
-		consoles: map[string]*consoleTab{},
+		app:        a,
+		consoles:   map[string]*consoleTab{},
+		realized:   map[string]fyne.CanvasObject{},
+		pageReload: map[string]func(){},
+		activeItem: "instances",
 	}
-	win := a.fyne.NewWindow("VXVisor Console — " + a.client.BaseURL())
+	win := a.fyne.NewWindow("VXVisor — " + a.client.BaseURL())
 	win.SetIcon(appIcon)
-	win.Resize(fyne.NewSize(1180, 760))
+	win.Resize(fyne.NewSize(1240, 800))
 	win.CenterOnScreen()
 	sh.win = win
 
+	sh.items = sh.navItems()
+	sh.content = container.NewStack()
+	nav := sh.navRail()
+
+	win.SetContent(container.NewBorder(nil, nil, nav, nil, sh.content))
+	win.Show()
+
+	// Default landing page (builds the VM sidebar + console tabs workspace).
+	sh.setPage("instances")
+
+	// Learn admin status + server version, then reveal admin-only nav sections.
+	go sh.loadIdentity()
+	// Offer an in-app update if the server has a newer client build.
+	go sh.checkForUpdate()
+
+	sh.reload(false)
+	sh.startAutoRefresh()
+}
+
+// buildInstancesPage assembles the VM inventory sidebar plus the console/overview
+// tab workspace. It is the Instances section's content (and the Overview item
+// focuses its dashboard tab).
+func (sh *shell) buildInstancesPage() fyne.CanvasObject {
 	sh.dash = newDashboard(sh)
 	sh.overview = container.NewTabItemWithIcon("Overview", gridIcon(), sh.dash.root)
 	sh.tabs = container.NewDocTabs(sh.overview)
@@ -87,37 +126,41 @@ func (a *App) showShell() {
 			}
 		}
 	}
+	return container.NewBorder(nil, nil, sh.sidebar(), nil, sh.tabs)
+}
 
-	win.SetContent(container.NewBorder(nil, nil, sh.sidebar(), nil, sh.tabs))
-	win.Show()
-
-	// Offer an in-app update if the server has a newer client build.
-	go sh.checkForUpdate()
-
-	sh.reload(false)
-	sh.startAutoRefresh()
+// loadIdentity fetches /api/v1/me and, once known, rebuilds the nav (to reveal
+// admin-only sections) and updates the footer version line.
+func (sh *shell) loadIdentity() {
+	me, err := sh.app.client.Me()
+	if err != nil {
+		return
+	}
+	fyne.Do(func() {
+		sh.me = me
+		sh.rebuildNav()
+		if sh.navVer != nil {
+			sh.navVer.Text = "server " + me.Version + " · client " + Version
+			canvas.Refresh(sh.navVer)
+		}
+	})
 }
 
 // --- sidebar ---------------------------------------------------------------
 
 func (sh *shell) sidebar() fyne.CanvasObject {
-	// Brand header.
-	brand := container.NewHBox(
-		glyphBadge(34),
-		container.NewVBox(
-			brandWordmark(19),
-			mutedText("Console", 11.5),
-		),
-	)
-
 	sh.search = widget.NewEntry()
 	sh.search.SetPlaceHolder("Filter VMs…")
 	sh.search.OnChanged = func(string) { sh.renderList() }
 
 	sh.countTxt = mutedText("", 11)
 
+	newBtn := container.NewThemeOverride(plainBtn("+ New", func() { sh.newVMDialog() }), compactTheme{})
+	titleRow := container.New(&insetLayout{14, 10},
+		container.NewBorder(nil, nil, boldText("Instances", 15), newBtn))
+
 	header := container.NewVBox(
-		container.NewPadded(brand),
+		titleRow,
 		container.NewPadded(sh.search),
 		container.New(&insetLayout{14, 2}, sh.countTxt),
 		spacer(4),
@@ -144,28 +187,13 @@ func (sh *shell) sidebar() fyne.CanvasObject {
 
 	sh.viewStack = container.NewStack(sh.listWrap, sh.folderWrap)
 
-	// Footer: who/where + disconnect.
-	sh.toastTxt = mutedText("", 11)
-	disconnect := widget.NewButtonWithIcon("Disconnect", theme.LogoutIcon(), func() {
-		sh.stop()
-		sh.win.Close()
-		sh.app.showConnect()
-	})
-	disconnect.Importance = widget.LowImportance
-	foot := container.NewVBox(
-		widget.NewSeparator(),
-		container.New(&insetLayout{14, 2}, mutedText(sh.app.client.User+" @ "+hostOnly(sh.app.client.BaseURL()), 12)),
-		container.New(&insetLayout{14, 0}, sh.toastTxt),
-		container.NewPadded(disconnect),
-	)
-
-	inner := container.NewBorder(container.NewVBox(header, toggle, spacer(4)), foot, nil, nil, sh.viewStack)
+	inner := container.NewBorder(container.NewVBox(header, toggle, spacer(4)), nil, nil, nil, sh.viewStack)
 	sh.setView(sh.viewMode)
 
-	// Sidebar surface: a panel at a fixed width with a 1px right divider, like the
-	// web rail.
+	// Inventory surface: a panel at a fixed width with a 1px right divider, like
+	// the web list rail (the brand + identity footer live on the nav rail).
 	bg := canvas.NewRectangle(colPanel)
-	rail := container.New(&fixedWidthLayout{272}, container.NewStack(bg, inner))
+	rail := container.New(&fixedWidthLayout{262}, container.NewStack(bg, inner))
 	return container.NewBorder(nil, nil, nil, widget.NewSeparator(), rail)
 }
 
