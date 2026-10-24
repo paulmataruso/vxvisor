@@ -79,12 +79,6 @@ func (s *Supervisor) Run(ctx context.Context) {
 	// if it verifies; otherwise keep the untouched source). Runs before any
 	// reconcile could act on a half-moved VM.
 	s.mgr.RecoverMigrations()
-	// Autostart flagged VMs — but ONLY after a real HOST reboot, never on a plain
-	// control-plane restart/upgrade (where KillMode=process keeps guests alive and
-	// adoption above re-attaches them). We tell the two apart by the kernel boot_id:
-	// it changes across a reboot but is stable across a vdxd restart. Runs after
-	// adoption so a VM already running is skipped (AutostartIDs excludes running).
-	s.bootAutostart()
 	// When the management interface is a default vSwitch, ensure its attachable
 	// "VM Network" port group exists (ESXi-style). One-shot at boot so an admin's
 	// deletion stays deleted; a fresh install / mgmt-NIC conversion gets it here.
@@ -111,6 +105,15 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// NSX-style model is authoritative after a reboot.
 		s.svc.ReensureFirewall()
 	}
+	// Autostart flagged VMs — but ONLY after a real HOST reboot, never on a plain
+	// control-plane restart/upgrade (where KillMode=process keeps guests alive and
+	// adoption above re-attaches them). We tell the two apart by the kernel boot_id:
+	// it changes across a reboot but is stable across a vdxd restart. Runs after
+	// adoption (so a running VM is skipped) AND after the network layer above
+	// (default port group, physical links, vRouter bridges/veths, firewalls) so a
+	// VM attached to a vRouter's internal bridge doesn't try to start before that
+	// bridge exists — the boot-ordering race that otherwise lands such VMs in "error".
+	s.bootAutostart()
 	go s.loop(ctx, "reconciler", 5*time.Second, s.reconcile)
 	go s.loop(ctx, "session-gc", 1*time.Hour, s.gcWebSessions)
 	go s.loop(ctx, "retention", 10*time.Minute, s.retention)
