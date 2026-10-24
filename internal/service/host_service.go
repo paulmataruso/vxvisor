@@ -328,6 +328,30 @@ func diskMountNote(disk string) string {
 	return ""
 }
 
+// storageStackMember returns a human label if the disk (or any of its children)
+// is part of an active storage stack — LVM, software RAID, or LUKS — which must
+// be torn down properly rather than blind-wiped. Empty string = safe to wipe.
+func storageStackMember(d hostinfo.BlockDev) string {
+	stack := map[string]string{
+		"LVM2_member":       "an LVM volume group",
+		"linux_raid_member": "a software RAID array",
+		"crypto_LUKS":       "a LUKS container",
+	}
+	var walk func(hostinfo.BlockDev) string
+	walk = func(b hostinfo.BlockDev) string {
+		if lbl, ok := stack[b.FSType]; ok {
+			return lbl
+		}
+		for _, c := range b.Children {
+			if n := walk(c); n != "" {
+				return n
+			}
+		}
+		return ""
+	}
+	return walk(d)
+}
+
 // validDiskPath reports whether disk is a real whole-disk /dev path on this host.
 func validDiskPath(disk string) bool {
 	devs, err := hostinfo.BlockDevices()
@@ -353,6 +377,8 @@ type DiskStatusRow struct {
 	Health      string `json:"health"` // PASSED | FAILED | unknown | n/a
 	Reclaim     bool   `json:"reclaim"` // can be cleared for reuse (Ceph remnants, not mounted)
 	ReclaimNote string `json:"reclaim_note"`
+	Wipeable    bool   `json:"wipeable"`  // has only inert leftovers (foreign partition table/fs) and is NOT actively used → safe to initialize
+	WipeNote    string `json:"wipe_note"` // what's on it (for the button tooltip)
 	Failed      bool   `json:"failed"`    // the drive has failed / dropped off the bus
 	FailNote    string `json:"fail_note"` // why (for the UI + toast)
 	Behind      string `json:"behind"`    // RAID controller this drive sits behind ("" = direct/kernel disk)
@@ -417,6 +443,16 @@ func (s *Service) DiskStatus(p *Principal) []DiskStatusRow {
 		// Offer a reclaim (wipe) only for a disk stranded by a removed Ceph OSD.
 		if d.InUse {
 			row.Reclaim, row.ReclaimNote = s.CephDiskReclaimable(d.Path)
+		}
+		// Generic initialize/wipe: a disk that carries only inert leftovers (a used
+		// disk swapped in — e.g. a foreign Windows/data partition table) and is NOT
+		// actively in use (not mounted, not part of an LVM/RAID/LUKS stack, not a
+		// failed/offline drive). Lets an admin reclaim it from the UI; the hard
+		// guards live again in WipeDisk server-side.
+		if d.InUse && !row.Failed && !row.Reclaim && diskMountNote(d.Path) == "" {
+			if storageStackMember(d) == "" {
+				row.Wipeable, row.WipeNote = true, d.UseNote
+			}
 		}
 		out = append(out, row)
 	}

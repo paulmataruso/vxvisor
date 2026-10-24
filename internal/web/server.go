@@ -192,6 +192,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/vddk-upload", s.auth(s.uploadVDDK))
 	mux.HandleFunc("POST /storage", s.auth(s.upsertPool))
 	mux.HandleFunc("POST /storage/delete", s.auth(s.deleteStoragePool))
+	mux.HandleFunc("POST /storage/disk/wipe", s.auth(s.wipeDisk))
 	// ZFS + LVM pool management (admin; destructive ops confirmed in the UI).
 	mux.HandleFunc("POST /storage/zfs/create", s.auth(s.createZFSPool))
 	mux.HandleFunc("POST /storage/zfs/{name}/destroy", s.auth(s.destroyZFSPool))

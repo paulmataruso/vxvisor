@@ -520,3 +520,22 @@ func (s *Server) deleteStoragePool(w http.ResponseWriter, r *http.Request, p *se
 	}
 	http.Redirect(w, r, "/storage", http.StatusSeeOther)
 }
+
+// wipeDisk erases a used disk's inert leftover partitions so it becomes free and
+// usable (the general "Initialize disk" action). DESTRUCTIVE; guarded in
+// service.WipeDisk and confirmed twice in the UI.
+func (s *Server) wipeDisk(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.WipeDisk(p, r.FormValue("disk"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	dest := r.Referer()
+	if dest == "" {
+		dest = "/storage"
+	}
+	http.Redirect(w, r, dest, http.StatusSeeOther)
+}
