@@ -96,3 +96,29 @@ func clusterIcon() fyne.Resource {
 func lockIcon() fyne.Resource {
 	return svgIcon("lock", `<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`)
 }
+
+// Action icons used on buttons (matching the web sprite's single-stroke style).
+func plusIcon() fyne.Resource { return svgIcon("plus", `<path d="M12 5v14M5 12h14"/>`) }
+func refreshIcon() fyne.Resource {
+	return svgIcon("refresh", `<path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/>`)
+}
+func playIcon() fyne.Resource { return svgIcon("play", `<path d="m6 4 14 8-14 8V4Z"/>`) }
+func stopIcon() fyne.Resource {
+	return svgIcon("stop", `<rect x="5" y="5" width="14" height="14" rx="2"/>`)
+}
+func gearIcon() fyne.Resource {
+	return svgIcon("gear", `<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 0 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 0 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H23a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/>`)
+}
+func pencilIcon() fyne.Resource {
+	return svgIcon("pencil", `<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>`)
+}
+func checkIcon() fyne.Resource { return svgIcon("check", `<path d="M20 6 9 17l-5-5"/>`) }
+func cameraIcon() fyne.Resource {
+	return svgIcon("camera", `<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/>`)
+}
+func tagIcon() fyne.Resource {
+	return svgIcon("tag", `<path d="M20.6 13.4 12 22l-9-9V3h10l7.6 7.6a2 2 0 0 1 0 2.8ZM7 7h.01"/>`)
+}
+func folderOpenIcon() fyne.Resource {
+	return svgIcon("folderopen", `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2H3V7ZM3 11h18l-2 8a2 2 0 0 1-2 1.6H5A2 2 0 0 1 3 19Z"/>`)
+}

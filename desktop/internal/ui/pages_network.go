@@ -41,7 +41,11 @@ func (sh *shell) networksPage() fyne.CanvasObject {
 		netTable := dataTable([]string{"Name", "Mode / subnet", "Bridge", ""},
 			[]float32{2.6, 3, 2, 1.6}, rows, "No networks.")
 
-		sections := []fyne.CanvasObject{netTable}
+		var sections []fyne.CanvasObject
+		if sh.isAdmin() {
+			sections = append(sections, sh.networkMapSection(), spacer(16))
+		}
+		sections = append(sections, subSection("Port groups", nil, netTable))
 		if sh.isAdmin() {
 			sections = append(sections, spacer(16), sh.bondsSection(), spacer(16), sh.vswitchesSection())
 		}

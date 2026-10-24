@@ -25,11 +25,11 @@ func mutedPara(s string) fyne.CanvasObject {
 // stateColor maps a VM/connection state word to its palette accent.
 func stateColor(state string) color.Color {
 	switch strings.ToLower(state) {
-	case "running", "ok", "connected":
+	case "running", "ok", "connected", "done", "completed", "ready", "active", "mounted", "enabled", "up", "online":
 		return colOK
-	case "error", "failed", "bad", "disconnected":
+	case "error", "failed", "bad", "disconnected", "down":
 		return colDanger
-	case "stopped", "shutoff", "off":
+	case "stopped", "shutoff", "off", "revoked", "disabled", "offline":
 		return colMuted
 	default: // starting, stopping, connecting, paused…
 		return colWarn
@@ -60,11 +60,11 @@ func pill(text, state string) fyne.CanvasObject {
 	t.TextSize = 11
 	t.TextStyle = fyne.TextStyle{Bold: true}
 
-	row := container.NewHBox(
-		container.NewGridWrap(fyne.NewSize(7, 7), d),
-		t,
-	)
-	return container.NewStack(r, container.New(&insetLayout{6, 3}, row))
+	// Border keeps the dot inline with and vertically centered against the text
+	// (an HBox top-aligns them, which made the label sit below-right of the dot).
+	dotBox := container.NewGridWrap(fyne.NewSize(8, 8), d)
+	row := container.NewBorder(nil, nil, container.NewCenter(dotBox), nil, t)
+	return container.NewStack(r, container.New(&insetLayout{7, 3}, row))
 }
 
 // card wraps content in a panel surface: rounded, 1px line border, soft depth.

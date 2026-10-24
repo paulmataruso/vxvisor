@@ -95,7 +95,7 @@ func (sh *shell) apikeysPage() fyne.CanvasObject {
 				cellBold(k.Label),
 				cellMono(k.Prefix),
 				cell(lastUsed(k.LastUsed)),
-				cell(status),
+				cellState(status),
 				rowActions(revoke),
 			})
 		}

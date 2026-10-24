@@ -122,7 +122,7 @@ func (sh *shell) importOptionsDialog(host, user, pass string, insecure bool, vm 
 				poolNames = append(poolNames, p.Name)
 				poolIDs = append(poolIDs, p.ID)
 			}
-			pool := widget.NewSelect(poolNames, nil)
+			pool := widget.NewSelect(uniqueLabels(poolNames), nil)
 			pool.SetSelectedIndex(0)
 			items := []*widget.FormItem{
 				widget.NewFormItem("OS type", osType),

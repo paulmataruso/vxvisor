@@ -73,17 +73,19 @@ func (sh *shell) monitoringPage() fyne.CanvasObject {
 	sh.pageReload["monitoring"] = load
 	load()
 
-	// Live-ish updates: poll while the window is open.
+	// Live-ish updates: poll until the shell stops (sh.done), no sh.win race.
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
-		for range t.C {
-			if sh.win == nil {
+		for {
+			select {
+			case <-sh.done:
 				return
-			}
-			s, err := sh.app.client.MetricHistory("host", "", 10)
-			if err == nil {
-				fyne.Do(func() { apply(s) })
+			case <-t.C:
+				s, err := sh.app.client.MetricHistory("host", "", 10)
+				if err == nil {
+					fyne.Do(func() { apply(s) })
+				}
 			}
 		}
 	}()

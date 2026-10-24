@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -111,9 +112,11 @@ func subSection(title string, action fyne.CanvasObject, body fyne.CanvasObject) 
 	return container.NewVBox(head, spacer(6), body)
 }
 
+// thinLine is a full-width 1px divider (like the web table row separators). It
+// must stretch horizontally, so it uses a height-pinned layout (a GridWrap would
+// make a 1x1 dot).
 func thinLine() fyne.CanvasObject {
-	r := canvas.NewRectangle(colLine)
-	return container.NewGridWrap(fyne.NewSize(1, 1), r)
+	return container.New(&fixedHeightLayout{1}, canvas.NewRectangle(colLine))
 }
 
 // cell is a left-aligned, single-line (truncating) table cell for plain text.
@@ -156,28 +159,85 @@ func layoutExpand() fyne.CanvasObject { return layout.NewSpacer() }
 
 // --- buttons ---------------------------------------------------------------
 
-func primaryBtn(label string, tap func()) *widget.Button {
-	b := widget.NewButton(label, tap)
-	b.Importance = widget.HighImportance
+// mkBtn builds a button with a bordered "bubble" (a real importance, never flat
+// Low) and an icon inferred from the label so every button reads like the web UI.
+func mkBtn(label string, imp widget.Importance, tap func()) *widget.Button {
+	var b *widget.Button
+	if ic := iconFor(label); ic != nil {
+		b = widget.NewButtonWithIcon(label, ic, tap)
+	} else {
+		b = widget.NewButton(label, tap)
+	}
+	b.Importance = imp
 	return b
+}
+
+func primaryBtn(label string, tap func()) *widget.Button {
+	return mkBtn(label, widget.HighImportance, tap)
 }
 
 func dangerBtn(label string, tap func()) *widget.Button {
-	b := widget.NewButton(label, tap)
-	b.Importance = widget.DangerImportance
-	return b
+	return mkBtn(label, widget.DangerImportance, tap)
 }
 
+// plainBtn is a secondary button WITH a bubble (Medium importance fills with the
+// theme button color), matching the web's outlined buttons.
 func plainBtn(label string, tap func()) *widget.Button {
-	b := widget.NewButton(label, tap)
-	b.Importance = widget.LowImportance
-	return b
+	return mkBtn(label, widget.MediumImportance, tap)
 }
 
 func iconBtn(label string, icon fyne.Resource, tap func()) *widget.Button {
 	b := widget.NewButtonWithIcon(label, icon, tap)
-	b.Importance = widget.LowImportance
+	b.Importance = widget.MediumImportance
 	return b
+}
+
+// iconFor maps a button label to a web-sprite-style icon so buttons are
+// consistently glyphed. Returns nil when no icon fits (plain text button).
+func iconFor(label string) fyne.Resource {
+	l := strings.ToLower(strings.TrimSpace(label))
+	switch {
+	case l == "":
+		return nil
+	case hasAny(l, "delete", "remove", "purge", "unmount", "revoke", "eject"):
+		return trashIcon()
+	case hasAny(l, "start", "launch", "console"):
+		return playIcon()
+	case l == "stop" || strings.HasPrefix(l, "stop "):
+		return stopIcon()
+	case hasAny(l, "restart", "refresh", "apply", "probe", "reconnect"):
+		return refreshIcon()
+	case hasAny(l, "restore", "revert"):
+		return refreshIcon()
+	case hasAny(l, "new ", "add", "create", "register", "pull", "mount", "attach", "advertise", "connect", "back up", "set uplink", "set transit"):
+		return plusIcon()
+	case hasAny(l, "browse"):
+		return folderOpenIcon()
+	case hasAny(l, "test", "save", "set ", "apply"):
+		return checkIcon()
+	case hasAny(l, "configure", "edit"):
+		return gearIcon()
+	case hasAny(l, "rename"):
+		return pencilIcon()
+	case hasAny(l, "snapshot"):
+		return cameraIcon()
+	case hasAny(l, "zone"):
+		return tagIcon()
+	case hasAny(l, "update", "download"):
+		return downloadIcon()
+	case hasAny(l, "network"):
+		return networkIcon()
+	}
+	return nil
+}
+
+func hasAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- async actions ----------------------------------------------------------
@@ -242,6 +302,24 @@ func (sh *shell) showFormThen(title, confirm string, items []*widget.FormItem, s
 
 // errReq is a small helper for required-field validation errors.
 func errReq(msg string) error { return fmt.Errorf("%s", msg) }
+
+// uniqueLabels disambiguates repeated option labels (appending " (2)", " (3)")
+// so widget.Select.SelectedIndex() — which returns the FIRST option equal to the
+// selected text — maps back to the correct parallel slice index even when the
+// underlying names (folders, VMs, groups) collide.
+func uniqueLabels(names []string) []string {
+	seen := map[string]int{}
+	out := make([]string, len(names))
+	for i, n := range names {
+		seen[n]++
+		if seen[n] > 1 {
+			out[i] = fmt.Sprintf("%s (%d)", n, seen[n])
+		} else {
+			out[i] = n
+		}
+	}
+	return out
+}
 
 // itoaf / itoaf2 format floats for stat tiles (0 and 2 decimal places).
 func itoaf(f float64) string  { return fmt.Sprintf("%.0f", f) }

@@ -186,7 +186,7 @@ func (sh *shell) snapshotBody(s client.Session, snaps []client.Snapshot, err err
 		rows = append(rows, []fyne.CanvasObject{
 			cellBold(sn.Name),
 			cell(shortTime(sn.CreatedAt)),
-			cell(state),
+			cellState(state),
 			rowActions(revert, del),
 		})
 	}

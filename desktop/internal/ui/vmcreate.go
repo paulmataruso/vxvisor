@@ -39,7 +39,7 @@ func (sh *shell) showCreateForm(imgs []client.Image) {
 		}
 		imgNames = append(imgNames, label)
 	}
-	image := widget.NewSelect(imgNames, nil)
+	image := widget.NewSelect(uniqueLabels(imgNames), nil)
 	if len(imgNames) > 0 {
 		image.SetSelectedIndex(0)
 	}

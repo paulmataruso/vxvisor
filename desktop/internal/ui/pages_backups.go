@@ -69,13 +69,12 @@ func (sh *shell) backupsPage() fyne.CanvasObject {
 		for _, t := range targets {
 			t := t
 			test := plainBtn("Test", func() {
+				var msg string
 				sh.do(func() error {
-					msg, e := sh.app.client.TestBackupTarget(t.ID)
-					if e == nil {
-						sh.toast(msg)
-					}
+					m, e := sh.app.client.TestBackupTarget(t.ID)
+					msg = m
 					return e
-				}, func() {})
+				}, func() { sh.toast(msg) }) // toast runs in fyne.Do
 			})
 			del := dangerBtn("Delete", func() {
 				sh.confirm("Delete target", "Delete target \""+t.Name+"\"?", func() {
@@ -112,7 +111,7 @@ func (sh *shell) sessionSelect() (*widget.Select, []string) {
 		names = append(names, v.Name)
 		ids = append(ids, v.ID)
 	}
-	sel := widget.NewSelect(names, nil)
+	sel := widget.NewSelect(uniqueLabels(names), nil)
 	if len(names) > 0 {
 		sel.SetSelectedIndex(0)
 	}

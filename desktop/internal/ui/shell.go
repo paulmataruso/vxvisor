@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -69,6 +70,10 @@ type shell struct {
 	vms      []client.Session
 	selID    string
 	consoles map[string]*consoleTab
+
+	// done is closed by stop() to halt background pollers (no sh.win races).
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 func (a *App) showShell() {
@@ -78,6 +83,7 @@ func (a *App) showShell() {
 		realized:   map[string]fyne.CanvasObject{},
 		pageReload: map[string]func(){},
 		activeItem: "instances",
+		done:       make(chan struct{}),
 	}
 	win := a.fyne.NewWindow("VXVisor — " + a.client.BaseURL())
 	win.SetIcon(appIcon)
@@ -155,7 +161,7 @@ func (sh *shell) sidebar() fyne.CanvasObject {
 
 	sh.countTxt = mutedText("", 11)
 
-	newBtn := container.NewThemeOverride(plainBtn("+ New", func() { sh.newVMDialog() }), compactTheme{})
+	newBtn := container.NewThemeOverride(plainBtn("New", func() { sh.newVMDialog() }), compactTheme{})
 	titleRow := container.New(&insetLayout{14, 10},
 		container.NewBorder(nil, nil, boldText("Instances", 15), newBtn))
 
@@ -479,7 +485,7 @@ func (sh *shell) moveVMDialog(vmID string) {
 		names = append(names, f.Name)
 		ids = append(ids, f.ID)
 	}
-	sel := widget.NewSelect(names, nil)
+	sel := widget.NewSelect(uniqueLabels(names), nil)
 	sel.SetSelectedIndex(0)
 	dialog.ShowForm("Move "+sh.vmByID(vmID).Name, "Move", "Cancel",
 		[]*widget.FormItem{widget.NewFormItem("Folder", sel)},
@@ -545,11 +551,13 @@ func (sh *shell) startAutoRefresh() {
 	go func() {
 		t := time.NewTicker(6 * time.Second)
 		defer t.Stop()
-		for range t.C {
-			if sh.win == nil {
+		for {
+			select {
+			case <-sh.done:
 				return
+			case <-t.C:
+				sh.reload(false)
 			}
-			sh.reload(false)
 		}
 	}()
 }
@@ -618,6 +626,7 @@ func (sh *shell) toast(msg string) {
 }
 
 func (sh *shell) stop() {
+	sh.stopOnce.Do(func() { close(sh.done) }) // halt background pollers
 	sh.win = nil
 	for _, c := range sh.consoles {
 		c.close()

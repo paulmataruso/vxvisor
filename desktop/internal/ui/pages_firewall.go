@@ -20,10 +20,15 @@ func (sh *shell) vfirewallPage() fyne.CanvasObject {
 			return nil, err
 		}
 
-		en := widget.NewCheck("Distributed firewall enabled", func(b bool) {
-			sh.do(func() error { return sh.app.client.FWSetEnabled(b) }, func() { sh.toast("Firewall " + onoff(b)) })
-		})
+		// Set the initial state BEFORE wiring OnChanged — SetChecked fires the
+		// handler whenever the value differs from the default (false), which would
+		// POST a spurious FWSetEnabled (and mutate UI off the render goroutine) on
+		// every load of an already-enabled firewall.
+		en := widget.NewCheck("Distributed firewall enabled", nil)
 		en.SetChecked(v.Enabled)
+		en.OnChanged = func(b bool) {
+			sh.do(func() error { return sh.app.client.FWSetEnabled(b) }, func() { sh.toast("Firewall " + onoff(b)) })
+		}
 		enRow := card(container.NewPadded(en))
 
 		addGrp := plainBtn("Add group", func() { sh.fwAddGroupDialog() })
@@ -114,8 +119,9 @@ func (sh *shell) fwAddRuleDialog(dir string, v client.OrgFirewallView) {
 		names = append(names, e.Name)
 		keys = append(keys, e.Key)
 	}
-	from := widget.NewSelect(names, nil)
-	to := widget.NewSelect(names, nil)
+	un := uniqueLabels(names)
+	from := widget.NewSelect(un, nil)
+	to := widget.NewSelect(un, nil)
 	if len(names) > 0 {
 		from.SetSelectedIndex(0)
 		to.SetSelectedIndex(0)
