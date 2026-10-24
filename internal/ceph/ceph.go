@@ -331,6 +331,57 @@ func ZapDisk(disk string) error {
 	return nil
 }
 
+// Teardown completely removes the on-node Ceph cluster from this host. It stops,
+// disables and resets EVERY Ceph systemd unit (targets, mon/mgr/osd/mds
+// instances, and the ceph-crash collector that otherwise keeps retrying forever
+// after the cluster is gone), unloads the RBD kernel modules, and deletes all
+// Ceph configuration and state (/etc/ceph, /var/lib/ceph incl. crash dumps,
+// logs, runtime dirs).
+//
+// It deliberately LEAVES the ceph packages installed, so a later Bootstrap can
+// stand a cluster back up, and it does NOT wipe OSD disks — those are reclaimed
+// per-disk with ZapDisk once the operator confirms. Every step is best-effort: a
+// missing unit or path is not an error, because the goal is to converge to "gone"
+// from any partial or already-broken state.
+func Teardown() error {
+	// 1. Disable + stop the top-level units and the crash collector in one shot.
+	units := []string{
+		"ceph.target", "ceph-crash.service",
+		"ceph-mon.target", "ceph-mgr.target", "ceph-osd.target", "ceph-mds.target",
+	}
+	_, _ = run(90*time.Second, "systemctl", append([]string{"disable", "--now"}, units...)...)
+
+	// 2. Stop + disable every per-daemon instance unit (names carry the hostname /
+	//    OSD id, so match by glob — unmatched globs are harmless no-ops here).
+	for _, g := range []string{"ceph-mon@*", "ceph-mgr@*", "ceph-osd@*", "ceph-mds@*", "ceph-volume@*"} {
+		_, _ = run(60*time.Second, "systemctl", "stop", g)
+		_, _ = run(30*time.Second, "systemctl", "disable", g)
+	}
+	_, _ = run(20*time.Second, "systemctl", "reset-failed")
+
+	// 3. Unload the kernel clients (rbd sits on top of libceph).
+	_, _ = run(15*time.Second, "modprobe", "-r", "rbd")
+	_, _ = run(15*time.Second, "modprobe", "-r", "libceph")
+
+	// 4. Delete all config + state, including the crash dir whose backlog drives
+	//    I/O pressure after a dead cluster.
+	for _, path := range []string{
+		"/etc/ceph", "/var/lib/ceph", "/var/log/ceph", "/var/run/ceph", "/run/ceph",
+	} {
+		_ = os.RemoveAll(path)
+	}
+	_, _ = run(15*time.Second, "systemctl", "daemon-reload")
+
+	// 5. Confirm the daemons are actually gone.
+	if _, err := run(10*time.Second, "pgrep", "-x", "ceph-mon"); err == nil {
+		return fmt.Errorf("ceph-mon is still running after teardown")
+	}
+	if _, err := run(10*time.Second, "pgrep", "-x", "ceph-osd"); err == nil {
+		return fmt.Errorf("ceph-osd is still running after teardown")
+	}
+	return nil
+}
+
 // CreatePool creates an RBD pool, initialises it for rbd, and pins its replica
 // size (1 on a single node — non-redundant until a second node joins).
 func CreatePool(name string, size int) error {

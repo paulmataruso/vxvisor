@@ -831,6 +831,28 @@ DROP TABLE IF EXISTS desktop_creds;
 DROP TABLE IF EXISTS pool_grants;
 DROP TABLE IF EXISTS desktop_pools;
 `},
+	{43, "vm-folders", `
+-- Inventory folders: organize instances into a nestable tree (VMware-style).
+-- Folders are org-scoped and shared across the org; a VM lives in at most one
+-- folder. Membership is tracked in a SEPARATE table (absent = root/ungrouped) so
+-- the tightly-coupled sessions table and its scan logic stay untouched. Both FKs
+-- cascade, and foreign_keys is ON, so deleting a VM or a folder auto-clears the
+-- stale membership rows.
+CREATE TABLE IF NOT EXISTS vm_folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id     INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    parent_id  INTEGER REFERENCES vm_folders(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vm_folders_org ON vm_folders(org_id, parent_id);
+CREATE TABLE IF NOT EXISTS vm_folder_members (
+    vm_id     TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    org_id    INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    folder_id INTEGER NOT NULL REFERENCES vm_folders(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_vm_folder_members_folder ON vm_folder_members(folder_id);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

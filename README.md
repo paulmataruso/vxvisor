@@ -1,4 +1,6 @@
-# VXVisor
+<p align="left">
+  <img src="docs/vxwordmark.svg" alt="VXVisor" height="72">
+</p>
 
 **A single-binary VM & infrastructure control plane for Linux.**
 Run virtual machines and containers, software-defined storage and networking,

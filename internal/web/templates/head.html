@@ -1,6 +1,7 @@
 {{define "head"}}<!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>VXVisor</title>
+<link rel="icon" type="image/svg+xml" href="/static/brand/vxicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -38,6 +39,8 @@
  .brand .dot{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--primary),var(--accent));display:grid;place-items:center;color:#fff;flex:none}
  .brand .dot .ic{width:16px;height:16px;stroke:#fff}
  .brand .logomark{width:30px;height:30px;flex:none}
+ .brand .wordmark{letter-spacing:-.3px}
+ .brand .wordmark b{color:#12C8F5;font-weight:800}
  /* Themed scrollbars — the default OS grey doesn't match the dark UI. */
  *{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
  ::-webkit-scrollbar{width:10px;height:10px}
@@ -195,21 +198,25 @@
  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2M12 20v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M2 12h2M20 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></symbol>
  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.5 6.5 0 0 0 21 12.8Z"/></symbol>
  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
+ <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
 </svg>
 <nav class="rail">
   <div class="brand">
-    <svg class="logomark" viewBox="150 270 705 430" fill="none" aria-hidden="true">
+    <svg class="logomark" viewBox="0 0 512 512" fill="none" aria-hidden="true">
       <defs>
-        <linearGradient id="vxg1" x1="190" y1="300" x2="840" y2="740" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#168BFF"/><stop offset="0.48" stop-color="#1261D9"/><stop offset="1" stop-color="#092B70"/></linearGradient>
-        <linearGradient id="vxg2" x1="400" y1="330" x2="850" y2="720" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#159CFF"/><stop offset="1" stop-color="#0754C7"/></linearGradient>
-        <linearGradient id="vxg3" x1="470" y1="400" x2="760" y2="730" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#174A9B"/><stop offset="1" stop-color="#09265D"/></linearGradient>
+        <linearGradient id="vxblue" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#12C8F5"/><stop offset="0.52" stop-color="#087BFF"/><stop offset="1" stop-color="#0645E8"/></linearGradient>
+        <linearGradient id="vxframe" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#087BFF"/><stop offset="1" stop-color="#12C8F5"/></linearGradient>
       </defs>
-      <path d="M155 280 H260 L455 585 L520 685 H415 Z" fill="url(#vxg1)"/>
-      <path d="M260 280 H365 L520 520 L455 620 Z" fill="#10468F"/>
-      <path d="M415 685 L660 380 L740 280 H845 L520 685 Z" fill="url(#vxg2)"/>
-      <path d="M470 280 H575 L845 685 H740 Z" fill="url(#vxg3)"/>
+      <rect x="18" y="18" width="476" height="476" rx="92" fill="#071426" stroke="#075BDE" stroke-width="5"/>
+      <path d="M112 179 L256 95 L400 179" fill="none" stroke="url(#vxframe)" stroke-width="13" stroke-linejoin="round"/>
+      <path d="M91 244 V365 L185 426 M421 244 V365 L327 426" fill="none" stroke="url(#vxframe)" stroke-width="12" stroke-linejoin="round"/>
+      <g fill="url(#vxblue)">
+        <rect x="194" y="174" width="124" height="36" rx="8"/><rect x="194" y="220" width="124" height="36" rx="8"/><rect x="194" y="266" width="124" height="36" rx="8"/>
+        <path d="M67 224 H139 Q150 224 157 235 L256 369 L355 235 Q362 224 373 224 H445 L292 433 Q278 452 256 452 Q234 452 220 433 Z"/>
+      </g>
+      <g fill="#071426"><circle cx="214" cy="192" r="6"/><circle cx="214" cy="238" r="6"/><circle cx="214" cy="284" r="6"/></g>
     </svg>
-    <span>VXVisor</span>
+    <span class="wordmark"><b>Vx</b>visor</span>
   </div>
   <div class="nav">
     <a href="/" class="{{if eq .Active "overview"}}on{{end}}"><svg class="ic"><use href="#i-grid"/></svg><span>Overview</span></a>
@@ -239,7 +246,8 @@
     <a href="/migrate" class="{{if eq .Active "migrate"}}on{{end}}"><svg class="ic"><use href="#i-layers"/></svg><span>Import / Export</span></a>
     <a href="/orgs" class="{{if eq .Active "orgs"}}on{{end}}"><svg class="ic"><use href="#i-building"/></svg><span>Organizations</span></a>
     <a href="/cluster" class="{{if eq .Active "cluster"}}on{{end}}"><svg class="ic"><use href="#i-grid"/></svg><span>Cluster</span></a>
-    <a href="/settings/auth" class="{{if eq .Active "settings"}}on{{end}}"><svg class="ic"><use href="#i-key"/></svg><span>Authentication</span></a>{{end}}
+    <a href="/settings/auth" class="{{if eq .Active "settings"}}on{{end}}"><svg class="ic"><use href="#i-key"/></svg><span>Authentication</span></a>
+    <a href="/update" class="{{if eq .Active "update"}}on{{end}}"><svg class="ic"><use href="#i-download"/></svg><span>Updates</span></a>{{end}}
   </div>
   <div class="foot"><svg class="ic ic-sm"><use href="#i-users"/></svg><span class="uname">{{.P.User.Username}}{{if .P.IsAdmin}} · admin{{end}}</span></div>
 </nav>
@@ -261,6 +269,7 @@
     </form>
     {{end}}
     <button type="button" class="iconbtn" id="themebtn" title="Toggle light/dark" aria-label="Toggle theme"><svg class="ic"><use href="#i-moon"/></svg></button>
+    <a href="/clients" class="btn sm{{if eq .Active "clients"}} primary{{end}}" title="Download the VXVisor desktop console client"><svg class="ic"><use href="#i-monitor"/></svg>Client</a>
     {{if .P.IsAdmin}}
     <form method="post" action="/host/restart" style="display:inline" onsubmit="return hostPowerConfirm('restart')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm hp-restart" title="Reboot the physical host">⟳ Restart</button></form>
     <form method="post" action="/host/shutdown" style="display:inline" onsubmit="return hostPowerConfirm('shut down')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm hp-shutdown" title="Power off the physical host">⏻ Shutdown</button></form>

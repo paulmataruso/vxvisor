@@ -151,8 +151,22 @@ type ADConfig struct {
 
 type UpdateConfig struct {
 	// FeedURL points at an operator-controlled JSON manifest describing the
-	// latest build (version, url, sha256). No vendor server is involved.
+	// latest build (version, url, sha256). No vendor server is involved. When set,
+	// it overrides GitHubRepo (air-gapped / self-hosted feed).
 	FeedURL string `toml:"feed_url"`
+
+	// GitHubRepo is the "owner/name" whose GitHub Releases the Update page checks
+	// (only when an admin clicks "Check for updates" — never automatically). Empty
+	// falls back to the built-in default.
+	GitHubRepo string `toml:"github_repo"`
+}
+
+// Repo returns the configured GitHub repo or the built-in default.
+func (u UpdateConfig) Repo() string {
+	if u.GitHubRepo != "" {
+		return u.GitHubRepo
+	}
+	return "paulmataruso/vxvisor"
 }
 
 type ServerConfig struct {

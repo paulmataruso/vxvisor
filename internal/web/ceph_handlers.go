@@ -49,6 +49,20 @@ func (s *Server) addCephOSD(w http.ResponseWriter, r *http.Request, p *service.P
 	http.Redirect(w, r, "/ceph", http.StatusSeeOther)
 }
 
+// destroyCeph fully removes the on-node Ceph cluster (services + config + state).
+// Double-confirmed in the UI; the service refuses while any VM disk is on RBD.
+func (s *Server) destroyCeph(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DestroyCeph(p, clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/ceph", http.StatusSeeOther)
+}
+
 // clearDisk reclaims a disk stranded by a removed Ceph OSD (wipe LVM + signatures).
 // Double-confirmed in the UI; the service refuses a mounted / non-Ceph disk.
 func (s *Server) clearDisk(w http.ResponseWriter, r *http.Request, p *service.Principal) {

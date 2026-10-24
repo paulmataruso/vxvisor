@@ -48,6 +48,11 @@
   <p class="muted" style="margin:12px 0 0">You're seeing every node's VMs in one place, and you can fully manage any of them from here — each action is carried out on whichever node owns the VM.</p>
   {{else}}<div class="empty">No instances across the cluster yet.</div>{{end}}
   {{else}}
+  <div class="viewbar" style="display:flex;gap:6px;margin:0 0 14px">
+    <button class="btn sm primary" id="vb-list" type="button">List</button>
+    <button class="btn sm" id="vb-folders" type="button">Folders</button>
+  </div>
+  <div id="view-list">
   {{if .Sessions}}
   <table>
     <tr><th>Name</th><th>Location</th><th>Type</th><th>Image</th><th>Storage</th><th>Specs</th><th>State</th><th></th></tr>
@@ -75,6 +80,25 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No instances in this organization yet.{{if not .Images}} Pull a base image first — <span class="mono">vdxd image pull ubuntu-24.04</span>.{{end}}</div>{{end}}
+  </div>{{/* /view-list */}}
+
+  <div id="view-folders" style="display:none">
+    <div class="ftbar" style="display:flex;gap:10px;align-items:center;margin:0 0 12px">
+      <button class="btn sm" type="button" onclick="fnewFolder(0)">+ New folder</button>
+      <span class="muted" style="font-size:12px">Drag an instance onto a folder to move it — changes save instantly.</span>
+    </div>
+    {{if .Sessions}}
+    <div class="ftree">
+      {{range .FolderRoots}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+      <div class="ftfolder ftroot" data-folder="0" ondragover="fallow(event)" ondrop="fdrop(event,0)">
+        <div class="ftsum"><span class="ftname muted">Ungrouped</span><span class="ftcount">{{len .RootVMs}}</span></div>
+        <div class="ftbody">
+          {{range .RootVMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+        </div>
+      </div>
+    </div>
+    {{else}}<div class="empty">No instances in this organization yet.</div>{{end}}
+  </div>
   {{end}}
 </div>
 
@@ -140,4 +164,119 @@
    os.addEventListener('change', sync); sync();
  })();
 </script>
+
+<style>
+ .ftree{display:flex;flex-direction:column;gap:10px}
+ .ftfolder{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2);padding:4px 6px}
+ .ftfolder[open]>.ftsum, details.ftfolder>summary.ftsum{list-style:none}
+ details.ftfolder>summary::-webkit-details-marker{display:none}
+ .ftsum{display:flex;align-items:center;gap:10px;padding:7px 8px;cursor:pointer;user-select:none;border-radius:7px}
+ details.ftfolder>summary.ftsum:hover{background:var(--panel3)}
+ .ftfolder.dragover{border-color:var(--primary);background:var(--panel3)}
+ .ftname{font-weight:600}
+ .ftcount{min-width:20px;text-align:center;font-size:11px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:0 6px}
+ .ftactions{margin-left:auto;display:flex;gap:6px}
+ .ftbody{display:flex;flex-direction:column;gap:6px;padding:4px 4px 6px 18px}
+ .ftvm{display:flex;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);cursor:grab}
+ .ftvm:active{cursor:grabbing}
+ .ftvm.dragging{opacity:.5}
+ .ftvm-name{font-weight:600}
+ .ftvm-spec{font-size:11.5px}
+ .ftvm-act{margin-left:auto;display:flex;align-items:center;gap:6px;white-space:nowrap}
+ .ftmove{font-size:12px;padding:4px 6px}
+</style>
+<script>
+ (function(){
+   // Instances view toggle (List / Folders), remembered per browser.
+   var list=document.getElementById('view-list'), folders=document.getElementById('view-folders');
+   var bl=document.getElementById('vb-list'), bf=document.getElementById('vb-folders');
+   if(!list||!folders||!bl||!bf) return;
+   function setView(v){
+     var f=(v==='folders');
+     folders.style.display=f?'':'none'; list.style.display=f?'none':'';
+     bf.classList.toggle('primary',f); bl.classList.toggle('primary',!f);
+     try{localStorage.setItem('vdx.instview',v);}catch(e){}
+   }
+   bl.addEventListener('click',function(){setView('list');});
+   bf.addEventListener('click',function(){setView('folders');});
+   var saved='list'; try{saved=localStorage.getItem('vdx.instview')||'list';}catch(e){}
+   setView(saved);
+ })();
+
+ function fcsrf(){var m=document.querySelector('#view-folders input[name=csrf], input[name=csrf]');return m?m.value:'';}
+ function fpost(url,data){
+   var b=new URLSearchParams(data); b.set('csrf',fcsrf()); b.set('ajax','1');
+   return fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b.toString()})
+     .then(function(r){return r.json().catch(function(){return{};}).then(function(j){return{ok:r.ok,j:j};});})
+     .then(function(res){
+       if(!res.ok){ var m=(res.j&&res.j.error)||'Action failed'; if(window.VDXToast)VDXToast(m); else alert(m); return; }
+       location.reload();
+     }).catch(function(){ location.reload(); });
+ }
+ function fnewFolder(parent){var n=prompt('New folder name'); if(!n)return; fpost('/folders',{parent:parent,name:n});}
+ function frename(id,cur){var n=prompt('Rename folder',cur); if(n===null||n===''||n===cur)return; fpost('/folders/'+id+'/rename',{name:n});}
+ function fdelete(id,name){ if(!confirm('Delete folder "'+name+'"?\nIts instances and subfolders move up one level — nothing is deleted.'))return; fpost('/folders/'+id+'/delete',{});}
+ function fmove(vm,folder){ if(folder==='')return; fpost('/folders/move-vm',{vm:vm,folder:folder});}
+
+ // Drag-and-drop: a VM row onto a folder (or the Ungrouped zone, folder 0).
+ var fdragVM=null;
+ function fdrag(e,vm){ fdragVM=vm; try{e.dataTransfer.setData('text/plain',vm);}catch(_){} e.dataTransfer.effectAllowed='move'; e.target.classList.add('dragging'); }
+ function fallow(e){ e.preventDefault(); e.dataTransfer.dropEffect='move';
+   var t=e.currentTarget; t.classList.add('dragover'); }
+ function fdrop(e,folder){ e.preventDefault(); e.stopPropagation();
+   var t=e.currentTarget; t.classList.remove('dragover');
+   var vm=fdragVM||(e.dataTransfer&&e.dataTransfer.getData('text/plain')); if(!vm)return;
+   fpost('/folders/move-vm',{vm:vm,folder:folder});
+ }
+ document.addEventListener('dragend',function(e){
+   document.querySelectorAll('.ftfolder.dragover').forEach(function(el){el.classList.remove('dragover');});
+   document.querySelectorAll('.ftvm.dragging').forEach(function(el){el.classList.remove('dragging');});
+ });
+ document.addEventListener('dragleave',function(e){
+   if(e.target&&e.target.classList&&e.target.classList.contains('ftfolder'))e.target.classList.remove('dragover');
+ });
+</script>
 {{template "foot" .}}{{end}}
+
+{{/* One folder node of the inventory tree. Context: {Node, CSRF, Folders}. The
+     recursion re-passes CSRF/Folders because {{template}} rebinds $ to its arg. */}}
+{{define "ftnode"}}
+<details class="ftfolder" open data-folder="{{.Node.ID}}" ondragover="fallow(event)" ondrop="fdrop(event,{{.Node.ID}})">
+  <summary class="ftsum">
+    <span class="ftname">{{.Node.Name}}</span>
+    <span class="ftcount">{{len .Node.VMs}}</span>
+    <span class="ftactions">
+      <button class="btn sm" type="button" title="New subfolder" onclick="fnewFolder({{.Node.ID}});event.preventDefault();event.stopPropagation()">+ Sub</button>
+      <button class="btn sm" type="button" onclick="frename({{.Node.ID}},{{.Node.Name}});event.preventDefault();event.stopPropagation()">Rename</button>
+      <button class="btn sm danger" type="button" onclick="fdelete({{.Node.ID}},{{.Node.Name}});event.preventDefault();event.stopPropagation()">Delete</button>
+    </span>
+  </summary>
+  <div class="ftbody">
+    {{range .Node.VMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+    {{range .Node.Children}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+  </div>
+</details>
+{{end}}
+
+{{/* One draggable VM row inside the tree. Context: {VM, CSRF, Folders}. */}}
+{{define "ftvmrow"}}
+<div class="ftvm" draggable="true" data-vm="{{.VM.ID}}" ondragstart="fdrag(event,{{.VM.ID}})">
+  <a class="ftvm-name" href="/instances/{{.VM.ID}}">{{.VM.Name}}</a>
+  <span class="muted ftvm-spec">{{.VM.Kind}} · {{.VM.CPUs}} vCPU · {{.VM.MemoryMB}} MB</span>
+  <span class="pill {{.VM.State}}">{{.VM.State}}</span>
+  <span class="ftvm-act">
+    {{if eq .VM.State "running"}}
+      <a class="btn sm" href="/console/{{.VM.ID}}" target="_blank" rel="noopener">Console</a>
+      <form method="post" action="/sessions/{{.VM.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
+    {{else}}
+      <form method="post" action="/sessions/{{.VM.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>
+    {{end}}
+    <a class="btn sm" href="/instances/{{.VM.ID}}">Details</a>
+    <select class="ftmove" onchange="fmove({{.VM.ID}},this.value)" title="Move to folder">
+      <option value="">Move to…</option>
+      <option value="0">— Ungrouped —</option>
+      {{range .Folders}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+    </select>
+  </span>
+</div>
+{{end}}

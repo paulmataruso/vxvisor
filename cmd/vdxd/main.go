@@ -216,6 +216,7 @@ func cmdServe(cfgPath string) {
 		log.Printf("license enforcement ON: licensee=%q seats=%d servers=%d", lic.Licensee, lic.Seats, lic.Servers)
 	}
 	svc := service.New(cfg, d, st, stg, net, mgr, enf)
+	service.SetBuildVersion(version) // so the Update page can report/compare versions
 	// Clear any transient disk-export files left by an import that was interrupted
 	// by a restart/crash (no import survives a restart, so these are always dead).
 	svc.SweepImportTemps()

@@ -83,6 +83,25 @@
   </script>
 </div>
 
+<!-- Danger zone: fully remove Ceph from this host -->
+<div class="card" style="border-color:color-mix(in srgb,var(--danger) 35%,var(--line))">
+  <h2 style="color:var(--danger)">Remove Ceph</h2>
+  <p class="muted" style="margin:0 0 12px">Completely remove Ceph from this host: stop and disable every Ceph service (including the <span class="mono">ceph-crash</span> collector that keeps retrying after a cluster dies), unload the kernel modules, and delete all Ceph configuration and state — including queued crash dumps. The ceph packages stay installed so you can set it up again later, and your OSD disks are left intact (reclaim each one above with <strong>Clear for reuse</strong> afterwards).{{if .Status.Configured}} Any VM still using an RBD disk must be moved or deleted first.{{end}}</p>
+  <form method="post" action="/ceph/destroy" style="display:inline" onsubmit="return confirmDestroy()">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="btn danger">Remove Ceph from this host…</button>
+  </form>
+  <script>
+  function confirmDestroy(){
+    if(!confirm('Remove Ceph from this host?\n\nThis stops and disables ALL Ceph services, unloads the kernel modules, and deletes every Ceph config and state file (including queued crash dumps). OSD disks are NOT wiped. This cannot be undone, but you can bootstrap a new cluster afterwards.')) return false;
+    var t = prompt('Type REMOVE to confirm fully removing Ceph:');
+    if(t === null) return false;
+    if(t.trim() !== 'REMOVE'){ alert('“'+t+'” does not match — cancelled.'); return false; }
+    return true;
+  }
+  </script>
+</div>
+
 <!-- Bootstrap modal -->
 <div class="modal" id="m-bootstrap"><div class="modal-card">
   <div class="modal-head"><h3>Bootstrap Ceph cluster</h3><button class="modal-x" data-close>&times;</button></div>

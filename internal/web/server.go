@@ -117,6 +117,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /switch-org", s.auth(s.switchOrg))
 
 	mux.HandleFunc("POST /sessions", s.auth(s.createSession))
+	// Inventory folders (VMware-style tree on the instances page). Mutations
+	// support drag-and-drop (?ajax=1 → JSON) and a plain form POST fallback.
+	mux.HandleFunc("POST /folders", s.auth(s.folderCreate))
+	mux.HandleFunc("POST /folders/{id}/rename", s.auth(s.folderRename))
+	mux.HandleFunc("POST /folders/{id}/delete", s.auth(s.folderDelete))
+	mux.HandleFunc("POST /folders/{id}/move", s.auth(s.folderMove))
+	mux.HandleFunc("POST /folders/move-vm", s.auth(s.folderMoveVM))
 	// VM-scoped admin routes are cluster-transparent: on the VIP a request for a
 	// VM owned by another node is reverse-proxied to that node (vmManage), so full
 	// per-VM management works from the unified view and from each host's own IP.
@@ -139,6 +146,14 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /console/{id}/serial/ws", s.auth(s.serialProxy))
 
 	// M3: images & storage
+	mux.HandleFunc("GET /clients", s.auth(s.clientsPage))
+	mux.HandleFunc("GET /clients/latest", s.auth(s.clientLatest))
+	mux.HandleFunc("GET /clients/download/{name}", s.auth(s.clientDownload))
+	mux.HandleFunc("GET /update", s.auth(s.updatePage))
+	mux.HandleFunc("POST /update/check", s.auth(s.updateCheck))
+	mux.HandleFunc("POST /update/apply", s.auth(s.updateApply))
+	mux.HandleFunc("POST /update/channel", s.auth(s.updateChannel))
+
 	mux.HandleFunc("GET /isos", s.auth(s.isos))
 	mux.HandleFunc("GET /api/isos", s.auth(s.apiISOs))
 	mux.HandleFunc("POST /isos/upload", s.auth(s.uploadISO))
@@ -204,6 +219,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ceph/bootstrap", s.auth(s.bootstrapCeph))
 	mux.HandleFunc("POST /ceph/osd", s.auth(s.addCephOSD))
 	mux.HandleFunc("POST /ceph/disk/clear", s.auth(s.clearDisk))
+	mux.HandleFunc("POST /ceph/destroy", s.auth(s.destroyCeph))
 	mux.HandleFunc("GET /api/iscsi/discover", s.auth(s.apiISCSIDiscover))
 	mux.HandleFunc("GET /api/migrations", s.auth(s.apiMigrations))
 	mux.HandleFunc("GET /api/drive-alerts", s.auth(s.apiDriveAlerts))

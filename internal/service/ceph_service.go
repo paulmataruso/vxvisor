@@ -114,6 +114,35 @@ func (s *Service) BootstrapCeph(p *Principal, poolName, osdDisk, ip string) erro
 	return nil
 }
 
+// DestroyCeph fully removes the on-node Ceph cluster: it stops/disables every
+// Ceph service, unloads the kernel modules, deletes all Ceph config/state (incl.
+// the crash backlog), and drops the pool registration so the UI returns to its
+// "not configured" state. Packages stay installed so a later bootstrap can rebuild.
+//
+// It refuses while any VM still has a disk on RBD — tearing Ceph down under a live
+// VM disk would strand it. OSD disks are not wiped here; the operator reclaims each
+// one with "Clear for reuse" (ClearCephDisk) after confirming.
+func (s *Service) DestroyCeph(p *Principal, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sessions
+		WHERE disk_backend='rbd' OR disk_path LIKE 'rbd:%'`).Scan(&n)
+	if n > 0 {
+		return fmt.Errorf("%d VM disk(s) are still on Ceph RBD — move or delete them before removing Ceph", n)
+	}
+	if err := ceph.Teardown(); err != nil {
+		return fmt.Errorf("ceph teardown: %w", err)
+	}
+	// Drop the pool registration + bootstrap markers; the Ceph page now shows the
+	// bootstrap flow again instead of a phantom cluster.
+	_, _ = s.db.Exec(`DELETE FROM storage_pools WHERE kind='rbd'`)
+	_, _ = s.db.Exec(`DELETE FROM settings WHERE key IN (?,?)`, cephBootstrappedKey, cephPoolKey)
+	s.audit(p, p.OrgID, "ceph.destroy", "ceph", "cluster", ip, nil)
+	return nil
+}
+
 // CephDiskReclaimable reports whether a disk can be cleared for reuse via the UI:
 // it carries Ceph OSD remnants AND is not currently mounted. Returns a short note
 // for the button tooltip. Works with the cluster stopped.

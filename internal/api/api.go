@@ -27,6 +27,12 @@ func New(svc *service.Service) *API { return &API{svc: svc, rl: newRateLimiter(1
 
 func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/sessions", a.auth("read", a.listSessions))
+	mux.HandleFunc("GET /api/v1/folders", a.auth("read", a.listFolders))
+	mux.HandleFunc("POST /api/v1/folders", a.auth("write", a.createFolder))
+	mux.HandleFunc("POST /api/v1/folders/{id}/rename", a.auth("write", a.renameFolder))
+	mux.HandleFunc("POST /api/v1/folders/{id}/delete", a.auth("write", a.deleteFolder))
+	mux.HandleFunc("POST /api/v1/folders/{id}/move", a.auth("write", a.moveFolder))
+	mux.HandleFunc("POST /api/v1/folders/move-vm", a.auth("write", a.moveVMFolder))
 	mux.HandleFunc("POST /api/v1/sessions", a.auth("write", a.createSession))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/resize", a.auth("write", a.resizeSession))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/start", a.auth("write", a.startSession))
@@ -115,6 +121,84 @@ func (a *API) listSessions(w http.ResponseWriter, r *http.Request, p *service.Pr
 		return
 	}
 	writeJSON(w, 200, s)
+}
+
+func (a *API) listFolders(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	fd, err := a.svc.ListFolderData(p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, fd)
+}
+
+func apiIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (a *API) createFolder(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	var body struct {
+		Parent int64  `json:"parent"`
+		Name   string `json:"name"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	id, err := a.svc.CreateFolder(p, body.Parent, body.Name, apiIP(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"id": id})
+}
+
+func (a *API) renameFolder(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Name string `json:"name"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if err := a.svc.RenameFolder(p, id, body.Name, apiIP(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (a *API) deleteFolder(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err := a.svc.DeleteFolder(p, id, apiIP(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (a *API) moveFolder(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var body struct {
+		Parent int64 `json:"parent"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if err := a.svc.MoveFolder(p, id, body.Parent, apiIP(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (a *API) moveVMFolder(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	var body struct {
+		VM     string `json:"vm"`
+		Folder int64  `json:"folder"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if err := a.svc.MoveVM(p, body.VM, body.Folder, apiIP(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (a *API) createSession(w http.ResponseWriter, r *http.Request, p *service.Principal) {

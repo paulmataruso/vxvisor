@@ -1,0 +1,103 @@
+{{define "update.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Updates</h2>
+  </div>
+  <p class="muted" style="margin:0 0 14px;max-width:72ch">
+    Check GitHub for a newer VXVisor release and apply it in place. The server
+    contacts GitHub <strong>only when you press “Check for updates”</strong> —
+    never automatically — and sends nothing about this install. Applying an update
+    swaps the <code>vdxd</code> binary (keeping a <code>.bak</code>), refreshes the
+    bundled desktop-client downloads, and restarts the service.
+  </p>
+
+  <table style="margin-bottom:14px">
+    <tr><th style="width:180px">Running version</th><td class="mono">{{.Current}}</td></tr>
+    <tr><th>Channel</th><td>
+      <select id="u-channel" onchange="uSetChannel()">
+        <option value="stable" {{if eq .Channel "stable"}}selected{{end}}>Stable (released)</option>
+        <option value="preview" {{if eq .Channel "preview"}}selected{{end}}>Preview (prereleases / dev)</option>
+      </select>
+      <span class="muted" style="font-size:12px;margin-left:8px">Preview tracks GitHub <em>pre-releases</em> (built from the dev branch).</span>
+    </td></tr>
+    <tr><th>Latest available</th><td class="mono" id="u-latest">—</td></tr>
+    <tr><th>Published</th><td class="muted" id="u-published">—</td></tr>
+  </table>
+
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn primary" id="u-check" onclick="uCheck()">Check for updates</button>
+    <button class="btn" id="u-apply" style="display:none" onclick="uApply()">Apply &amp; Restart</button>
+    <span class="muted" id="u-status"></span>
+  </div>
+
+  <div id="u-notes-wrap" style="display:none;margin-top:16px">
+    <div class="muted" style="font-size:12px;margin-bottom:6px">Release notes</div>
+    <pre id="u-notes" style="white-space:pre-wrap;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px;margin:0;max-height:320px;overflow:auto;font-size:12.5px"></pre>
+  </div>
+</div>
+
+<style>
+  #u-latest.newer{color:var(--accent);font-weight:600}
+</style>
+<script>
+const UCSRF = "{{.CSRF}}";
+function uSet(id,txt){ document.getElementById(id).textContent = txt; }
+async function uSetChannel(){
+  const ch=document.getElementById('u-channel').value;
+  uSet('u-status','Switching to '+ch+' channel…');
+  try{
+    const r=await fetch('/update/channel',{method:'POST',body:new URLSearchParams({csrf:UCSRF,channel:ch})});
+    const d=await r.json();
+    if(d.error){ uSet('u-status', d.error); return; }
+    uSet('u-status','Channel set to '+ch+'. Press “Check for updates”.');
+    document.getElementById('u-apply').style.display='none';
+    uSet('u-latest','—'); uSet('u-published','—');
+  }catch(e){ uSet('u-status','Failed: '+e); }
+}
+async function uCheck(){
+  const btn=document.getElementById('u-check');
+  btn.disabled=true; uSet('u-status','Checking GitHub…');
+  document.getElementById('u-apply').style.display='none';
+  try{
+    const r=await fetch('/update/check',{method:'POST',body:new URLSearchParams({csrf:UCSRF})});
+    const d=await r.json();
+    if(d.error){ uSet('u-status', d.error); btn.disabled=false; return; }
+    uSet('u-latest', d.latest || '—');
+    uSet('u-published', d.published_at ? new Date(d.published_at).toLocaleString() : '—');
+    if(d.notes){ document.getElementById('u-notes').textContent=d.notes; document.getElementById('u-notes-wrap').style.display='block'; }
+    if(d.up_to_date){
+      uSet('u-status','You are on the latest version.');
+      document.getElementById('u-latest').classList.remove('newer');
+    }else{
+      uSet('u-status','An update is available.');
+      document.getElementById('u-latest').classList.add('newer');
+      document.getElementById('u-apply').style.display='inline-block';
+    }
+  }catch(e){ uSet('u-status','Check failed: '+e); }
+  btn.disabled=false;
+}
+async function uApply(){
+  if(!confirm('Download and apply the update, then restart the server? Active sessions will briefly disconnect.')) return;
+  const apply=document.getElementById('u-apply'), check=document.getElementById('u-check');
+  apply.disabled=true; check.disabled=true; uSet('u-status','Downloading & applying… the server will restart.');
+  try{
+    const r=await fetch('/update/apply',{method:'POST',body:new URLSearchParams({csrf:UCSRF})});
+    const d=await r.json();
+    if(d.error){ uSet('u-status','Update failed: '+d.error); apply.disabled=false; check.disabled=false; return; }
+    uSet('u-status','Updated to '+d.version+'. Restarting — this page will reconnect automatically…');
+    uPoll();
+  }catch(e){
+    // A dropped connection here is expected (the server is restarting).
+    uSet('u-status','Server is restarting — reconnecting…'); uPoll();
+  }
+}
+function uPoll(){
+  let n=0;
+  const t=setInterval(async()=>{
+    n++;
+    try{ const r=await fetch('/update',{cache:'no-store'}); if(r.ok){ clearInterval(t); location.reload(); return; } }catch(e){}
+    if(n>60){ clearInterval(t); uSet('u-status','Still restarting — reload the page manually in a moment.'); }
+  },2000);
+}
+</script>
+{{template "foot" .}}{{end}}

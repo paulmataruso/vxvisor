@@ -1,0 +1,42 @@
+{{define "clients.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Desktop Client</h2>
+  </div>
+  <p class="muted" style="margin:0 0 14px;max-width:70ch">
+    VXVisor Console is a small desktop app for Windows and Linux. It connects to
+    this server, lists your virtual machines, lets you start, stop, restart and
+    open the console of a VM — a quick way to work with a machine without opening
+    the web UI. Download it, run it, and sign in with the same username and
+    password you use here.
+  </p>
+
+  {{if .Files}}
+  <table>
+    <tr><th>Platform</th><th>File</th><th>Size</th><th></th></tr>
+    {{range .Files}}
+    <tr>
+      <td><strong>{{.Platform}}</strong>{{if .Arch}} <span class="pill">{{.Arch}}</span>{{end}}</td>
+      <td class="mono" style="font-size:12px">{{.Name}}</td>
+      <td class="muted">{{humanBytes .Size}}</td>
+      <td style="text-align:right"><a class="btn sm primary" href="/clients/download/{{.Name}}">Download</a></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}
+  <div class="empty">
+    No client builds have been added to this server yet.
+  </div>
+  <p class="muted" style="margin:14px 0 0;max-width:70ch">
+    An administrator can add them by placing the compiled <code>vxconsole</code>
+    binaries in the server's <code>clients</code> folder (inside the data
+    directory). They will then appear here for everyone to download.
+  </p>
+  {{end}}
+
+  <p class="muted" style="margin:16px 0 0;font-size:12px;max-width:70ch">
+    Tip: for one-click clipboard paste in the console and an encrypted
+    connection, put a TLS reverse proxy in front of this server.
+  </p>
+</div>
+{{template "foot" .}}{{end}}

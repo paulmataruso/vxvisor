@@ -106,8 +106,14 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 	if localNode == "" {
 		localNode, _ = os.Hostname()
 	}
+	folders, _ := s.svc.ListFolderData(p)
+	folderRoots, rootVMs := buildFolderTree(sessions, folders.Folders, folders.Members)
 	data := map[string]any{
-		"Sessions":  sessions,
+		"Sessions":    sessions,
+		"Folders":     folders.Folders,
+		"VMFolders":   folders.Members,
+		"FolderRoots": folderRoots,
+		"RootVMs":     rootVMs,
 		"Images":    images,
 		"ISOs":      isos,
 		"Templates": templates,
