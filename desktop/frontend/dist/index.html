@@ -25,7 +25,8 @@
   .sub{color:var(--muted);font-size:13px;margin-top:2px}
   .ver{color:var(--muted);font-size:11px;margin-top:2px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
-  label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 6px}
+  label:first-child{margin-top:0}
   input{
     width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--line);
     background:var(--panel2); color:var(--fg); font-size:15px; outline:none;
@@ -33,7 +34,7 @@
   }
   input:focus{border-color:var(--primary)}
   button{
-    width:100%; margin-top:14px; padding:12px; border:0; border-radius:10px;
+    width:100%; margin-top:16px; padding:12px; border:0; border-radius:10px;
     background:var(--primary); color:#fff; font-size:15px; font-weight:600; cursor:pointer;
   }
   button:hover{filter:brightness(1.08)}
@@ -43,6 +44,7 @@
   .ritem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:9px;cursor:pointer;color:var(--fg)}
   .ritem:hover{background:var(--panel2)}
   .ritem .dot{width:7px;height:7px;border-radius:50%;background:var(--brand);flex:none}
+  .ritem .sub{color:var(--muted);font-size:12px}
   .ritem .x{margin-left:auto;color:var(--muted);font-size:16px;line-height:1;padding:0 4px}
   .ritem .x:hover{color:#f87171}
 </style>
@@ -58,6 +60,10 @@
     <div class="card">
       <label for="host">Server host</label>
       <input id="host" placeholder="host or ip (e.g. 10.0.0.5 or 10.0.0.5:8766)" autofocus />
+      <label for="user">Username</label>
+      <input id="user" autocomplete="username" />
+      <label for="pass">Password</label>
+      <input id="pass" type="password" autocomplete="current-password" />
       <button id="go">Connect</button>
       <div class="err" id="err"></div>
       <div class="recent" id="recentWrap" style="display:none">
@@ -77,55 +83,74 @@
     return u.protocol+'//'+u.host;
   }
   function getRecents(){ try{ return JSON.parse(localStorage.getItem(RK)||'[]'); }catch(e){ return []; } }
-  function saveRecent(url){
+  function saveRecent(base,user){
     try{
-      var r=getRecents().filter(function(x){return x!==url;});
-      r.unshift(url); r=r.slice(0,6);
+      var r=getRecents().filter(function(x){return x.h!==base;});
+      r.unshift({h:base,u:user||''}); r=r.slice(0,6);
       localStorage.setItem(RK, JSON.stringify(r));
     }catch(e){}
   }
-  function removeRecent(url){
-    try{ localStorage.setItem(RK, JSON.stringify(getRecents().filter(function(x){return x!==url;}))); }catch(e){}
+  function removeRecent(base){
+    try{ localStorage.setItem(RK, JSON.stringify(getRecents().filter(function(x){return x.h!==base;}))); }catch(e){}
     renderRecents();
   }
-  function connect(url){
-    if(!url){ document.getElementById('err').textContent='Enter a host.'; return; }
-    saveRecent(url);
+  function err(m){ document.getElementById('err').textContent=m||''; }
+
+  // Submit the login as a top-level form POST so the webview navigates to the
+  // server authenticated (the server sets the session cookie + redirects to /),
+  // exactly like the old single-page client — no separate login step.
+  function submitLogin(base,user,pass){
+    var f=document.createElement('form');
+    f.method='POST'; f.action=base+'/login'; f.style.display='none';
+    function add(n,v){ var i=document.createElement('input'); i.type='hidden'; i.name=n; i.value=v==null?'':v; f.appendChild(i); }
+    add('username',user); add('password',pass);
+    document.body.appendChild(f); f.submit();
+  }
+
+  function connect(){
+    var base=normalize(document.getElementById('host').value);
+    var user=document.getElementById('user').value.trim();
+    var pass=document.getElementById('pass').value;
+    if(!base){ err('Enter a host.'); return; }
+    if(!user){ err('Enter a username.'); return; }
+    saveRecent(base,user);
     var go=window.go && window.go.main && window.go.main.App;
-    var navigate=function(){ window.location.href=url; }; // load the server's web UI
+    var proceed=function(){ submitLogin(base,user,pass); };
     if(go && go.CheckUpdate){
-      // Offer a client self-update first; if accepted the app relaunches and this
-      // never resolves, otherwise we proceed to connect either way.
-      document.getElementById('err').textContent='Checking for updates…';
-      go.CheckUpdate(url).then(navigate, navigate);
+      err('Checking for updates…');
+      go.CheckUpdate(base).then(proceed, proceed); // relaunches if updated, else logs in
     } else {
-      navigate();
+      proceed();
     }
   }
+
   function renderRecents(){
     var r=getRecents(), wrap=document.getElementById('recentWrap'), box=document.getElementById('recent');
     box.innerHTML='';
     if(!r.length){ wrap.style.display='none'; return; }
     wrap.style.display='block';
-    r.forEach(function(url){
+    r.forEach(function(it){
       var row=document.createElement('div'); row.className='ritem';
       var dot=document.createElement('span'); dot.className='dot';
-      var label=document.createElement('span'); label.textContent=url.replace(/^https?:\/\//,'');
+      var label=document.createElement('span');
+      label.innerHTML=it.h.replace(/^https?:\/\//,'')+(it.u?' <span class="sub">· '+it.u+'</span>':'');
       var x=document.createElement('span'); x.className='x'; x.textContent='×'; x.title='forget';
       row.appendChild(dot); row.appendChild(label); row.appendChild(x);
-      row.onclick=function(){ connect(url); };
-      x.onclick=function(e){ e.stopPropagation(); removeRecent(url); };
+      row.onclick=function(){
+        document.getElementById('host').value=it.h;
+        document.getElementById('user').value=it.u||'';
+        document.getElementById('pass').focus();
+      };
+      x.onclick=function(e){ e.stopPropagation(); removeRecent(it.h); };
       box.appendChild(row);
     });
   }
-  document.getElementById('go').onclick=function(){
-    document.getElementById('err').textContent='';
-    connect(normalize(document.getElementById('host').value));
-  };
-  document.getElementById('host').addEventListener('keydown',function(e){
-    if(e.key==='Enter'){ document.getElementById('go').click(); }
+
+  document.getElementById('go').onclick=connect;
+  ['host','user','pass'].forEach(function(id){
+    document.getElementById(id).addEventListener('keydown',function(e){ if(e.key==='Enter'){ connect(); } });
   });
-  // Show client version from the Go backend when the Wails runtime is ready.
+
   function showVer(){
     try{
       if(window.go && window.go.main && window.go.main.App && window.go.main.App.Version){

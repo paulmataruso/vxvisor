@@ -121,6 +121,17 @@ Typical loop: develop on `dev` → publish a prerelease from `dev` → a test se
 **Preview** pulls and verifies it → merge `dev → main` → publish a **stable** release →
 Stable servers (everyone else) pick it up.
 
+**VERSIONING RULE — Preview must always be ≥ Stable (never below).** The channels compare
+by version, so a prerelease whose version is *lower* than the newest stable makes the
+Preview channel look stale/backwards (and offers no upgrade to test with). Therefore:
+- Every **prerelease** gets a version **strictly greater than the latest stable** (bump the
+  minor ahead, e.g. stable `v1.84.0` → next preview `v1.85.0`).
+- Promoting to **stable** cuts a stable release at that same version (or the next), so
+  Stable catches up to Preview — then the next preview bumps above it again.
+- Net: `Preview ≥ Stable` at all times; a test host on Preview always sees the build to try.
+- Server self-update never downgrades (`ApplyServerUpdate` refuses a version ≤ the running
+  one), so a stale Preview can't roll a host back — it just looks wrong. Keep the invariant.
+
 ### Cutting a release
 `deploy/release.sh vX.Y.Z-YYYYMMDD [notes-file] [--prerelease] [--target <branch>]`
 builds `vdxd` + both desktop clients at one version, writes `SHA256SUMS`, and runs
