@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VXVisor Console</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#121722; --panel2:#1a2130; --line:#27303f;
+    --fg:#e6e9ef; --muted:#8a93a6; --brand:#18a3f0; --primary:#3b82f6;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    -webkit-user-select:none; user-select:none;
+  }
+  .wrap{width:420px; max-width:92vw; padding:24px}
+  .brand{text-align:center; margin-bottom:22px}
+  .logo{width:72px;height:72px;margin:0 auto 12px;display:block;border-radius:16px}
+  .wordmark{font-size:34px;font-weight:800;letter-spacing:-.5px}
+  .wordmark .vx{color:var(--brand)}
+  .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .ver{color:var(--muted);font-size:11px;margin-top:2px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+  input{
+    width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--fg); font-size:15px; outline:none;
+    -webkit-user-select:text; user-select:text;
+  }
+  input:focus{border-color:var(--primary)}
+  button{
+    width:100%; margin-top:14px; padding:12px; border:0; border-radius:10px;
+    background:var(--primary); color:#fff; font-size:15px; font-weight:600; cursor:pointer;
+  }
+  button:hover{filter:brightness(1.08)}
+  .err{color:#f87171;font-size:13px;margin-top:10px;min-height:18px}
+  .recent{margin-top:16px}
+  .recent h4{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:0 0 8px;font-weight:700}
+  .ritem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:9px;cursor:pointer;color:var(--fg)}
+  .ritem:hover{background:var(--panel2)}
+  .ritem .dot{width:7px;height:7px;border-radius:50%;background:var(--brand);flex:none}
+  .ritem .x{margin-left:auto;color:var(--muted);font-size:16px;line-height:1;padding:0 4px}
+  .ritem .x:hover{color:#f87171}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <img class="logo" src="appicon.png" alt="" onerror="this.style.display='none'"/>
+      <div class="wordmark"><span class="vx">Vx</span>visor</div>
+      <div class="sub">Management Console</div>
+      <div class="ver" id="ver"></div>
+    </div>
+    <div class="card">
+      <label for="host">Server host</label>
+      <input id="host" placeholder="host or ip (e.g. 10.0.0.5 or 10.0.0.5:8766)" autofocus />
+      <button id="go">Connect</button>
+      <div class="err" id="err"></div>
+      <div class="recent" id="recentWrap" style="display:none">
+        <h4>Recent</h4>
+        <div id="recent"></div>
+      </div>
+    </div>
+  </div>
+<script>
+  var RK='vx_recent_hosts';
+  function normalize(h){
+    h=(h||'').trim(); if(!h) return '';
+    if(!/:\/\//.test(h)) h='http://'+h;
+    var u; try{ u=new URL(h); }catch(e){ return ''; }
+    if(!u.hostname) return '';
+    if(!u.port) u.port='8766';
+    return u.protocol+'//'+u.host;
+  }
+  function getRecents(){ try{ return JSON.parse(localStorage.getItem(RK)||'[]'); }catch(e){ return []; } }
+  function saveRecent(url){
+    try{
+      var r=getRecents().filter(function(x){return x!==url;});
+      r.unshift(url); r=r.slice(0,6);
+      localStorage.setItem(RK, JSON.stringify(r));
+    }catch(e){}
+  }
+  function removeRecent(url){
+    try{ localStorage.setItem(RK, JSON.stringify(getRecents().filter(function(x){return x!==url;}))); }catch(e){}
+    renderRecents();
+  }
+  function connect(url){
+    if(!url){ document.getElementById('err').textContent='Enter a host.'; return; }
+    saveRecent(url);
+    window.location.href=url; // navigate the webview to the server's web UI
+  }
+  function renderRecents(){
+    var r=getRecents(), wrap=document.getElementById('recentWrap'), box=document.getElementById('recent');
+    box.innerHTML='';
+    if(!r.length){ wrap.style.display='none'; return; }
+    wrap.style.display='block';
+    r.forEach(function(url){
+      var row=document.createElement('div'); row.className='ritem';
+      var dot=document.createElement('span'); dot.className='dot';
+      var label=document.createElement('span'); label.textContent=url.replace(/^https?:\/\//,'');
+      var x=document.createElement('span'); x.className='x'; x.textContent='×'; x.title='forget';
+      row.appendChild(dot); row.appendChild(label); row.appendChild(x);
+      row.onclick=function(){ connect(url); };
+      x.onclick=function(e){ e.stopPropagation(); removeRecent(url); };
+      box.appendChild(row);
+    });
+  }
+  document.getElementById('go').onclick=function(){
+    document.getElementById('err').textContent='';
+    connect(normalize(document.getElementById('host').value));
+  };
+  document.getElementById('host').addEventListener('keydown',function(e){
+    if(e.key==='Enter'){ document.getElementById('go').click(); }
+  });
+  // Show client version from the Go backend when the Wails runtime is ready.
+  function showVer(){
+    try{
+      if(window.go && window.go.main && window.go.main.App && window.go.main.App.Version){
+        window.go.main.App.Version().then(function(v){ if(v) document.getElementById('ver').textContent=v; });
+        return;
+      }
+    }catch(e){}
+    setTimeout(showVer,150);
+  }
+  showVer();
+  renderRecents();
+</script>
+</body>
+</html>

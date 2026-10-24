@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "vxconsole",
+  "outputfilename": "vxconsole",
+  "author": {
+    "name": "paulmataruso",
+    "email": "120042217+paulmataruso@users.noreply.github.com"
+  },
+  "info": {
+    "productName": "VXVisor Console",
+    "comments": "VXVisor management console"
+  }
+}
