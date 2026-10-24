@@ -147,8 +147,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 
 	// M3: images & storage
 	mux.HandleFunc("GET /clients", s.auth(s.clientsPage))
-	mux.HandleFunc("GET /clients/latest", s.auth(s.clientLatest))
-	mux.HandleFunc("GET /clients/download/{name}", s.auth(s.clientDownload))
+	// Public (no auth): the desktop shell self-updates before the user logs in, so
+	// it must read the latest-client metadata and download the binary without a
+	// session. The binaries are distributed to users anyway (not secret); both
+	// handlers ignore the principal. The /clients browser page stays authed.
+	mux.HandleFunc("GET /clients/latest", func(w http.ResponseWriter, r *http.Request) { s.clientLatest(w, r, nil) })
+	mux.HandleFunc("GET /clients/download/{name}", func(w http.ResponseWriter, r *http.Request) { s.clientDownload(w, r, nil) })
 	mux.HandleFunc("GET /update", s.auth(s.updatePage))
 	mux.HandleFunc("POST /update/check", s.auth(s.updateCheck))
 	mux.HandleFunc("POST /update/apply", s.auth(s.updateApply))

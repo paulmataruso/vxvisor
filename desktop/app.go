@@ -18,7 +18,10 @@ type App struct {
 
 func NewApp() *App { return &App{} }
 
-func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
+	a.cleanupOld() // remove a leftover "<exe>.old" from a prior Windows self-update
+}
 
 // Version returns the client build version (shown on the connect screen).
 func (a *App) Version() string { return version }

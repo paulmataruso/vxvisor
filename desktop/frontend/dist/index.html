@@ -91,7 +91,16 @@
   function connect(url){
     if(!url){ document.getElementById('err').textContent='Enter a host.'; return; }
     saveRecent(url);
-    window.location.href=url; // navigate the webview to the server's web UI
+    var go=window.go && window.go.main && window.go.main.App;
+    var navigate=function(){ window.location.href=url; }; // load the server's web UI
+    if(go && go.CheckUpdate){
+      // Offer a client self-update first; if accepted the app relaunches and this
+      // never resolves, otherwise we proceed to connect either way.
+      document.getElementById('err').textContent='Checking for updates…';
+      go.CheckUpdate(url).then(navigate, navigate);
+    } else {
+      navigate();
+    }
   }
   function renderRecents(){
     var r=getRecents(), wrap=document.getElementById('recentWrap'), box=document.getElementById('recent');
