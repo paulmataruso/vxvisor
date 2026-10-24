@@ -26,10 +26,12 @@ type consoleTab struct {
 	s    client.Session
 	item *container.TabItem
 
-	view   *vncView
-	conn   interface{ Close() error }
-	rc     *rfb.Client
-	closed bool
+	view      *vncView
+	conn      interface{ Close() error }
+	rc        *rfb.Client
+	closed    bool
+	closeCh   chan struct{} // closed on tab close; interrupts the reconnect backoff
+	closeOnce sync.Once
 
 	center    *fyne.Container
 	statusDot *canvas.Circle
@@ -37,7 +39,7 @@ type consoleTab struct {
 }
 
 func newConsoleTab(sh *shell, s client.Session) *consoleTab {
-	c := &consoleTab{sh: sh, s: s}
+	c := &consoleTab{sh: sh, s: s, closeCh: make(chan struct{})}
 	c.view = newVNCView()
 
 	// Screen area: the viewer on black, matching the web console's #wrap.
@@ -54,41 +56,93 @@ func newConsoleTab(sh *shell, s client.Session) *consoleTab {
 
 func (c *consoleTab) connect() {
 	c.setStatus("wait", "connecting…")
-	go func() {
-		conn, err := c.sh.app.client.DialWS(c.sh.app.client.ConsoleWSURL(c.s.ID))
-		if err != nil {
-			fyne.Do(func() { c.setStatus("bad", "connect failed: "+err.Error()) })
+	go c.connLoop()
+}
+
+// connLoop keeps the console connected: it (re)dials + handshakes, runs the RFB
+// read loop until the connection drops, then retries with capped backoff — so a
+// server restart or a brief network blip recovers on its own, without the user
+// closing the tab or logging back in. The session cookie survives a vdxd restart
+// (sessions are DB-backed), so no re-auth is needed. Ends when the tab is closed.
+func (c *consoleTab) connLoop() {
+	backoff := time.Second
+	first := true
+	for {
+		if c.closed {
 			return
 		}
-		rw := client.WSReadWriter(conn)
-		rc, err := rfb.Handshake(rw, c.s.VNCPassword)
-		if err != nil {
-			conn.Close()
-			fyne.Do(func() { c.setStatus("bad", "handshake failed: "+err.Error()) })
-			return
-		}
-		c.conn = conn
-		c.rc = rc
-		c.view.attach(rc, c.sh.win)
-		rc.OnCutText = func(txt string) {
-			fyne.Do(func() { c.sh.win.Clipboard().SetContent(txt) })
-		}
-		rc.OnError = func(e error) {
+		if !first {
 			fyne.Do(func() {
 				if !c.closed {
-					c.setStatus("bad", "disconnected: "+e.Error())
+					c.setStatus("wait", "reconnecting…")
 				}
 			})
+			select {
+			case <-time.After(backoff):
+			case <-c.closeCh:
+				return
+			}
+			if backoff < 10*time.Second {
+				backoff *= 2
+			}
 		}
-		rc.OnResize = func(w, h int) {
-			fyne.Do(func() { c.setStatus("ok", "connected  ·  "+itoa(w)+"×"+itoa(h)) })
+		first = false
+		if c.dialAndRun() {
+			backoff = time.Second // a good session resets the backoff
 		}
+	}
+}
+
+// dialAndRun connects once and blocks in the RFB read loop until it ends. Returns
+// true if it actually got a live session (so the caller can reset backoff).
+func (c *consoleTab) dialAndRun() (connected bool) {
+	fyne.Do(func() {
+		if !c.closed {
+			c.setStatus("wait", "connecting…")
+		}
+	})
+	conn, err := c.sh.app.client.DialWS(c.sh.app.client.ConsoleWSURL(c.s.ID))
+	if err != nil {
 		fyne.Do(func() {
+			if !c.closed {
+				c.setStatus("wait", "reconnecting… ("+err.Error()+")")
+			}
+		})
+		return false
+	}
+	rw := client.WSReadWriter(conn)
+	rc, err := rfb.Handshake(rw, c.s.VNCPassword)
+	if err != nil {
+		conn.Close()
+		fyne.Do(func() {
+			if !c.closed {
+				c.setStatus("wait", "reconnecting… ("+err.Error()+")")
+			}
+		})
+		return false
+	}
+	if c.closed { // tab closed while we were dialing
+		conn.Close()
+		return false
+	}
+	c.conn = conn
+	c.rc = rc
+	c.view.stopLoop() // end any prior repaint loop before re-attaching (reconnect)
+	c.view.attach(rc, c.sh.win)
+	rc.OnCutText = func(txt string) {
+		fyne.Do(func() { c.sh.win.Clipboard().SetContent(txt) })
+	}
+	rc.OnResize = func(w, h int) {
+		fyne.Do(func() { c.setStatus("ok", "connected  ·  "+itoa(w)+"×"+itoa(h)) })
+	}
+	fyne.Do(func() {
+		if !c.closed {
 			c.setStatus("ok", "connected")
 			c.focus()
-		})
-		go rc.Run()
-	}()
+		}
+	})
+	rc.Run() // blocks until the connection ends; connLoop then retries
+	return true
 }
 
 func (c *consoleTab) focus() {
@@ -99,6 +153,7 @@ func (c *consoleTab) focus() {
 
 func (c *consoleTab) close() {
 	c.closed = true
+	c.closeOnce.Do(func() { close(c.closeCh) }) // stop the reconnect loop / backoff
 	if c.view != nil {
 		c.view.stopLoop()
 	}
