@@ -1,15 +1,36 @@
-<p align="left">
-  <img src="docs/vxwordmark.svg" alt="VXVisor" height="72">
+<p align="center">
+  <img src="docs/vxicon.png" alt="" height="96">
+</p>
+<p align="center">
+  <img src="docs/vxwordmark.svg" alt="VXVisor" height="60">
 </p>
 
-**A single-binary VM & infrastructure control plane for Linux.**
-Run virtual machines and containers, software-defined storage and networking,
-and multi-node clustering — all from one web UI, backed by one self-contained Go
-binary with no external database and no agents.
+<p align="center"><b>A single-binary VM &amp; infrastructure control plane for Linux.</b></p>
 
-[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue.svg)](LICENSE)
-![Platform: Linux](https://img.shields.io/badge/platform-linux-informational)
-![Built with Go](https://img.shields.io/badge/built%20with-Go-00ADD8)
+<p align="center">
+  <a href="LICENSE"><img alt="License: BSL 1.1" src="https://img.shields.io/badge/license-BSL%201.1-blue.svg"></a>
+  <a href="https://github.com/paulmataruso/vxvisor/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/paulmataruso/vxvisor?include_prereleases&label=release&color=18a3f0"></a>
+  <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/paulmataruso/vxvisor?logo=go&color=00ADD8">
+  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-linux-informational?logo=linux&logoColor=white">
+  <img alt="Top language" src="https://img.shields.io/github/languages/top/paulmataruso/vxvisor?color=00ADD8">
+  <img alt="Code size" src="https://img.shields.io/github/languages/code-size/paulmataruso/vxvisor">
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/paulmataruso/vxvisor">
+</p>
+
+<p align="center">
+  <img alt="QEMU/KVM" src="https://img.shields.io/badge/QEMU%2FKVM-virtualization-ff6600?logo=qemu&logoColor=white">
+  <img alt="LXC" src="https://img.shields.io/badge/LXC-containers-2496ED">
+  <img alt="ZFS" src="https://img.shields.io/badge/ZFS-pools-7a40c2">
+  <img alt="Ceph" src="https://img.shields.io/badge/Ceph-RBD-ef5c55">
+  <img alt="FRR" src="https://img.shields.io/badge/FRR-OSPF%20%C2%B7%20BGP-00875a">
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-embedded-003B57?logo=sqlite&logoColor=white">
+  <img alt="Wails" src="https://img.shields.io/badge/desktop-Wails-df0000">
+  <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-brightgreen">
+</p>
+
+Run virtual machines and containers, software-defined storage and networking,
+and multi-node clustering — all from one web UI (and a native desktop client),
+backed by one self-contained Go binary with no external database and no agents.
 
 VXVisor is an original, from-scratch platform inspired by the shape of Proxmox
 and vSphere. It installs in minutes, ships as a single binary (templates and
