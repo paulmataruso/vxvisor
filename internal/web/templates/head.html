@@ -268,6 +268,7 @@
       </select>
     </form>
     {{end}}
+    {{if .Version}}<span class="muted" title="Server version" style="font-size:12px;white-space:nowrap">{{.Version}}</span>{{end}}
     <button type="button" class="iconbtn" id="themebtn" title="Toggle light/dark" aria-label="Toggle theme"><svg class="ic"><use href="#i-moon"/></svg></button>
     <a href="/clients" class="btn sm{{if eq .Active "clients"}} primary{{end}}" title="Download the VXVisor desktop console client"><svg class="ic"><use href="#i-monitor"/></svg>Client</a>
     {{if .P.IsAdmin}}

@@ -645,6 +645,7 @@ func (s *Server) render(w http.ResponseWriter, p *service.Principal, name, activ
 	}
 	// Cluster mode indicators for the chrome (topbar badge, nav). Unified = the
 	// request came in on the VIP; NodeName/VIP label the current view.
+	view["Version"] = service.BuildVersion()
 	view["Unified"] = p.Unified
 	view["Clustered"] = s.svc.ClusterEnabledRole()
 	view["NodeName"] = s.svc.ClusterSelfName()
