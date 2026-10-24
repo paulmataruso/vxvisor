@@ -14,7 +14,8 @@ func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.cleanupOld() // remove a leftover "<exe>.old" from a prior Windows self-update
+	a.cleanupOld()       // remove a leftover "<exe>.old" from a prior Windows self-update
+	a.integrateDesktop() // install the .desktop + hicolor icon so GNOME shows the taskbar icon
 }
 
 // Version returns the client build version (shown on the connect screen).

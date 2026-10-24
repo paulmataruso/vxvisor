@@ -36,8 +36,10 @@ func main() {
 		Bind:      []interface{}{app},
 		// Window/taskbar icon + a stable WM class so the desktop environment shows it.
 		Linux: &linux.Options{
-			Icon:        appIcon,
-			ProgramName: "VXVisor Console",
+			Icon: appIcon,
+			// g_set_prgname → X11 res_name / Wayland app_id. Keep it a clean, no-space
+			// token so GNOME matches the installed vxconsole.desktop (StartupWMClass).
+			ProgramName: "vxconsole",
 		},
 	})
 	if err != nil {
