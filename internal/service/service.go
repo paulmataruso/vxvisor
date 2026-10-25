@@ -233,6 +233,13 @@ func (p *Principal) effectiveRank() int {
 
 func (p *Principal) atLeast(role string) bool { return p.effectiveRank() >= roleRank[role] }
 
+// OrgAdmin reports whether the caller may administer the CURRENT org's own
+// resources (segments, internal routers, firewall). True for an org admin/owner
+// or an instance admin. Exposed to templates (which otherwise only have
+// .P.IsAdmin) to gate the per-tenant network surface. It does NOT grant access
+// to host/physical resources — those stay gated on IsAdmin.
+func (p *Principal) OrgAdmin() bool { return p.atLeast("admin") }
+
 // SwitchOrg changes the caller's current org after verifying access.
 func (s *Service) SwitchOrg(p *Principal, orgID int64) error {
 	for _, o := range p.Orgs {

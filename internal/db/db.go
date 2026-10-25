@@ -882,6 +882,86 @@ CREATE TABLE IF NOT EXISTS tenant_networks (
 CREATE INDEX IF NOT EXISTS idx_tnet_org ON tenant_networks(org_id);
 CREATE INDEX IF NOT EXISTS idx_tnet_network ON tenant_networks(network_id);
 `},
+	{45, "tenant-net-v2", `
+-- Tenant networking v2. Two changes:
+--
+-- (1) net_segments: a transactional allocator that reserves a globally-unique
+--     segment identity (a VXLAN VNI) per tenant segment. In v2 this is an
+--     IDENTITY ONLY — no vxlan device is created from it (segments realize as
+--     plain uplink-less bridges, which is stronger isolation on a single host
+--     than a peerless vxlan that would expose a host-wide UDP:4789 ingress). The
+--     reserved VNI + cluster-wide allocator + device materialization are the v3
+--     multi-host growth path. The composite PRIMARY KEY makes a double allocation
+--     impossible.
+CREATE TABLE IF NOT EXISTS net_segments (
+    seg_type   TEXT NOT NULL,              -- 'vxlan' (v2); 'vlan' reserved
+    seg_id     INTEGER NOT NULL,           -- the allocated VNI (identity)
+    org_id     INTEGER NOT NULL,
+    net_id     INTEGER NOT NULL,           -- backing networks.id this identity belongs to
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (seg_type, seg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_net_segments_net ON net_segments(net_id);
+CREATE INDEX IF NOT EXISTS idx_net_segments_org ON net_segments(org_id);
+
+-- (2) Rebuild vrouters so router names are unique PER ORG, not globally. The old
+--     column-level "name TEXT NOT NULL UNIQUE" collided across tenants (two orgs
+--     could not both name a router "core") and leaked another org's name via the
+--     constraint error. SQLite cannot drop a column constraint in place, so we
+--     rebuild. This runs with foreign_keys=ON: we first copy vrouter_legs into a
+--     constraint-free temp table and DROP the real vrouter_legs, so that when we
+--     DROP vrouters nothing references it (no implicit cascade can wipe legs),
+--     then we recreate vrouters with UNIQUE(org_id,name) and restore the legs.
+CREATE TABLE vrouter_legs_tmp45 AS SELECT * FROM vrouter_legs;
+DROP TABLE vrouter_legs;
+CREATE TABLE vrouters_new45 (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id         INTEGER NOT NULL,
+    owner_id       INTEGER NOT NULL DEFAULT 0,
+    name           TEXT NOT NULL,
+    runtime        TEXT NOT NULL DEFAULT 'lxc',
+    container_name TEXT NOT NULL DEFAULT '',
+    netns_name     TEXT NOT NULL DEFAULT '',
+    vm_session_id  TEXT NOT NULL DEFAULT '',
+    image          TEXT NOT NULL DEFAULT '',
+    lxcpath        TEXT NOT NULL DEFAULT '',
+    dist           TEXT NOT NULL DEFAULT 'debian',
+    release        TEXT NOT NULL DEFAULT 'trixie',
+    cpus           INTEGER NOT NULL DEFAULT 1,
+    mem_mb         INTEGER NOT NULL DEFAULT 512,
+    frr_json       TEXT NOT NULL DEFAULT '{}',
+    status         TEXT NOT NULL DEFAULT 'creating',
+    error          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    fw_json        TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(org_id, name)
+);
+INSERT INTO vrouters_new45 (id,org_id,owner_id,name,runtime,container_name,netns_name,vm_session_id,image,lxcpath,dist,release,cpus,mem_mb,frr_json,status,error,created_at,fw_json)
+    SELECT id,org_id,owner_id,name,runtime,container_name,netns_name,vm_session_id,image,lxcpath,dist,release,cpus,mem_mb,frr_json,status,error,created_at,fw_json FROM vrouters;
+DROP TABLE vrouters;
+ALTER TABLE vrouters_new45 RENAME TO vrouters;
+CREATE INDEX IF NOT EXISTS idx_vrouters_org ON vrouters(org_id);
+CREATE TABLE vrouter_legs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    vrouter_id  INTEGER NOT NULL REFERENCES vrouters(id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    bridge      TEXT NOT NULL DEFAULT '',
+    phys_iface  TEXT NOT NULL DEFAULT '',
+    network_id  INTEGER NOT NULL DEFAULT 0,
+    iface_name  TEXT NOT NULL DEFAULT '',
+    cidr        TEXT NOT NULL DEFAULT '',
+    mac         TEXT NOT NULL DEFAULT '',
+    dhcp        INTEGER NOT NULL DEFAULT 0,
+    dhcp_range  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    dhcp_dns    TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO vrouter_legs (id,vrouter_id,idx,kind,bridge,phys_iface,network_id,iface_name,cidr,mac,dhcp,dhcp_range,created_at,dhcp_dns)
+    SELECT id,vrouter_id,idx,kind,bridge,phys_iface,network_id,iface_name,cidr,mac,dhcp,dhcp_range,created_at,dhcp_dns FROM vrouter_legs_tmp45;
+CREATE INDEX IF NOT EXISTS idx_vrouter_legs_vr ON vrouter_legs(vrouter_id);
+DROP TABLE vrouter_legs_tmp45;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

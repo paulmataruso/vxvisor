@@ -131,7 +131,7 @@ func (s *Service) saveOrgFW(orgID int64, f OrgFirewall) error {
 // per-vRouter / per-network config), applies fn, persists, audits, then
 // recompiles both enforcement planes.
 func (s *Service) mutateOrgFW(p *Principal, ip, action string, fn func(*OrgFirewall) error) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	s.ensureOrgFWSeeded(p.OrgID)
@@ -494,7 +494,7 @@ func (s *Service) orgVMs(orgID int64) (vms []orgVM, byMAC map[string]orgVM) {
 
 // ListFirewallView returns the single unified firewall view for the org.
 func (s *Service) ListFirewallView(p *Principal) (OrgFirewallView, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return OrgFirewallView{}, ErrUnauthorized
 	}
 	s.ensureOrgFWSeeded(p.OrgID)

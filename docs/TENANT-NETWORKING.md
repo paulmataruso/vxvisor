@@ -307,3 +307,298 @@ reensure; optional host dnsmasq helper for isolated DHCP (bound strictly to the 
 apply → two VMs on it reach each other, nothing else; create routed net → VM gets DHCP + NATed
 egress, cannot see another org's isolated net; delete → devices gone, segment freed; confirm
 mgmt/SSH never drops across any apply; confirm org A apply/delete leaves org B devices untouched.
+
+---
+
+# v2 — Per-tenant network domain (the user's full vision)
+
+Status: **IMPLEMENTED (v2, vdxd 1.100.0-20261025; migration 45)**. Supersedes the isolated-only
+scope where they conflict. v1 (isolated single network per org) shipped in vdxd 1.99.0. v2 makes a
+tenant's **whole logical** Networks experience self-service and isolated; the physical layer stays
+instance-admin. Built per §24 (final, post-two-reviews): plain-bridge segments + VNI **identity**
+allocator (no vxlan device — that + cluster span are v3), per-org-admin `/vrouters`+`/vfirewall`,
+netns-only tenant routers with no transit, attach-by-owned-gatewayless-segment, `vrouters.name`
+per-org-unique, check-before-apply EW firewall.
+
+## 14. v2 goal and locked decisions
+
+**Goal (user, 2026-10-25):** "If I create a new tenant and go to the network page, I should be
+able to use every function under the network page and have it isolated from everyone else."
+
+Reframed: each org is a **virtual network domain** (a VPC). A per-org admin, in their org
+context, can create **many** isolated segments, give each a subnet + DHCP, route L3 **between
+their own segments** with an internal router, and apply a per-tenant firewall — none of which
+can see, collide with, or perturb any other tenant. The **physical layer stays instance-admin**.
+
+**Decisions locked with the user (answered questions, 2026-10-25):**
+- **Isolation model = overlay segments.** Each tenant segment = a VXLAN segment with a
+  **transactionally-allocated, globally-unique VNI**; a per-tenant netns router is the L3 edge
+  *between the tenant's own segments*. (Chosen over "hard namespace per tenant" — no qemu-in-netns
+  rework — and it reuses the VXLAN engine + vRouter already built.)
+- **Tenant self-serves:** (a) internal segments + subnets + DHCP, (b) internal routers (L3 between
+  their own segments), (c) firewall. **NOT external egress** (NAT / floating IPs) — deliberately
+  out of v2, which removes the SNAT-edge work entirely. No tenant transit link.
+- **Physical layer admin-only (unchanged):** physical NICs, bonds, vSwitch uplinks, mgmt bridge,
+  host L3 routing (`/routing`), and **vRouter transit links** (a transit leg attaches a physical
+  NIC → stays instance-admin). This is what guarantees "can never get locked out" and
+  "can't affect other tenants".
+
+## 15. The authz pivot (the key enabling change)
+
+Today `/vrouters` and `/vfirewall` gate on **instance** `IsAdmin` (`vroutersPage`/`fwPage`
+403 on `!p.IsAdmin`); all their reads/writes are *already* org-scoped by `p.OrgID`. v2 changes
+those gates to **per-org admin** (`p.atLeast("admin")`), with two carve-outs that remain
+instance-only:
+- `AddTransitLink` / `UpdateTransitLink` (physical NIC attach) — refuse unless `p.IsAdmin`.
+- The physical cards on `/networks` (Bonds, vSwitches, Host interfaces, Topology) — already
+  `{{if .P.IsAdmin}}` in the template and `!p.IsAdmin` in `vswitch_service.go`; unchanged.
+
+Result: a per-org admin, switched into their org, sees **only their** segments, routers, and
+firewall (org-scoped queries already enforce this), and cannot touch anything physical. An
+instance admin still sees everything per currently-selected org, plus the physical plane.
+
+`/routing` (host FRR, `inet vdxclone`) stays instance-admin — it is the host control plane, not
+a tenant object.
+
+## 16. Transactional segment allocator (migration 45) — the isolation substrate
+
+```
+CREATE TABLE net_segments (
+  seg_type   TEXT    NOT NULL,            -- 'vxlan' (v2); 'vlan' reserved for a later L2-bridge mode
+  seg_id     INTEGER NOT NULL,            -- the allocated VNI
+  org_id     INTEGER NOT NULL,
+  net_id     INTEGER NOT NULL,            -- backing networks.id this VNI realizes
+  created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (seg_type, seg_id)
+);
+CREATE INDEX idx_net_segments_net ON net_segments(net_id);
+```
+
+`AllocVNI(orgID, netID) (int, error)`:
+1. **Short DB-only critical section** (NO device ops inside — avoids the single-conn-pool
+   tx-across-device deadlock, Review-1 M1): pick the lowest free id in `[VNIBase, VNIMax]`
+   (default **200000–1048575**, above hand-entered VNIs and the cluster overlay's range) that is
+   present in neither `net_segments` nor `networks.vni`; `INSERT` it. The composite PRIMARY KEY
+   turns any race into a constraint error → retry the next free id (bounded retries).
+2. Return the VNI. **Device realize happens AFTER this returns**, outside any tx.
+3. On a later realize failure, the caller **frees** the row (`DELETE FROM net_segments WHERE
+   seg_type='vxlan' AND seg_id=?`) as a compensating action — same rollback discipline as
+   `realizeVXLANNetwork`.
+
+`FreeVNI(netID)` on segment delete. Allocation is correct under the single-connection pool
+(the existing concurrency guard) and additionally race-safe via the unique PK.
+
+## 17. Tenant segment = VXLAN-backed network (evolves tenant_networks, keeps backing-row model)
+
+A tenant **segment** keeps v1's "owns a backing `networks` row" shape (so VM taps use
+`resolveTapTarget` unchanged — one bridge per segment), but the backing row is now **mode=vxlan**:
+
+- backing `networks`: `mode='vxlan'`, `org_id`, `cidr`, `gateway`, `vni=AllocVNI(...)`,
+  `underlay=<resolved>`, `vxlan_peers=MergePeerCSV("", ClusterPeerUnderlayIPs)` (auto cluster peers),
+  `dstport/mtu` defaults.
+- bridge = `VNINetworkNames(netid)` = `vdxubr<netid>`; realized by `EnsureVNINetwork(...)` +
+  persisted via the `vdx-net-<id>.service` systemd unit (reuse `realizeVXLANNetwork` verbatim).
+- `tenant_networks.ext_mode='segment'`, `seg_id` recorded (via `net_segments`, joined for display).
+- **Underlay resolver** (`segmentUnderlay()`): cluster underlay NIC if clustered, else the NIC
+  carrying the host default route, else the mgmt NIC. The VXLAN device sits *on top of* the NIC
+  (transport only) — it never reassigns the NIC's IP or brings it down, so it is lockout-safe even
+  when it resolves to the mgmt NIC. On a single host there are **no peers**, so BUM frames have
+  nowhere to go and all traffic stays local on the bridge — identical isolation to a plain bridge,
+  but with an allocator-owned unique VNI and instant cluster-readiness (the user's explicit choice).
+
+**Isolation between tenants is structural**: distinct VNIs + distinct bridges. It does not depend
+on any firewall rule. (The host-global EW `bridge vdxdfw` table only ever emits a rule when *both*
+endpoints have a MAC on the *same* org-scoped network, so it cannot create cross-tenant reachability
+either — confirmed by the firewall map.)
+
+v1's `ext_mode='isolated'` (plain `vdxt<id>` bridge, no VNI) remains valid for already-created
+rows and as an automatic fallback is **not** used — new tenant segments are always `'segment'`
+(VXLAN). The default-on-org-create network becomes a `'segment'` too.
+
+## 18. Internal router (L3 between a tenant's own segments) — reuse vRouter, no transit
+
+The vRouter already routes between internal legs with **no SNAT** when it has no transit leg
+(`RenderForVRouter` forces `Uplink=""`/`InternalCIDRs=nil`). v2 exposes this to per-org admins:
+
+- A per-org admin creates an **internal-only router** (runtime `netns`) on `/vrouters` (now
+  per-org-admin gated). The transit-link action stays instance-admin, so a tenant router is
+  internal-only by construction.
+- **Attaching an existing segment as a leg** must NOT create a second bridge/row. Factor
+  `attachInternalLegToBridge(vrID, bridge, networkID, gatewayCIDR, dhcp, range, dns)` out of
+  `AttachInternalNetwork` (the Review-1 M4/M5 refactor, now actually built): it inserts a
+  `vrouter_legs` row bound to the segment's existing `bridge`/`network_id`, then `applyAndPush`.
+- **Gateway ownership handoff:** a *standalone* segment may carry a host gateway IP on its bridge +
+  host dnsmasq. When that segment is attached to a router, the **router leg becomes the gateway**:
+  remove the host gateway IP from the bridge and stop host dnsmasq for it; the router leg holds the
+  gateway IP (zebra assigns it) and the router's per-leg dnsmasq (`SetDHCP`) serves DHCP with the
+  leg IP as gateway. On detach, reverse it. This transition is the main new state-machine in v2 and
+  must be idempotent and lockout-neutral (segment bridge, never mgmt).
+- Routing *between* the attached segments is then automatic (zebra connected routes); the tenant
+  can additionally add static/OSPF/BGP between their own segments via the existing dynamic-routing
+  CRUD (all org-scoped, no host effect).
+
+## 19. Per-tenant firewall — reuse `/vfirewall` as-is, just re-gate
+
+`org_firewall` is already one doc per org, compiled to a per-vRouter `inet vdxfw` (default-drop,
+isolated netfilter per netns) for N-S and the host `bridge vdxdfw` (default-accept, MAC-matched)
+for E-W. v2 only **re-gates `/vfirewall` to per-org admin**; the compiler and enforcement are
+unchanged. Cross-tenant isolation is structural (segments), so default-accept EW is safe; a tenant's
+rules only ever match their own MACs/segments. No new firewall engine.
+
+## 20. UI / scoping changes
+
+- `/networks`: the **Tenant Networks** card becomes **"Segments"**, ungated from `IsAdmin` to
+  per-org admin; "+ Add Segment" modal (name, CIDR, gateway, DHCP). Physical cards stay admin-only.
+- `/vrouters`: per-org-admin; in non-instance-admin context the **transit-link UI is hidden** and
+  the endpoint refuses. "Attach segment" picks from the org's segments (not a free-form new net).
+- `/vfirewall`: per-org-admin (template + handler gate change only).
+- Nav: the Network group's L3 Routing stays admin-only; vRouters + vFirewall lose the
+  `{{if .P.IsAdmin}}` gate and instead render for `atLeast("admin")` (add a template helper
+  `.P.OrgAdmin` since templates currently only have `.P.IsAdmin`).
+
+## 21. Guardrails (v2 additions on top of v1)
+
+- Allocator: `net_segments` PK + range exclusion of in-use `networks.vni` = no VNI collision ever.
+- Underlay is transport-only; never reconfigured; mgmt-safe even if it is the mgmt NIC.
+- Tenant routers cannot get a transit leg (instance-admin gate on `AddTransitLink`) → no tenant can
+  reach a physical NIC or the outside; the host-safety invariant in `internal/vrouter` already
+  forbids host-routing writes.
+- Gateway handoff only ever touches the segment's own `vdxubr<id>` bridge, never mgmt.
+- Every tenant op is `p.OrgID`-scoped and `atLeast("admin")`-gated and audited.
+
+## 22. v2 file plan (to be finalized after the two reviews)
+
+- `db.go`: migration 45 `net_segments`; add `seg_type`/`seg_id` display join (no destructive change
+  to `tenant_networks`; `ext_mode='segment'` is a new value, columns already exist).
+- `service/segment_alloc.go` (new): `AllocVNI`/`FreeVNI`, range consts, `segmentUnderlay()`.
+- `service/tenantnet_service.go`: segment create path (VXLAN-backed) + reensure for `'segment'`.
+- `service/vrouter_service.go`: `attachInternalLegToBridge`; per-org-admin gating; transit stays
+  `IsAdmin`; gateway-handoff on attach/detach.
+- `service/service.go`: default-on-org-create becomes a `'segment'`.
+- `web/vrouter_handlers.go` + `fw_handlers.go` + `net_handlers.go` + `server.go`: gate changes.
+- `web/templates/{networks,vrouters,vfirewall,head}.html`: Segments card, transit-hide, nav gating,
+  `.P.OrgAdmin` helper.
+- `worker.go`: reensure order already correct (vRouters → tenant nets → autostart).
+
+## 23. Open risks to stress in the two adversarial reviews
+
+1. **Gateway-ownership handoff** (standalone→routed→standalone): the trickiest new state machine —
+   races, idempotency, DHCP continuity, and never touching mgmt.
+2. **VXLAN-on-mgmt-NIC underlay on a single host**: correctness/isolation of a peerless VNI; any
+   path by which BUM/flood could leak onto the underlay or the mgmt segment.
+3. **Per-org-admin exposure of `/vrouters`**: does any existing vRouter endpoint assume instance
+   admin for a host-affecting side effect (beyond transit), e.g. a leg that could land on a shared
+   bridge or a dynamic-routing knob with host reach? Audit every `vrDo` handler.
+4. **Allocator vs single-conn pool**: confirm no device op occurs inside the alloc tx; confirm the
+   compensating `FreeVNI` on every realize-failure branch.
+5. **`vrouters.name` is globally UNIQUE, not per-org** — two orgs naming a router "core" collides.
+   Needs per-org name handling or a scoped default name.
+6. **Does making segments VXLAN break v1's shipped isolated nets / the default org?** Migration must
+   be additive; existing `'isolated'` rows must keep working; the pre-existing default org must keep
+   `0→vdxbr0`.
+
+## 24. FINAL v2 (after two adversarial reviews) — SUPERSEDES §14–23 where they conflict
+
+Both reviews converged. The design is re-scoped to **single-host, plain-bridge segments**; the
+VXLAN *device* and cluster-spanning are deferred to v3. Resolutions:
+
+**R1 — Substrate: NO vxlan device in v2. Plain uplink-less bridge (v1's proven `vdxt<id>`/`vdxubr`
+path), full stop.** Both reviewers showed a peerless vxlan on a single host is a *regression*:
+`EnsureVNINetwork` opens a host-wide **UDP:4789 listener demuxed purely by VNI** (R1-B1) with no
+input filter anywhere in the tree; VNIs are sequential/guessable; the underlay resolves to the mgmt
+NIC — an external/cross-tenant L2 **injection** surface a plain bridge does not have. And the
+allocator is **node-local** while the design auto-peered VNIs cluster-wide (R1-B3) → node A's
+tenant-X VNI 200000 would VXLAN-bridge to node B's tenant-Y VNI 200000: catastrophic cross-tenant
+L2. **Decision:** segments realize as plain bridges (reuse v1 `provisionIsolated` verbatim). We
+**still `AllocVNI` + record `net_segments`** purely as a reserved, globally-unique *identity* for
+the future — **no device uses it in v2, no auto-peer.** Cluster-spanning (materialize vxlan +
+cluster-wide allocator + segment-row replication + a UDP:4789 cluster-peer-allowlist input filter)
+is **v3**, explicitly descoped.
+
+**R2 — Router: NO live gateway handoff.** A segment is created **either** standalone (host gateway
+IP on its bridge + host dnsmasq) **or** routed (gatewayless, pure L2). Only a **gatewayless**
+segment may be attached to a tenant router (whose leg becomes the sole gateway + dnsmasq — exactly
+today's `AttachInternalNetwork`, minus the fresh-bridge creation). Attaching a segment that still
+holds a host gateway IP is **refused** ("create it gatewayless, or remove the gateway first"). This
+deletes the IP-steal / DHCP-continuity / reensure-race state machine (R1-B5) entirely. Track attach
+state in the existing `tenant_networks.vrouter_id` column; `ReensureTenantNetworks` **skips** host
+gateway/DHCP for any segment with `vrouter_id!=0`.
+
+**R3 — Authz pivot through ONE choke-point (R2-B4/R1-M5).** Add `requireVRouterAdmin(p)` and
+`requireOrgFWAdmin(p)` = `atLeast("admin")` + org-scoped; flip ALL ~30 `!p.IsAdmin` sites in
+`vrouter_service.go` + `fw_service.go` + the `vroutersPage`/`fwPage`/`fwDo` handlers to call them.
+**Explicit instance-admin exceptions that STAY `IsAdmin`:** `AddTransitLink`, `UpdateTransitLink`
+(physical NIC), and `DeleteVRouter` *when a transit leg exists*. Fix `VRouterAvailable` (today
+returns false for non-instance-admins → feature looks unavailable). Add a `Principal.OrgAdmin()`
+method (templates only have `.P.IsAdmin`).
+
+**R4 — Tenant routers are `netns`-only (R1-M1/R2-B4).** `CreateVRouter` rejects `runtime` in
+{`lxc`,`vm`} unless `p.IsAdmin` (lxc = privileged container on the host).
+
+**R5 — Attach-by-owned-segment-only (R1-B7).** `attachInternalLegToBridge(p, vrID, tnetID)` resolves
+the segment via `tenant_networks`+`networks` by `(id, org_id=p.OrgID)`; **derives the bridge from
+that row**, never from client input; refuses anything not an owned tenant segment (never
+`vdxbr0`/a foreign bridge). Otherwise a crafted POST could land a router leg on a shared/foreign L2.
+
+**R6 — `DeleteVRouter` must not destroy attached segments (R1-B4).** For each internal leg, if its
+`network_id` is referenced by a `tenant_networks` row → it is an *attached* segment: remove ONLY
+the leg + clear `vrouter_id`, never `DeleteNetwork`/`DeleteLink` it (it has its own lifecycle and
+may run VMs). Only *owned* internal nets (created by the legacy `AttachInternalNetwork`) get the old
+teardown. Refuse the whole delete for a non-instance-admin if a transit leg exists.
+
+**R7 — `vrouters.name` → `UNIQUE(org_id,name)` (R1-B6/R2-B3).** Migration 45 rebuilds `vrouters`
+safely under FK-ON (copy legs to a tmp table, drop `vrouter_legs` then `vrouters`, recreate
+`vrouters` with `UNIQUE(org_id,name)`, rename, recreate `vrouter_legs` with its FK, restore legs,
+drop tmp — no cascade wipe because no child references `vrouters` at the moment it is dropped).
+`CreateVRouter` also checks per-org name uniqueness with a friendly error.
+
+**R8 — Raw network-create stays instance-admin (R2-B1).** The free-text-`underlay`/arbitrary-`vni`
+VXLAN form and `mode in {vxlan,bridge,vlan}`/`bridge`/`vlan_id` fields of `CreateNetwork` require
+`p.IsAdmin`. Per-org admins create networks **only** through the constrained segment path
+(forced naming, no free-text underlay/VNI). Template exposes only "+ Add Segment" to `.P.OrgAdmin`;
+Port Groups / raw VXLAN / Bonds / vSwitches / Topology stay under `.P.IsAdmin`.
+
+**R9 — Allocator hardening (R1-M3/R2-MINOR-1).** `AllocVNI`: inclusive bounds `[200000,1048575]`;
+exclude `networks.vni` **and** `storage_overlays.vni` **and** the cluster-config overlay VNI;
+prefer `max+1` over lowest-free to avoid immediate reuse; **free the row only AFTER device teardown**
+on delete; the whole alloc is a short DB-only critical section (no device op inside), composite PK
+makes a race a constraint error → retry; realize happens after the alloc returns, with a
+compensating `FreeVNI` on every realize-failure branch. (In v2 no device is realized from the VNI,
+so this is mostly future-proofing, but the free-after-teardown ordering is wired now.)
+
+**R10 — Firewall safety (R1-M2/R1-M4).** `ReplaceBridgeFW` validates/loads the new ruleset **before**
+deleting the live table (don't leave every tenant's DFW empty on a transient parse failure).
+Validate group MACs against the **org's own VMs** at write time and org-scope the `ip_leases` query
+in `buildFWMaps`; add a regression test asserting a foreign MAC in a group yields no host rule (the
+cross-tenant EW safety is currently implicit).
+
+**R11 — Topology stays instance-only in v2 (R2-MINOR-3).** The `/networks` topology + host-interface
+cards are host-wide and remain `.P.IsAdmin`. A per-org segment/router diagram is a later nicety; the
+user's logical functions (segments, routing, firewall) are all delivered without it.
+
+### Final v2 file plan
+- `internal/db/db.go`: migration 45 — `net_segments` + safe `vrouters` rebuild to `UNIQUE(org_id,name)`.
+- `internal/service/segment_alloc.go` (new): `AllocVNI`/`FreeVNI` + range consts (R9).
+- `internal/service/tenantnet_service.go`: VNI alloc on create; gatewayless-segment option;
+  `ReensureTenantNetworks` skips host gw/DHCP when `vrouter_id!=0`; `FreeVNI` on delete after teardown.
+- `internal/service/vrouter_service.go`: `requireVRouterAdmin`; flip gates (transit + transit-delete
+  stay `IsAdmin`); netns-only for tenants; per-org name check; `attachInternalLegToBridge` (owned-only);
+  `detachInternalLeg`; `DeleteVRouter` segment-preservation; fix `VRouterAvailable`.
+- `internal/service/fw_service.go` + `fw_compile.go` + `net_firewall_service.go`: `requireOrgFWAdmin`;
+  MAC/org validation; org-scoped `ip_leases`; atomic `ReplaceBridgeFW`.
+- `internal/service/net_service.go`: `CreateNetwork` raw-mode/underlay/vni/vlan fields require `IsAdmin`.
+- `internal/service/service.go`: `Principal.OrgAdmin()`; default-on-org-create stays a standalone segment.
+- `internal/web/{vrouter_handlers,fw_handlers,net_handlers}.go` + `server.go`: page gates → OrgAdmin;
+  routes for attach/detach segment + constrained segment create.
+- `internal/web/templates/{networks,vrouters,vfirewall,head}.html`: Segments card + "+ Add Segment"
+  (OrgAdmin); hide transit UI for non-IsAdmin; attach-segment picker; nav gates → OrgAdmin.
+- `internal/worker/worker.go`: reensure order already correct.
+
+### v2 verification
+build + vet + template-check; migration 45 applies (incl. vrouters rebuild preserves legs);
+as a per-org **admin** (non-instance-admin), in a tenant org: create two standalone segments → VMs
+on each reach peers only within the segment; create a `netns` router → cannot see a transit option;
+create two gatewayless segments + attach both → VMs route between them, not to other orgs; firewall
+page usable and rules scoped to the org; confirm a per-org admin can NOT reach bonds/vSwitches/raw
+VXLAN/host routing/transit, cannot delete a transit-bearing router, and cannot attach a foreign/shared
+bridge; confirm mgmt/SSH never drops; confirm org A ops leave org B untouched.

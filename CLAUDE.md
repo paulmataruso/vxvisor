@@ -167,9 +167,25 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   binds `network_id` when it's 0 and the org has a default); the pre-existing default org is
   unchanged. `internal/service/tenantnet_service.go`, host DHCP in `netdrv/tenantdhcp.go`
   (dnsmasq bound strictly to the tenant bridge), boot rebuild `ReensureTenantNetworks()` (after
-  vRouters). **Routed / L2-bridge / vRouter external modes + a VXLAN/VLAN segment allocator are
-  the next phase** — see `docs/TENANT-NETWORKING.md` (full design + both adversarial reviews).
-  Groundwork done: the netns vRouter `ApplyLegs` is now idempotent (was a hard 2nd-apply bug).
+  vRouters). Groundwork: the netns vRouter `ApplyLegs` is idempotent (was a hard 2nd-apply bug).
+- **Tenant networking v2** (migration 45): a per-org admin (`atLeast("admin")`, not just an
+  instance admin) now self-serves their org's whole **logical** network surface, fully isolated;
+  the **physical** layer (NICs, bonds, vSwitch uplinks, host `/routing`, vRouter **transit**
+  links, raw port-group/VXLAN forms) stays instance-admin. Pieces: (a) `net_segments` — a
+  transactional VNI **identity** allocator (`service/segment_alloc.go`, range 200000–1048575,
+  excludes in-use `networks`/`storage_overlays` VNIs, composite PK = no collision); in v2 the VNI
+  is identity-only — **segments realize as plain bridges, NOT vxlan devices** (a peerless vxlan on
+  one host would open a host-wide UDP:4789 injection surface and the node-local allocator can't be
+  cluster-safe yet — both are the v3 multi-host path). (b) Segments can be **standalone** (own
+  gateway+DHCP) or **routed/gatewayless** and attached to a per-org **netns** vRouter whose leg
+  becomes their sole gateway — `AttachSegment`/`DetachSegment` bind to the segment's OWN bridge
+  (never client input, org-scoped), no live gateway-handoff. (c) `/vrouters` + `/vfirewall`
+  re-gated to `OrgAdmin` (transit + lxc stay instance-only; tenant routers are netns-only);
+  `DeleteVRouter` preserves attached segments and refuses a tenant deleting a transit-bearing
+  router. (d) `vrouters.name` → `UNIQUE(org_id,name)` (was global). (e) `ReplaceBridgeFW` validates
+  in check-mode before tearing down the host-global EW table. Full design + the two adversarial
+  reviews + the deferred v3 (cluster-wide allocator + segment replication + vxlan materialization +
+  UDP:4789 ingress filter) in `docs/TENANT-NETWORKING.md` §14–24.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

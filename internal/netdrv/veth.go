@@ -117,6 +117,13 @@ func NetnsLinkUp(ns, iface string) error {
 	return run("ip", "netns", "exec", ns, "ip", "link", "set", iface, "up")
 }
 
+// NetnsDelLink deletes an interface inside a namespace (best effort). For a veth
+// end this removes the whole pair, so the host-side peer vanishes too — used to
+// detach a vRouter leg without disturbing the bridge it was enslaved to.
+func NetnsDelLink(ns, iface string) {
+	_ = run("ip", "netns", "exec", ns, "ip", "link", "del", iface)
+}
+
 // NetnsAddr assigns an address to an interface inside a namespace (idempotent-ish;
 // a duplicate add is ignored by the caller). Normally zebra assigns leg IPs, so
 // this is a fallback for the loopback / pre-FRR bring-up.

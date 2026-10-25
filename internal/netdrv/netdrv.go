@@ -124,6 +124,17 @@ func ReplaceBridgeFW(ruleset string) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return fmt.Errorf("nftables is not installed")
 	}
+	// Validate the new ruleset in check mode BEFORE tearing down the live table,
+	// so a bad render (which affects EVERY org's east-west rules — the table is
+	// host-global) can never leave the host firewall blanked. Empty ruleset means
+	// "disable", which is always valid.
+	if strings.TrimSpace(ruleset) != "" {
+		cmd := exec.Command("nft", "-c", "-f", "-")
+		cmd.Stdin = strings.NewReader(ruleset)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("nft check (not applied, firewall unchanged): %v: %s", err, out)
+		}
+	}
 	_ = exec.Command("nft", "delete", "table", "bridge", BridgeFWTable).Run() // ignore if absent
 	if strings.TrimSpace(ruleset) == "" {
 		return nil
@@ -149,13 +160,13 @@ type Network struct {
 	PoolStart string
 	PoolEnd   string
 	// VXLAN segment params (mode=="vxlan"; zero/empty otherwise).
-	VNI       int
-	Underlay  string
+	VNI        int
+	Underlay   string
 	VXLANLocal string
 	VXLANPeers string
-	DstPort   int
-	MTU       int
-	CreatedAt string
+	DstPort    int
+	MTU        int
+	CreatedAt  string
 }
 
 const netCols = `id,org_id,name,mode,bridge,vlan_id,cidr,gateway,pool_start,pool_end,
@@ -179,8 +190,18 @@ func (s *Store) CreateNetwork(n Network) (int64, error) {
 	return res.LastInsertId()
 }
 
-func defPort(p int) int { if p <= 0 { return 4789 }; return p }
-func defMTU(m int) int  { if m <= 0 { return 1450 }; return m }
+func defPort(p int) int {
+	if p <= 0 {
+		return 4789
+	}
+	return p
+}
+func defMTU(m int) int {
+	if m <= 0 {
+		return 1450
+	}
+	return m
+}
 
 // SetNetworkBridge records the realized bridge name for a network (VXLAN nets
 // learn their per-network bridge name only after the row id is assigned).

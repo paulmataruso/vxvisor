@@ -9,14 +9,14 @@
   <p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
 </div>
 
-{{if .P.IsAdmin}}
-<!-- ===================== Tenant Networks ===================== -->
+{{if .P.OrgAdmin}}
+<!-- ===================== Segments (tenant networks) ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Tenant Networks</h2>
-    <button class="btn primary" data-modal="m-tnet">+ Add tenant network</button>
+    <h2>Segments</h2>
+    <button class="btn primary" data-modal="m-tnet">+ Add segment</button>
   </div>
-  <p class="muted" style="margin:0 0 10px">A <strong>tenant network</strong> is a private, isolated network just for this organization — its own dedicated bridge with no uplink, so its VMs can never share a segment with another tenant. New VMs in this org attach here by default. (Routing a tenant network to the outside — NAT / L2 / vRouter — is coming next.)</p>
+  <p class="muted" style="margin:0 0 10px">A <strong>segment</strong> is a private, isolated network for this organization — its own dedicated bridge with no uplink, so its VMs can never share a broadcast domain with another tenant. Give it a gateway + DHCP to make it <em>standalone</em>, or leave the gateway empty to make it <em>routed</em> (attach it to a router on the vRouters page to route between your segments). New VMs in this org attach to the default segment.</p>
   {{if .TenantNetworks}}
   <table>
     <tr><th>Name</th><th>Mode</th><th>Bridge</th><th>CIDR</th><th>Gateway</th><th>State</th><th></th></tr>
@@ -32,9 +32,11 @@
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No tenant networks yet. Add one to give this organization a private, isolated network.</div>{{end}}
+  {{else}}<div class="empty">No segments yet. Add one to give this organization a private, isolated network.</div>{{end}}
 </div>
+{{end}}
 
+{{if .P.IsAdmin}}
 <!-- ===================== Uplinks / Link Aggregation ===================== -->
 <div class="card">
   <div class="card-head">
@@ -77,10 +79,10 @@
 <div class="card">
   <div class="card-head">
     <h2>Port Groups &amp; VXLAN networks</h2>
-    <div style="display:flex;gap:8px">
+    {{if .P.IsAdmin}}<div style="display:flex;gap:8px">
       <button class="btn" data-modal="m-vxlan">+ VXLAN network</button>
       <button class="btn primary" data-modal="m-pg">+ Add port group</button>
-    </div>
+    </div>{{end}}
   </div>
   {{if .Networks}}
   <table>
@@ -92,7 +94,7 @@
       <td class="muted">{{if .Bridge}}{{.Bridge}}{{end}}{{if .VLANID}} · vlan {{.VLANID}}{{end}}</td>
       <td class="mono" style="font-size:12px">{{.CIDR}}</td>
       <td class="muted">{{if .PoolStart}}{{.PoolStart}}–{{.PoolEnd}}{{end}}</td>
-      <td style="text-align:right"><form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+      <td style="text-align:right">{{if $.P.IsAdmin}}<form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
     </tr>
     {{end}}
   </table>
@@ -240,16 +242,16 @@
 {{end}}
 
 <div class="modal" id="m-tnet"><div class="modal-card lg">
-  <div class="modal-head"><h3>Add tenant network</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Add segment</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/networks/tenant">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Name<input type="text" name="name" placeholder="private-net" required></label>
     <label class="fld">CIDR<input type="text" name="cidr" placeholder="10.50.0.0/24"></label>
-    <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.50.0.1" title="Optional — assigned to the bridge for this isolated network"></label>
-    <label class="fld">DHCP<select name="dhcp"><option value="1">serve DHCP on this network</option><option value="0">no DHCP (static)</option></select></label>
+    <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.50.0.1 — leave blank for a routed segment" title="Set a gateway for a standalone segment; leave blank to attach it to a router (the router leg becomes its gateway)."></label>
+    <label class="fld">DHCP<select name="dhcp"><option value="1">serve DHCP on this segment</option><option value="0">no DHCP (static / routed)</option></select></label>
     <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.50.0.100-200"></label>
     <label class="fld">DHCP DNS<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create tenant network</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create segment</button></div>
   </form>
 </div></div>
 

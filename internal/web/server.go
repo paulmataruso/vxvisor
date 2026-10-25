@@ -289,6 +289,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /vrouters/{id}/delete", s.auth(s.deleteVRouter))
 	mux.HandleFunc("POST /vrouters/{id}/transit", s.auth(s.addTransitLink))
 	mux.HandleFunc("POST /vrouters/{id}/internal", s.auth(s.attachInternal))
+	mux.HandleFunc("POST /vrouters/{id}/segment/attach", s.auth(s.attachSegment))
+	mux.HandleFunc("POST /vrouters/{id}/segment/detach", s.auth(s.detachSegment))
 	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/dhcp", s.auth(s.updateInternalDHCP))
 	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/update", s.auth(s.updateInternalNetwork))
 	mux.HandleFunc("POST /vrouters/{id}/transit/update", s.auth(s.updateTransitLink))

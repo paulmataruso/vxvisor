@@ -28,6 +28,13 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 }
 
 func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		// Raw port groups / VXLAN networks bind vSwitch uplinks and host underlay
+		// NICs — physical infrastructure. Per-org admins create isolated segments
+		// instead (the Segments card), which can't reach the physical network.
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)
 		return
@@ -57,6 +64,10 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *servic
 }
 
 func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)
 		return

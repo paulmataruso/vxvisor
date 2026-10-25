@@ -63,6 +63,31 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 	return out, rows.Err()
 }
 
+// AttachableSegments returns the org's segments eligible to attach to a router:
+// unattached (vrouter_id=0) and gatewayless (no host gateway), so the router leg
+// can become their sole gateway without any live gateway-ownership handoff.
+func (s *Service) AttachableSegments(p *Principal) ([]TenantNetwork, error) {
+	if !p.atLeast("admin") || p.OrgID == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT t.id,t.org_id,t.name,t.network_id,COALESCE(n.bridge,''),COALESCE(n.cidr,'')
+		FROM tenant_networks t JOIN networks n ON n.id=t.network_id
+		WHERE t.org_id=? AND t.vrouter_id=0 AND COALESCE(n.gateway,'')='' ORDER BY t.name`, p.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TenantNetwork
+	for rows.Next() {
+		var t TenantNetwork
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.NetworkID, &t.Bridge, &t.CIDR); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // CreateTenantNetwork creates and realizes an isolated tenant network (admin).
 func (s *Service) CreateTenantNetwork(p *Principal, name, cidr, gateway string, dhcp bool, dhcpRange, dns, ip string) (int64, error) {
 	if !p.atLeast("admin") {
@@ -112,6 +137,13 @@ func (s *Service) createTenantNetwork(orgID int64, name, cidr, gateway string, d
 		_ = s.net.DeleteNetwork(orgID, netID)
 		return 0, err
 	}
+	// Reserve a globally-unique segment identity (a VXLAN VNI). v2 uses it as an
+	// identity only — the segment realizes as a plain bridge below; the VNI
+	// reserves the number for the future multi-host overlay. Best effort: if the
+	// allocator is exhausted we still create a working single-host segment.
+	if _, err := s.AllocVNI(orgID, netID); err != nil {
+		log.Printf("tenant-net: VNI identity not allocated for net %d: %v", netID, err)
+	}
 	def := 0
 	if isDefault {
 		def = 1
@@ -119,6 +151,7 @@ func (s *Service) createTenantNetwork(orgID int64, name, cidr, gateway string, d
 	res, err := s.db.Exec(`INSERT INTO tenant_networks(org_id,name,network_id,ext_mode,state,is_default)
 		VALUES(?,?,?,?,?,?)`, orgID, name, netID, "isolated", "applied", def)
 	if err != nil {
+		s.FreeVNI(netID)
 		_ = s.net.DeleteNetwork(orgID, netID)
 		return 0, err
 	}
@@ -128,6 +161,7 @@ func (s *Service) createTenantNetwork(orgID int64, name, cidr, gateway string, d
 		netdrv.StopTenantDHCP(bridge)
 		netdrv.DelLink(bridge)
 		_, _ = s.db.Exec(`DELETE FROM tenant_networks WHERE id=?`, tnID)
+		s.FreeVNI(netID)
 		_ = s.net.DeleteNetwork(orgID, netID)
 		return 0, fmt.Errorf("realize isolated segment: %w", err)
 	}
@@ -164,15 +198,18 @@ func (s *Service) DeleteTenantNetwork(p *Principal, id int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
-	var orgID, netID int64
+	var orgID, netID, vrouterID int64
 	var name string
-	err := s.db.QueryRow(`SELECT org_id,network_id,name FROM tenant_networks WHERE id=? AND org_id=?`, id, p.OrgID).
-		Scan(&orgID, &netID, &name)
+	err := s.db.QueryRow(`SELECT org_id,network_id,name,vrouter_id FROM tenant_networks WHERE id=? AND org_id=?`, id, p.OrgID).
+		Scan(&orgID, &netID, &name, &vrouterID)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("tenant network not found")
 	}
 	if err != nil {
 		return err
+	}
+	if vrouterID != 0 {
+		return fmt.Errorf("this segment is attached to a router — detach it from the router first")
 	}
 	var attached int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE network_id=? AND deleted_at IS NULL`, netID).Scan(&attached)
@@ -188,6 +225,9 @@ func (s *Service) DeleteTenantNetwork(p *Principal, id int64, ip string) error {
 	}
 	netdrv.StopTenantDHCP(bridge)
 	netdrv.DelLink(bridge)
+	// Device is gone — now release the reserved segment identity (never before,
+	// so a concurrent allocation can't reuse the VNI while the bridge lingers).
+	s.FreeVNI(netID)
 	if netdrv.IfaceExists(bridge) {
 		// Row is gone but the device lingered (should not happen for an empty
 		// bridge); surface it so the operator can clean up.
@@ -230,8 +270,11 @@ func (s *Service) provisionDefaultForOrg(orgID int64) {
 // boot (the kernel loses bridges/addresses across a reboot). Runs after
 // ReensureVRouters and before autostart so VMs find their bridge ready.
 func (s *Service) ReensureTenantNetworks() {
+	// Skip segments attached to a router (vrouter_id!=0): the router leg owns
+	// their gateway + DHCP, so re-adding a host gateway IP here would create a
+	// duplicate gateway on that L2. Standalone segments (vrouter_id=0) rebuild.
 	rows, err := s.db.Query(`SELECT t.network_id,COALESCE(n.cidr,''),COALESCE(n.gateway,'')
-		FROM tenant_networks t JOIN networks n ON n.id=t.network_id WHERE t.ext_mode='isolated'`)
+		FROM tenant_networks t JOIN networks n ON n.id=t.network_id WHERE t.ext_mode='isolated' AND t.vrouter_id=0`)
 	if err != nil {
 		return
 	}
