@@ -487,6 +487,14 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	var netID any
 	if o.NetworkID > 0 {
 		netID = o.NetworkID
+	} else if o.OrgID > 0 {
+		// Default-isolate: if the org has a default tenant network, land the VM on
+		// its isolated bridge instead of the shared default. Orgs WITHOUT one (the
+		// pre-existing default org) keep the historical shared-bridge behavior.
+		var defNet int64
+		if m.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE org_id=? AND is_default=1 LIMIT 1`, o.OrgID).Scan(&defNet) == nil && defNet > 0 {
+			netID = defNet
+		}
 	}
 	var poolID any
 	if o.StoragePoolID > 0 {

@@ -88,8 +88,23 @@ func (b netnsBackend) Destroy(vr VRouter) error {
 	return nil
 }
 
+// netnsIfacePresent reports whether an interface exists INSIDE the namespace.
+func netnsIfacePresent(ns, iface string) bool {
+	_, err := nsrun(5*time.Second, "ip", "netns", "exec", ns, "ip", "link", "show", iface)
+	return err == nil
+}
+
 // ApplyLegs builds veth pairs for each leg: host end enslaved to the leg bridge,
 // peer moved into the namespace and renamed ethN. veths can be added live.
+//
+// IDEMPOTENT: applyAndPush re-passes EVERY leg on every change (e.g. adding a
+// second internal leg re-applies the first). A leg whose in-namespace iface is
+// already present is fully wired, so we SKIP it — re-running MoveToNetns on a
+// peer that has already been moved would fail ("Cannot find device") and take
+// the whole apply (and every other leg/tenant on this router) down with it.
+// A leg that is only half-applied (peer moved but not renamed, or a stale pair)
+// is torn down and rebuilt clean: deleting the host end removes the veth pair
+// wherever its peer landed, and we also clear any stale un-renamed peer in the ns.
 func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 	for _, l := range legs {
 		host := "vrh" + strconv.FormatInt(vr.ID, 10) + "e" + strconv.Itoa(l.Idx)
@@ -97,6 +112,12 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 		if len(host) > 15 || len(peer) > 15 {
 			return fmt.Errorf("veth name %q too long", host)
 		}
+		if netnsIfacePresent(vr.NetnsName, l.IfaceName) {
+			continue // already fully wired
+		}
+		// Clear any half-applied remnants so the rebuild starts from a clean slate.
+		netdrv.DeleteLink(host)                                                              // host-ns end (removes the pair wherever the peer is)
+		_, _ = nsrun(5*time.Second, "ip", "netns", "exec", vr.NetnsName, "ip", "link", "del", peer) // stale un-renamed peer in the ns
 		if err := netdrv.EnsureVethPair(host, peer); err != nil {
 			return err
 		}

@@ -16,12 +16,14 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	}
 	bonds, _ := s.svc.ListBonds(p)
 	vswitches, _ := s.svc.ListVSwitches(p)
+	tnets, _ := s.svc.ListTenantNetworks(p)
 	s.render(w, p, "networks.html", "networks", map[string]any{
-		"Networks":     list,
-		"Bonds":        bonds,
-		"VSwitches":    vswitches,
-		"MgmtBridge":   s.svc.MgmtInterface(),
-		"ClusterPeers": s.svc.ClusterPeerUnderlayIPs(p),
+		"Networks":       list,
+		"TenantNetworks": tnets,
+		"Bonds":          bonds,
+		"VSwitches":      vswitches,
+		"MgmtBridge":     s.svc.MgmtInterface(),
+		"ClusterPeers":   s.svc.ClusterPeerUnderlayIPs(p),
 	})
 }
 
@@ -60,6 +62,34 @@ func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *servic
 		return
 	}
 	if err := s.svc.DeleteNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// ---- tenant networks -----------------------------------------------------
+
+func (s *Server) createTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	dhcp := r.FormValue("dhcp") == "1"
+	if _, err := s.svc.CreateTenantNetwork(p, r.FormValue("name"), r.FormValue("cidr"), r.FormValue("gateway"),
+		dhcp, r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) deleteTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}

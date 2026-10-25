@@ -158,6 +158,19 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   Shell self-update is not yet implemented (the UI lives server-side now, so the shell rarely
   changes); until then a new client is downloaded from the `/clients` page.
 
+- **Tenant networks** (migration 44, `tenant_networks`): first-class per-org isolated
+  networks. v1 ships the **isolated** mode — a dedicated per-org bridge `vdxt<network_id>`
+  with no uplink (its own L2 domain; two orgs can never share a segment). Each tenant network
+  OWNS a backing `networks` row (the port group VMs attach to) referenced by a **RESTRICT** FK
+  so the raw `/networks` delete can't orphan it. New orgs get a default isolated network
+  (`CreateOrg`→`provisionDefaultForOrg`) and their VMs auto-attach to it (`manager.Create`
+  binds `network_id` when it's 0 and the org has a default); the pre-existing default org is
+  unchanged. `internal/service/tenantnet_service.go`, host DHCP in `netdrv/tenantdhcp.go`
+  (dnsmasq bound strictly to the tenant bridge), boot rebuild `ReensureTenantNetworks()` (after
+  vRouters). **Routed / L2-bridge / vRouter external modes + a VXLAN/VLAN segment allocator are
+  the next phase** — see `docs/TENANT-NETWORKING.md` (full design + both adversarial reviews).
+  Groundwork done: the netns vRouter `ApplyLegs` is now idempotent (was a hard 2nd-apply bug).
+
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous
 host's Claude memory is snapshotted in **`.claude-memory/`** (gitignored — contains host

@@ -853,6 +853,35 @@ CREATE TABLE IF NOT EXISTS vm_folder_members (
 );
 CREATE INDEX IF NOT EXISTS idx_vm_folder_members_folder ON vm_folder_members(folder_id);
 `},
+	{44, "tenant-networks", `
+-- Tenant networks: a first-class, per-org isolated network. v1 ships the
+-- "isolated" mode — a dedicated per-org Linux bridge (device vdxt<network_id>)
+-- that is its own L2 broadcast domain with no uplink, so two orgs' VMs can never
+-- share a segment. Each tenant network OWNS a backing 'networks' row (the normal
+-- port group VMs attach to via the existing tap path); network_id references it
+-- with the DEFAULT (NO ACTION / RESTRICT) foreign-key action ON PURPOSE, so the
+-- raw /networks delete errors on a tenant-owned row and callers must go through
+-- DeleteTenantNetwork (which tears down the host bridge). ext_mode/ext_ref/
+-- vrouter_id are reserved for the routed/l2bridge/vrouter external modes landing
+-- in a later release. Deleting an org cascades the row away (there is no
+-- DeleteOrg yet; when added it must tear down host devices explicitly first).
+CREATE TABLE IF NOT EXISTS tenant_networks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id      INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    network_id  INTEGER NOT NULL REFERENCES networks(id),
+    ext_mode    TEXT NOT NULL DEFAULT 'isolated',
+    ext_ref     TEXT NOT NULL DEFAULT '',
+    vrouter_id  INTEGER NOT NULL DEFAULT 0,
+    state       TEXT NOT NULL DEFAULT 'applied',
+    error       TEXT NOT NULL DEFAULT '',
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(org_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_tnet_org ON tenant_networks(org_id);
+CREATE INDEX IF NOT EXISTS idx_tnet_network ON tenant_networks(network_id);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

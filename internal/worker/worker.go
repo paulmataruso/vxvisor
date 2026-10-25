@@ -97,6 +97,10 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// order (containers are lxc.start.auto=0) so veth legs never race their
 		// bridges at boot.
 		s.svc.ReensureVRouters()
+		// Rebuild per-org isolated tenant-network bridges (+ their DHCP) that the
+		// kernel loses across a reboot. After vRouters, before autostart, so a VM
+		// on its tenant bridge finds it ready.
+		s.svc.ReensureTenantNetworks()
 		// Rebuild the distributed-firewall (port-group microsegmentation) host
 		// bridge nftables table — the kernel clears it on reboot.
 		s.svc.ReensureNetFirewalls()

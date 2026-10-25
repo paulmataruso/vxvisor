@@ -10,6 +10,31 @@
 </div>
 
 {{if .P.IsAdmin}}
+<!-- ===================== Tenant Networks ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Tenant Networks</h2>
+    <button class="btn primary" data-modal="m-tnet">+ Add tenant network</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px">A <strong>tenant network</strong> is a private, isolated network just for this organization — its own dedicated bridge with no uplink, so its VMs can never share a segment with another tenant. New VMs in this org attach here by default. (Routing a tenant network to the outside — NAT / L2 / vRouter — is coming next.)</p>
+  {{if .TenantNetworks}}
+  <table>
+    <tr><th>Name</th><th>Mode</th><th>Bridge</th><th>CIDR</th><th>Gateway</th><th>State</th><th></th></tr>
+    {{range .TenantNetworks}}
+    <tr>
+      <td><strong>{{.Name}}</strong>{{if .IsDefault}} <span class="pill">default</span>{{end}}</td>
+      <td><span class="pill">{{.ExtMode}}</span></td>
+      <td class="mono muted" style="font-size:12px">{{.Bridge}}</td>
+      <td class="mono" style="font-size:12px">{{.CIDR}}</td>
+      <td class="mono muted" style="font-size:12px">{{.Gateway}}</td>
+      <td>{{if eq .State "applied"}}<span class="pill running">● applied</span>{{else if eq .State "error"}}<span class="pill" style="color:var(--danger)" title="{{.Error}}">● error</span>{{else}}<span class="pill">{{.State}}</span>{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/networks/tenant/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete tenant network {{.Name}}? Refused if VMs are still attached.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No tenant networks yet. Add one to give this organization a private, isolated network.</div>{{end}}
+</div>
+
 <!-- ===================== Uplinks / Link Aggregation ===================== -->
 <div class="card">
   <div class="card-head">
@@ -213,6 +238,20 @@
  })();
 </script>
 {{end}}
+
+<div class="modal" id="m-tnet"><div class="modal-card lg">
+  <div class="modal-head"><h3>Add tenant network</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/networks/tenant">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="private-net" required></label>
+    <label class="fld">CIDR<input type="text" name="cidr" placeholder="10.50.0.0/24"></label>
+    <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.50.0.1" title="Optional — assigned to the bridge for this isolated network"></label>
+    <label class="fld">DHCP<select name="dhcp"><option value="1">serve DHCP on this network</option><option value="0">no DHCP (static)</option></select></label>
+    <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.50.0.100-200"></label>
+    <label class="fld">DHCP DNS<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create tenant network</button></div>
+  </form>
+</div></div>
 
 <div class="modal" id="m-pg"><div class="modal-card lg">
   <div class="modal-head"><h3>Add port group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>

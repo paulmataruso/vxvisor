@@ -722,6 +722,10 @@ func (s *Service) CreateOrg(p *Principal, name, slug, ip string) (int64, error) 
 		return 0, err
 	}
 	_ = s.store.AddMember(id, p.User.ID, "owner")
+	// Isolate the new org by default: give it a dedicated isolated tenant network
+	// so its VMs don't share an L2 segment with other orgs. Best-effort — a
+	// failure here must not fail org creation.
+	s.provisionDefaultForOrg(id)
 	s.audit(p, id, "org.create", "org", slug, ip, map[string]any{"name": name})
 	return id, nil
 }
