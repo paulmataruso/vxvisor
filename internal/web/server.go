@@ -192,6 +192,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/vddk-upload", s.auth(s.uploadVDDK))
 	mux.HandleFunc("POST /storage", s.auth(s.upsertPool))
 	mux.HandleFunc("POST /storage/delete", s.auth(s.deleteStoragePool))
+	mux.HandleFunc("POST /storage/disk/wipe", s.auth(s.wipeDisk))
 	// ZFS + LVM pool management (admin; destructive ops confirmed in the UI).
 	mux.HandleFunc("POST /storage/zfs/create", s.auth(s.createZFSPool))
 	mux.HandleFunc("POST /storage/zfs/{name}/destroy", s.auth(s.destroyZFSPool))
@@ -644,6 +645,7 @@ func (s *Server) render(w http.ResponseWriter, p *service.Principal, name, activ
 	}
 	// Cluster mode indicators for the chrome (topbar badge, nav). Unified = the
 	// request came in on the VIP; NodeName/VIP label the current view.
+	view["Version"] = service.BuildVersion()
 	view["Unified"] = p.Unified
 	view["Clustered"] = s.svc.ClusterEnabledRole()
 	view["NodeName"] = s.svc.ClusterSelfName()
