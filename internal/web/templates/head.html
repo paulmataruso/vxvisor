@@ -254,6 +254,7 @@
 <div class="main">
   <div class="topbar">
     <h1>{{if .Title}}{{.Title}}{{else}}VXVisor{{end}}</h1>
+    {{if .Version}}<span class="muted" title="Server version" style="font-size:12px;white-space:nowrap">{{.Version}}</span>{{end}}
     {{if .Clustered}}
       {{if .Unified}}<span class="pill running" title="Managing the whole cluster from the cluster address">⬡ Cluster{{if .VIP}} · {{.VIP}}{{end}}</span>
       {{else}}<span class="pill" title="Viewing this host only. Use the cluster address to manage the whole cluster.">▣ Host{{if .NodeName}} · {{.NodeName}}{{end}}</span>{{end}}
@@ -268,7 +269,6 @@
       </select>
     </form>
     {{end}}
-    {{if .Version}}<span class="muted" title="Server version" style="font-size:12px;white-space:nowrap">{{.Version}}</span>{{end}}
     <button type="button" class="iconbtn" id="themebtn" title="Toggle light/dark" aria-label="Toggle theme"><svg class="ic"><use href="#i-moon"/></svg></button>
     <a href="/clients" class="btn sm{{if eq .Active "clients"}} primary{{end}}" title="Download the VXVisor desktop console client"><svg class="ic"><use href="#i-monitor"/></svg>Client</a>
     {{if .P.IsAdmin}}

@@ -62,7 +62,15 @@ func (a *App) CheckUpdate(serverURL string) {
 		DefaultButton: "Update",
 		CancelButton:  "Later",
 	})
-	if choice != "Update" {
+	// IMPORTANT: Wails renders QuestionDialog as a native MessageBox on Windows,
+	// which IGNORES the custom button labels above and returns "Yes"/"No"
+	// (dialog.go responses map). macOS/Linux return the custom label ("Update").
+	// So accept every affirmative spelling; only an explicit decline/cancel/close
+	// skips the update.
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "update", "yes", "ok":
+		// proceed with the update
+	default:
 		return
 	}
 	newPath, err := download(serverURL, rel)
@@ -137,10 +145,19 @@ func download(serverURL string, rel clientRelease) (string, error) {
 	return dst, nil
 }
 
-// cleanupOld removes a leftover "<exe>.old" from a prior Windows self-update.
+// cleanupOld removes leftovers from a prior self-update: "<exe>.old" (legacy
+// Windows swap scheme), and a stale "<exe>.new"/"<exe>.update.bat" if a swap was
+// interrupted. Best-effort.
 func (a *App) cleanupOld() {
-	if exe, err := os.Executable(); err == nil {
-		os.Remove(exe + ".old")
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if r, e := filepath.EvalSymlinks(exe); e == nil {
+		exe = r
+	}
+	for _, suffix := range []string{".old", ".new", ".update.bat"} {
+		os.Remove(exe + suffix)
 	}
 }
 
