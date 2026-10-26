@@ -144,6 +144,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /console/{id}/ws", s.auth(s.vncProxy))
 	mux.HandleFunc("GET /console/{id}/serial", s.auth(s.serialConsole))
 	mux.HandleFunc("GET /console/{id}/serial/ws", s.auth(s.serialProxy))
+	// Optional rustguac advanced console (browser VNC/SPICE/RDP/SSH via the local
+	// rustguac add-on). Inert unless the [guac] config section is enabled.
+	mux.HandleFunc("GET /console/{id}/advanced", s.auth(s.advancedConsole))
 
 	// M3: images & storage
 	mux.HandleFunc("GET /clients", s.auth(s.clientsPage))

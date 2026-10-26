@@ -138,6 +138,23 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   and published to a host's `<DataDir>/clients`.
 
 ### Recent subsystems (not in the older notes above)
+- **rustguac "advanced console" (OPTIONAL test add-on, config-gated).** Browser SSH/RDP/VNC/
+  SPICE via a local [rustguac](https://github.com/sol1/rustguac) + its own guacd, built from
+  source under `/opt/rustguac` (systemd `rustguac` + `rustguac-guacd`). rustguac binds **loopback
+  only** (`127.0.0.1:8089`); its guacd runs on **4823** (the pre-existing Apache guacd on 4822 is
+  left untouched). vdxd fronts it: the `[guac]` config block (`enabled/upstream/api_key/
+  proxy_addr`) turns on `internal/service/guac_service.go` (`AdvancedConsole` brokers a session +
+  single-use WS ticket server-side with the admin API key) and a **second cookie-gated reverse-
+  proxy listener** (`internal/web/guac_proxy.go`, `cmd/vdxd/main.go`) on `proxy_addr`
+  (172.16.0.163:8767) that forwards to loopback rustguac — so a browser reaches rustguac only
+  through a valid `vdx_session`. Route `GET /console/{id}/advanced` (broker→302 to the proxy),
+  and an "⚡ RustGuac" button on console.html shown only when `GuacEnabled()`. **No DB migration**
+  — the whole feature is config-only. **Rollback:** set `[guac] enabled=false` + restart (instant,
+  reversible; noVNC untouched), or full uninstall via `~/rollback-rustguac.sh` on the host. Install
+  caveats on Ubuntu 26.04: install.sh's apt step was edited to drop `freerdp3-dev` (already present
+  at 3.24.2; the 3.32.1 security candidate conflicts) and the Xvnc/Chromium web-session deps
+  (chromium is a snap, no `chromium-sandbox` .deb) — neither affects VNC/SPICE/RDP/SSH consoles.
+
 - **Inventory folders** (migration 43): org-scoped nestable folder tree to organize
   instances. `vm_folders` + `vm_folder_members` tables (separate from `sessions`),
   `internal/service/folders_service.go`, REST + web (`/instances` List/Folders views with

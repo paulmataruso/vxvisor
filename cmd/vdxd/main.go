@@ -1,11 +1,12 @@
 // Command vdxd is the VXVisor daemon and CLI.
 //
 // Subcommands:
-//   vdxd serve                       run the web UI + REST API
-//   vdxd user add <name> [--admin]   create a user (prompts for password)
-//   vdxd org add <name> <slug>       create an org
-//   vdxd image pull <name>           download a base image into the cache
-//   vdxd version
+//
+//	vdxd serve                       run the web UI + REST API
+//	vdxd user add <name> [--admin]   create a user (prompts for password)
+//	vdxd org add <name> <slug>       create an org
+//	vdxd image pull <name>           download a base image into the cache
+//	vdxd version
 package main
 
 import (
@@ -278,6 +279,21 @@ func cmdServe(cfgPath string) {
 		}
 	}()
 
+	// Optional advanced-console (rustguac) reverse proxy: a cookie-gated listener
+	// on a separate browser-reachable port that fronts the loopback-only rustguac.
+	// Only started when the [guac] add-on is enabled, so it is fully opt-in and a
+	// clean rollback (disable → the port simply isn't opened).
+	var guacSrv *http.Server
+	if svc.GuacEnabled() && cfg.Guac.ProxyAddr != "" {
+		guacSrv = &http.Server{Addr: cfg.Guac.ProxyAddr, Handler: srv.GuacProxyHandler()}
+		go func() {
+			log.Printf("rustguac advanced-console proxy listening on %s -> %s", cfg.Guac.ProxyAddr, cfg.Guac.Upstream)
+			if err := guacSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("rustguac proxy listener error: %v", err)
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	log.Println("shutting down…")
 	// Release the VIP synchronously BEFORE exit so the macvlan is gone and no
@@ -290,6 +306,9 @@ func cmdServe(cfgPath string) {
 	_ = httpSrv.Shutdown(shutCtx)
 	if peerSrv != nil {
 		_ = peerSrv.Shutdown(shutCtx)
+	}
+	if guacSrv != nil {
+		_ = guacSrv.Shutdown(shutCtx)
 	}
 }
 
