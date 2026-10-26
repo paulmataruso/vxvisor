@@ -65,8 +65,13 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **43**
-  (`vm-folders`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **47**
+  (`ext-trunk-shared`). Add `{N, "name", "SQL"}`.
+- **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
+  inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
+  quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
+  migration statement can WIPE the control plane. Validate new migrations against the real
+  driver (a `db` test that opens a fresh DB) before shipping.
 - `ALTER TABLE sessions ADD COLUMN ...` is the pattern for new VM fields.
 
 ### `sessions` column discipline (`internal/session/manager.go`)
@@ -186,6 +191,36 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   in check-mode before tearing down the host-global EW table. Full design + the two adversarial
   reviews + the deferred v3 (cluster-wide allocator + segment replication + vxlan materialization +
   UDP:4789 ingress filter) in `docs/TENANT-NETWORKING.md` §14–24.
+- **Tenant networking v3** (migration 46): per-tenant **virtual uplinks** + an instance-admin
+  **egress-mapping console** (`/trunks`, "Tenant Egress" nav). A tenant builds isolated networks
+  normally and connects one to a named **uplink**; the admin decides what that uplink really is on
+  the wire. Model: an **external trunk** (`ext_trunks`) is a role-dedicated NIC/bond (NOT a raw
+  vSwitch uplink — `guardTrunk` enforces this in CreateVSwitch/CreateBond/UpgradeVSwitchToBond/
+  AddTransitLink + TransitCandidates); per-tenant **VLAN pools** (`tenant_vlan_pools`, Neutron-style
+  range, live used/available); **uplinks** (`tenant_uplinks`) in mode `access` (single 802.1q),
+  `qinq` (802.1ad outer S-tag, tenant inner VLANs preserved), or `dedicated` (whole NIC). Data plane
+  = per-tenant VLAN **subinterfaces** `<trunk>.<vid>` (`netdrv/trunk.go`; proto per-sub so 802.1q and
+  802.1ad tenants coexist on one trunk) enslaved into the tenant network's PLAIN bridge, so inner
+  C-tags survive and the tenant's private VLAN numbering never collides across tenants. Allocator
+  `service/vlan_alloc.go` (mirrors segment_alloc: outer_vid lives on the uplink row, standalone
+  partial unique index `ux_uplink_trunk_vid` is the race backstop, free-after-device-gone). QinQ
+  raises MTU + disables NIC VLAN offload on the trunk + every bond slave, recording the ORIGINAL
+  state ONCE at designation for byte-for-byte restore; `VerifyQinQ` is a pre-trust check and true
+  wire behavior must be tcpdump-confirmed on the host's NICs. **Rollback**: a "Disable tenant egress"
+  teardown (crash-safe via `teardown_pending`) deletes every subinterface and restores every trunk;
+  migration 46 is strictly additive so a binary rollback is clean. Boot: `ReensureExtTrunks` (before
+  tenant nets) + `ReensureUplinks` (after). The vRouter external leg (`vrouter.LegUplink`) is modeled
+  (WAN-zone classified) but its attach path is deferred — it rides the netns-FRR runtime that's
+  independently broken on this host.
+  - **Shared mgmt-uplink trunks** (migration 47, `ext_trunks.shared`): a trunk may be the management
+    vSwitch's own uplink (e.g. the mgmt bond). It's **access-only** (single 802.1q subinterfaces) and the
+    **parent is NEVER modified** — no MTU raise, no offload toggle — so management is never disturbed; tenant
+    egress rides the same physical link as untagged management, separated only by VLAN tag. `isMgmtBridgeUplink`
+    detects it and `DesignateTrunk` bypasses the "enslaved / is a vSwitch uplink" refusals **only** for that
+    device; QinQ on a shared trunk is refused. Shared trunks are excluded from `extTrunkIfaces` (so `guardTrunk`
+    doesn't fight the mgmt vSwitch) and from every `EnsureTrunk`/`RestoreTrunk` path
+    (Reensure/Undesignate/DisableTenantEgress). `SharedTrunkCandidates` surfaces the mgmt uplink in the
+    designate modal under a separate "shared with management" group.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

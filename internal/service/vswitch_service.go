@@ -144,6 +144,9 @@ func (s *Service) CreateBond(p *Principal, name, mode, hashPolicy string, member
 	if err := s.guardMgmt(members...); err != nil {
 		return err
 	}
+	if err := s.guardTrunk(members...); err != nil {
+		return err
+	}
 	if err := netdrv.EnsureBond(name, mode, hashPolicy, members); err != nil {
 		return err
 	}
@@ -189,6 +192,9 @@ func (s *Service) CreateVSwitch(p *Principal, name, uplink, ip string) error {
 		return ErrUnauthorized
 	}
 	if err := s.guardMgmt(uplink); err != nil {
+		return err
+	}
+	if err := s.guardTrunk(uplink); err != nil {
 		return err
 	}
 	bridge := bridgeNameFor(name)
@@ -256,6 +262,9 @@ func (s *Service) UpgradeVSwitchToBond(p *Principal, vswitch, bondName, mode, ha
 	// Never team the IP-holding management interface itself (vs.Bridge may BE it —
 	// that's fine, we team the uplink NICs feeding the bridge, not the bridge).
 	if err := s.guardMgmt(members...); err != nil {
+		return err
+	}
+	if err := s.guardTrunk(members...); err != nil {
 		return err
 	}
 	if bondName == "" {

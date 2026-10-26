@@ -97,10 +97,17 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// order (containers are lxc.start.auto=0) so veth legs never race their
 		// bridges at boot.
 		s.svc.ReensureVRouters()
+		// Re-apply external-trunk MTU/offload (tenant networking v3) that the kernel
+		// loses across a reboot. Before tenant networks + uplinks so the trunk is
+		// prepped before any subinterface is hung off it. Respects teardown_pending.
+		s.svc.ReensureExtTrunks()
 		// Rebuild per-org isolated tenant-network bridges (+ their DHCP) that the
 		// kernel loses across a reboot. After vRouters, before autostart, so a VM
 		// on its tenant bridge finds it ready.
 		s.svc.ReensureTenantNetworks()
+		// Re-wire bound tenant uplinks (VLAN subinterfaces/dedicated NICs) into their
+		// egress bridges — AFTER ReensureTenantNetworks so those bridges exist.
+		s.svc.ReensureUplinks()
 		// Rebuild the distributed-firewall (port-group microsegmentation) host
 		// bridge nftables table — the kernel clears it on reboot.
 		s.svc.ReensureNetFirewalls()

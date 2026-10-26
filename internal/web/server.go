@@ -272,6 +272,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/{id}/delete", s.auth(s.deleteNetwork))
 	mux.HandleFunc("POST /networks/tenant", s.auth(s.createTenantNetwork))
 	mux.HandleFunc("POST /networks/tenant/{id}/delete", s.auth(s.deleteTenantNetwork))
+	mux.HandleFunc("POST /networks/tenant/{id}/uplink", s.auth(s.connectUplink))
+	mux.HandleFunc("POST /networks/tenant/{id}/uplink/disconnect", s.auth(s.disconnectUplink))
 	// VMware-style data plane: bonds (LACP/etherchannel) + vSwitches (VLAN trunks).
 	mux.HandleFunc("POST /networks/bonds", s.auth(s.createBond))
 	mux.HandleFunc("POST /networks/bonds/{name}/delete", s.auth(s.deleteBond))
@@ -280,6 +282,15 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))
 	// NSX-lite virtual routers (vRouter): a per-tenant FRR routing instance (LXC
 	// container or network namespace) between a transit link and internal port groups.
+	mux.HandleFunc("GET /trunks", s.auth(s.trunksPage))
+	mux.HandleFunc("POST /trunks/designate", s.auth(s.designateTrunk))
+	mux.HandleFunc("POST /trunks/{id}/undesignate", s.auth(s.undesignateTrunk))
+	mux.HandleFunc("GET /trunks/{id}/verify", s.auth(s.verifyTrunkQinQ))
+	mux.HandleFunc("POST /trunks/pool", s.auth(s.setVlanPool))
+	mux.HandleFunc("POST /trunks/pool/{id}/delete", s.auth(s.deleteVlanPool))
+	mux.HandleFunc("POST /trunks/uplink", s.auth(s.createUplink))
+	mux.HandleFunc("POST /trunks/uplink/{id}/delete", s.auth(s.deleteUplink))
+	mux.HandleFunc("POST /trunks/disable", s.auth(s.disableTenantEgress))
 	mux.HandleFunc("GET /vrouters", s.auth(s.vroutersPage))
 	mux.HandleFunc("GET /vrouters/{id}/status", s.auth(s.apiVRouterStatus))
 	mux.HandleFunc("GET /vrouters/{id}/diagram", s.auth(s.apiVRouterDiagram))

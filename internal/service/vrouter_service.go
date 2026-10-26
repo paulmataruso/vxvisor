@@ -385,6 +385,9 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 	if err := s.guardMgmt(physIface); err != nil {
 		return err
 	}
+	if err := s.guardTrunk(physIface); err != nil {
+		return err
+	}
 	cands, _ := s.TransitCandidates(p)
 	ok := false
 	for _, c := range cands {

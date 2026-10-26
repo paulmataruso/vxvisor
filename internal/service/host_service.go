@@ -230,6 +230,7 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 	}
 	mgmt := s.mgmtIface()
 	storage := s.StorageIface()
+	trunks := s.extTrunkIfaces()
 	nbrs := lldp.Neighbors()
 	var out []TransitIface
 	for _, it := range ifaces {
@@ -241,6 +242,9 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 		}
 		if storage != "" && it.Name == storage {
 			continue // the dedicated storage NIC (carries the Ceph/storage IP) — never a transit
+		}
+		if trunks[it.Name] {
+			continue // a designated external trunk (bare NIC, Master=="") — reserved for tenant egress
 		}
 		ti := TransitIface{Name: it.Name, State: it.State, Carrier: it.Carrier, SpeedMbps: it.SpeedMbps, Addrs: it.Addrs}
 		if n, ok := nbrs[it.Name]; ok {

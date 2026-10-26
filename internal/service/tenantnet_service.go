@@ -32,6 +32,9 @@ type TenantNetwork struct {
 	Bridge  string
 	CIDR    string
 	Gateway string
+	// v3 egress: the connected uplink, if any (empty = internal/no egress).
+	UplinkID   int64
+	UplinkName string
 }
 
 func tenantBridgeName(networkID int64) string { return fmt.Sprintf("vdxt%d", networkID) }
@@ -42,7 +45,8 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(`SELECT t.id,t.org_id,t.name,t.network_id,t.ext_mode,t.state,t.error,t.is_default,t.created_at,
-		COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,'')
+		COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,''),
+		COALESCE(t.uplink_id,0),COALESCE((SELECT u.name FROM tenant_uplinks u WHERE u.id=t.uplink_id),'')
 		FROM tenant_networks t LEFT JOIN networks n ON n.id=t.network_id
 		WHERE t.org_id=? ORDER BY t.is_default DESC, t.name`, p.OrgID)
 	if err != nil {
@@ -54,7 +58,7 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 		var t TenantNetwork
 		var def int
 		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.NetworkID, &t.ExtMode, &t.State, &t.Error, &def,
-			&t.CreatedAt, &t.Bridge, &t.CIDR, &t.Gateway); err != nil {
+			&t.CreatedAt, &t.Bridge, &t.CIDR, &t.Gateway, &t.UplinkID, &t.UplinkName); err != nil {
 			return nil, err
 		}
 		t.IsDefault = def == 1
@@ -86,6 +90,85 @@ func (s *Service) AttachableSegments(p *Principal) ([]TenantNetwork, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// AttachableUplinks returns the org's admin-provisioned uplinks not yet connected
+// to any tenant network (an uplink is 1:1 with a network's egress). The org admin
+// picks from these; they cannot create or alter the underlying egress mapping.
+func (s *Service) AttachableUplinks(p *Principal) ([]UplinkView, error) {
+	if !p.atLeast("admin") || p.OrgID == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`SELECT id,name,mode,outer_vid,status FROM tenant_uplinks
+		WHERE org_id=? AND id NOT IN (SELECT uplink_id FROM tenant_networks WHERE uplink_id IS NOT NULL)
+		ORDER BY name`, p.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UplinkView
+	for rows.Next() {
+		var u UplinkView
+		if err := rows.Scan(&u.ID, &u.Name, &u.Mode, &u.OuterVID, &u.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// ConnectNetworkUplink connects one of the org's tenant networks to one of its
+// admin-provisioned uplinks (org admin). It records the reference on
+// tenant_networks and realizes the uplink device into the network's bridge. Both
+// objects must belong to the caller's org.
+func (s *Service) ConnectNetworkUplink(p *Principal, tnetID, uplinkID int64, ip string) error {
+	if !p.atLeast("admin") || p.OrgID == 0 {
+		return ErrUnauthorized
+	}
+	var netID int64
+	if err := s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=? AND org_id=?`, tnetID, p.OrgID).Scan(&netID); err != nil {
+		return fmt.Errorf("tenant network not found in this org")
+	}
+	var uOrg int64
+	if err := s.db.QueryRow(`SELECT org_id FROM tenant_uplinks WHERE id=?`, uplinkID).Scan(&uOrg); err != nil || uOrg != p.OrgID {
+		return fmt.Errorf("uplink not found in this org")
+	}
+	// One uplink per network: refuse if the uplink is already connected elsewhere.
+	var used int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tenant_networks WHERE uplink_id=?`, uplinkID).Scan(&used)
+	if used > 0 {
+		return fmt.Errorf("that uplink is already connected to a network")
+	}
+	if _, err := s.db.Exec(`UPDATE tenant_networks SET uplink_id=? WHERE id=?`, uplinkID, tnetID); err != nil {
+		return err
+	}
+	if err := s.realizeUplink(uplinkID, tenantBridgeName(netID)); err != nil {
+		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
+		return err
+	}
+	s.audit(p, p.OrgID, "uplink.connect", "tenant_network", fmt.Sprint(tnetID), ip, map[string]any{"uplink": uplinkID})
+	return nil
+}
+
+// DisconnectNetworkUplink detaches a tenant network from its uplink, tearing down
+// the uplink device (refusing while a VM is live on the bridge).
+func (s *Service) DisconnectNetworkUplink(p *Principal, tnetID int64, ip string) error {
+	if !p.atLeast("admin") || p.OrgID == 0 {
+		return ErrUnauthorized
+	}
+	var uplinkID sql.NullInt64
+	if err := s.db.QueryRow(`SELECT uplink_id FROM tenant_networks WHERE id=? AND org_id=?`, tnetID, p.OrgID).Scan(&uplinkID); err != nil {
+		return fmt.Errorf("tenant network not found in this org")
+	}
+	if !uplinkID.Valid {
+		return nil // already disconnected
+	}
+	if err := s.unrealizeUplink(uplinkID.Int64, true); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
+	s.audit(p, p.OrgID, "uplink.disconnect", "tenant_network", fmt.Sprint(tnetID), ip, nil)
+	return nil
 }
 
 // CreateTenantNetwork creates and realizes an isolated tenant network (admin).

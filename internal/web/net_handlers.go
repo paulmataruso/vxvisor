@@ -17,9 +17,11 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	bonds, _ := s.svc.ListBonds(p)
 	vswitches, _ := s.svc.ListVSwitches(p)
 	tnets, _ := s.svc.ListTenantNetworks(p)
+	uplinks, _ := s.svc.AttachableUplinks(p)
 	s.render(w, p, "networks.html", "networks", map[string]any{
 		"Networks":       list,
 		"TenantNetworks": tnets,
+		"Uplinks":        uplinks,
 		"Bonds":          bonds,
 		"VSwitches":      vswitches,
 		"MgmtBridge":     s.svc.MgmtInterface(),
@@ -103,6 +105,34 @@ func (s *Server) deleteTenantNetwork(w http.ResponseWriter, r *http.Request, p *
 	if err := s.svc.DeleteTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// connectUplink connects a tenant network to one of the org's admin-provisioned
+// uplinks (org admin); the uplink device is realized into the network's bridge.
+func (s *Server) connectUplink(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.ConnectNetworkUplink(p, atoi(r.PathValue("id")), atoi(r.FormValue("uplink_id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Network connected to the uplink — it now has external egress.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) disconnectUplink(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DisconnectNetworkUplink(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Network disconnected from its uplink.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

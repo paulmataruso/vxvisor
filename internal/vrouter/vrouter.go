@@ -36,6 +36,12 @@ const (
 const (
 	LegTransit  = "transit"
 	LegInternal = "internal"
+	// LegUplink is a tenant-networking-v3 external leg backed by an admin uplink
+	// (a VLAN subinterface or dedicated NIC enslaved to the leg bridge) rather than
+	// a raw physical transit NIC. Kept distinct from LegTransit so the phys-NIC-only
+	// guards (tenant can't delete a transit-bearing router; transit teardown keys on
+	// phys_iface) don't misfire — a tenant may delete an uplink-backed router.
+	LegUplink = "uplink"
 )
 
 // VRouter mirrors a vrouters row.
