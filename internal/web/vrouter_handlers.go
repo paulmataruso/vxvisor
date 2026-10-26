@@ -6,20 +6,28 @@ import (
 	"vdxclone/internal/service"
 )
 
-// vroutersPage renders the vRouter management page (admin only).
+// vroutersPage renders the vRouter management page. Per-org admins manage their
+// own org's routers (netns, internal-only); only an instance admin additionally
+// sees the transit (physical uplink) controls and the lxc runtime.
 func (s *Server) vroutersPage(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	if !p.IsAdmin {
-		http.Error(w, "admin only", http.StatusForbidden)
+	if !p.OrgAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	views, _ := s.svc.ListVRouters(p)
-	transit, _ := s.svc.TransitCandidates(p)
+	var transit []service.TransitIface
+	if p.IsAdmin {
+		transit, _ = s.svc.TransitCandidates(p)
+	}
+	segs, _ := s.svc.AttachableSegments(p)
 	s.render(w, p, "vrouters.html", "vrouters", map[string]any{
 		"VRouters":  views,
 		"Transit":   transit,
+		"Segments":  segs,
 		"Runtimes":  s.svc.VRouterRuntimes(),
 		"Available": s.svc.VRouterAvailable(p),
 		"UserMode":  s.svc.NetworkModeUser(),
+		"InstAdmin": p.IsAdmin,
 	})
 }
 
@@ -63,6 +71,22 @@ func (s *Server) apiVRouterDiagram(w http.ResponseWriter, r *http.Request, p *se
 		return
 	}
 	writeJSON(w, d)
+}
+
+// attachSegment attaches one of the org's existing (gatewayless) segments to a
+// vRouter as an internal leg; the router leg becomes its gateway.
+func (s *Server) attachSegment(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(vrID int64) error {
+		return s.svc.AttachSegment(p, vrID, int64(atoi(r.FormValue("tnet_id"))), r.FormValue("gateway"),
+			r.FormValue("dhcp") == "1", r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r))
+	})
+}
+
+// detachSegment removes a segment's leg from a vRouter without destroying it.
+func (s *Server) detachSegment(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(vrID int64) error {
+		return s.svc.DetachSegment(p, vrID, int64(atoi(r.FormValue("net_id"))), clientIP(r))
+	})
 }
 
 // vrDo wraps a mutation: CSRF, run, redirect back to /vrouters with a flash.
@@ -189,4 +213,3 @@ func (s *Server) updateInternalNetwork(w http.ResponseWriter, r *http.Request, p
 		return s.svc.UpdateInternalNetwork(p, id, int(atoi(r.PathValue("idx"))), r.FormValue("name"), r.FormValue("cidr"), r.FormValue("gateway"), clientIP(r))
 	})
 }
-

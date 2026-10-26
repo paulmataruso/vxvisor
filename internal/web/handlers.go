@@ -507,7 +507,7 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request, p *service.Prin
 		http.Error(w, err.Error(), statusFor(err))
 		return
 	}
-	s.render(w, p, "console.html", "compute", map[string]any{"Session": sess})
+	s.render(w, p, "console.html", "compute", map[string]any{"Session": sess, "GuacEnabled": s.svc.GuacEnabled()})
 }
 
 // ---- tenancy screens -----------------------------------------------------

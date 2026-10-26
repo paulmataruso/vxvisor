@@ -65,8 +65,13 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **43**
-  (`vm-folders`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **47**
+  (`ext-trunk-shared`). Add `{N, "name", "SQL"}`.
+- **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
+  inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
+  quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
+  migration statement can WIPE the control plane. Validate new migrations against the real
+  driver (a `db` test that opens a fresh DB) before shipping.
 - `ALTER TABLE sessions ADD COLUMN ...` is the pattern for new VM fields.
 
 ### `sessions` column discipline (`internal/session/manager.go`)
@@ -133,6 +138,23 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   and published to a host's `<DataDir>/clients`.
 
 ### Recent subsystems (not in the older notes above)
+- **rustguac "advanced console" (OPTIONAL test add-on, config-gated).** Browser SSH/RDP/VNC/
+  SPICE via a local [rustguac](https://github.com/sol1/rustguac) + its own guacd, built from
+  source under `/opt/rustguac` (systemd `rustguac` + `rustguac-guacd`). rustguac binds **loopback
+  only** (`127.0.0.1:8089`); its guacd runs on **4823** (the pre-existing Apache guacd on 4822 is
+  left untouched). vdxd fronts it: the `[guac]` config block (`enabled/upstream/api_key/
+  proxy_addr`) turns on `internal/service/guac_service.go` (`AdvancedConsole` brokers a session +
+  single-use WS ticket server-side with the admin API key) and a **second cookie-gated reverse-
+  proxy listener** (`internal/web/guac_proxy.go`, `cmd/vdxd/main.go`) on `proxy_addr`
+  (172.16.0.163:8767) that forwards to loopback rustguac — so a browser reaches rustguac only
+  through a valid `vdx_session`. Route `GET /console/{id}/advanced` (broker→302 to the proxy),
+  and an "⚡ RustGuac" button on console.html shown only when `GuacEnabled()`. **No DB migration**
+  — the whole feature is config-only. **Rollback:** set `[guac] enabled=false` + restart (instant,
+  reversible; noVNC untouched), or full uninstall via `~/rollback-rustguac.sh` on the host. Install
+  caveats on Ubuntu 26.04: install.sh's apt step was edited to drop `freerdp3-dev` (already present
+  at 3.24.2; the 3.32.1 security candidate conflicts) and the Xvnc/Chromium web-session deps
+  (chromium is a snap, no `chromium-sandbox` .deb) — neither affects VNC/SPICE/RDP/SSH consoles.
+
 - **Inventory folders** (migration 43): org-scoped nestable folder tree to organize
   instances. `vm_folders` + `vm_folder_members` tables (separate from `sessions`),
   `internal/service/folders_service.go`, REST + web (`/instances` List/Folders views with
@@ -157,6 +179,65 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   (Windows). Version baked via `-ldflags -X main.version` (Wails forwards it, unlike fyne-cross).
   Shell self-update is not yet implemented (the UI lives server-side now, so the shell rarely
   changes); until then a new client is downloaded from the `/clients` page.
+
+- **Tenant networks** (migration 44, `tenant_networks`): first-class per-org isolated
+  networks. v1 ships the **isolated** mode — a dedicated per-org bridge `vdxt<network_id>`
+  with no uplink (its own L2 domain; two orgs can never share a segment). Each tenant network
+  OWNS a backing `networks` row (the port group VMs attach to) referenced by a **RESTRICT** FK
+  so the raw `/networks` delete can't orphan it. New orgs get a default isolated network
+  (`CreateOrg`→`provisionDefaultForOrg`) and their VMs auto-attach to it (`manager.Create`
+  binds `network_id` when it's 0 and the org has a default); the pre-existing default org is
+  unchanged. `internal/service/tenantnet_service.go`, host DHCP in `netdrv/tenantdhcp.go`
+  (dnsmasq bound strictly to the tenant bridge), boot rebuild `ReensureTenantNetworks()` (after
+  vRouters). Groundwork: the netns vRouter `ApplyLegs` is idempotent (was a hard 2nd-apply bug).
+- **Tenant networking v2** (migration 45): a per-org admin (`atLeast("admin")`, not just an
+  instance admin) now self-serves their org's whole **logical** network surface, fully isolated;
+  the **physical** layer (NICs, bonds, vSwitch uplinks, host `/routing`, vRouter **transit**
+  links, raw port-group/VXLAN forms) stays instance-admin. Pieces: (a) `net_segments` — a
+  transactional VNI **identity** allocator (`service/segment_alloc.go`, range 200000–1048575,
+  excludes in-use `networks`/`storage_overlays` VNIs, composite PK = no collision); in v2 the VNI
+  is identity-only — **segments realize as plain bridges, NOT vxlan devices** (a peerless vxlan on
+  one host would open a host-wide UDP:4789 injection surface and the node-local allocator can't be
+  cluster-safe yet — both are the v3 multi-host path). (b) Segments can be **standalone** (own
+  gateway+DHCP) or **routed/gatewayless** and attached to a per-org **netns** vRouter whose leg
+  becomes their sole gateway — `AttachSegment`/`DetachSegment` bind to the segment's OWN bridge
+  (never client input, org-scoped), no live gateway-handoff. (c) `/vrouters` + `/vfirewall`
+  re-gated to `OrgAdmin` (transit + lxc stay instance-only; tenant routers are netns-only);
+  `DeleteVRouter` preserves attached segments and refuses a tenant deleting a transit-bearing
+  router. (d) `vrouters.name` → `UNIQUE(org_id,name)` (was global). (e) `ReplaceBridgeFW` validates
+  in check-mode before tearing down the host-global EW table. Full design + the two adversarial
+  reviews + the deferred v3 (cluster-wide allocator + segment replication + vxlan materialization +
+  UDP:4789 ingress filter) in `docs/TENANT-NETWORKING.md` §14–24.
+- **Tenant networking v3** (migration 46): per-tenant **virtual uplinks** + an instance-admin
+  **egress-mapping console** (`/trunks`, "Tenant Egress" nav). A tenant builds isolated networks
+  normally and connects one to a named **uplink**; the admin decides what that uplink really is on
+  the wire. Model: an **external trunk** (`ext_trunks`) is a role-dedicated NIC/bond (NOT a raw
+  vSwitch uplink — `guardTrunk` enforces this in CreateVSwitch/CreateBond/UpgradeVSwitchToBond/
+  AddTransitLink + TransitCandidates); per-tenant **VLAN pools** (`tenant_vlan_pools`, Neutron-style
+  range, live used/available); **uplinks** (`tenant_uplinks`) in mode `access` (single 802.1q),
+  `qinq` (802.1ad outer S-tag, tenant inner VLANs preserved), or `dedicated` (whole NIC). Data plane
+  = per-tenant VLAN **subinterfaces** `<trunk>.<vid>` (`netdrv/trunk.go`; proto per-sub so 802.1q and
+  802.1ad tenants coexist on one trunk) enslaved into the tenant network's PLAIN bridge, so inner
+  C-tags survive and the tenant's private VLAN numbering never collides across tenants. Allocator
+  `service/vlan_alloc.go` (mirrors segment_alloc: outer_vid lives on the uplink row, standalone
+  partial unique index `ux_uplink_trunk_vid` is the race backstop, free-after-device-gone). QinQ
+  raises MTU + disables NIC VLAN offload on the trunk + every bond slave, recording the ORIGINAL
+  state ONCE at designation for byte-for-byte restore; `VerifyQinQ` is a pre-trust check and true
+  wire behavior must be tcpdump-confirmed on the host's NICs. **Rollback**: a "Disable tenant egress"
+  teardown (crash-safe via `teardown_pending`) deletes every subinterface and restores every trunk;
+  migration 46 is strictly additive so a binary rollback is clean. Boot: `ReensureExtTrunks` (before
+  tenant nets) + `ReensureUplinks` (after). The vRouter external leg (`vrouter.LegUplink`) is modeled
+  (WAN-zone classified) but its attach path is deferred — it rides the netns-FRR runtime that's
+  independently broken on this host.
+  - **Shared mgmt-uplink trunks** (migration 47, `ext_trunks.shared`): a trunk may be the management
+    vSwitch's own uplink (e.g. the mgmt bond). It's **access-only** (single 802.1q subinterfaces) and the
+    **parent is NEVER modified** — no MTU raise, no offload toggle — so management is never disturbed; tenant
+    egress rides the same physical link as untagged management, separated only by VLAN tag. `isMgmtBridgeUplink`
+    detects it and `DesignateTrunk` bypasses the "enslaved / is a vSwitch uplink" refusals **only** for that
+    device; QinQ on a shared trunk is refused. Shared trunks are excluded from `extTrunkIfaces` (so `guardTrunk`
+    doesn't fight the mgmt vSwitch) and from every `EnsureTrunk`/`RestoreTrunk` path
+    (Reensure/Undesignate/DisableTenantEgress). `SharedTrunkCandidates` surfaces the mgmt uplink in the
+    designate modal under a separate "shared with management" group.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

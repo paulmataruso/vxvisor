@@ -9,6 +9,45 @@
   <p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
 </div>
 
+{{if .P.OrgAdmin}}
+<!-- ===================== Segments (tenant networks) ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Segments</h2>
+    <button class="btn primary" data-modal="m-tnet">+ Add segment</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px">A <strong>segment</strong> is a private, isolated network for this organization — its own dedicated bridge with no uplink, so its VMs can never share a broadcast domain with another tenant. Give it a gateway + DHCP to make it <em>standalone</em>, or leave the gateway empty to make it <em>routed</em> (attach it to a router on the vRouters page to route between your segments). New VMs in this org attach to the default segment.</p>
+  {{if .TenantNetworks}}
+  <table>
+    <tr><th>Name</th><th>Mode</th><th>Bridge</th><th>CIDR</th><th>Gateway</th><th>Uplink</th><th>State</th><th></th></tr>
+    {{range .TenantNetworks}}
+    <tr>
+      <td><strong>{{.Name}}</strong>{{if .IsDefault}} <span class="pill">default</span>{{end}}</td>
+      <td><span class="pill">{{.ExtMode}}</span></td>
+      <td class="mono muted" style="font-size:12px">{{.Bridge}}</td>
+      <td class="mono" style="font-size:12px">{{.CIDR}}</td>
+      <td class="mono muted" style="font-size:12px">{{.Gateway}}</td>
+      <td>
+        {{if .UplinkName}}<span class="pill running" title="Egressing via uplink {{.UplinkName}}">↗ {{.UplinkName}}</span>
+          <form method="post" action="/networks/tenant/{{.ID}}/uplink/disconnect" style="display:inline" onsubmit="return confirm('Disconnect {{.Name}} from uplink {{.UplinkName}}? Refused if a VM is live on it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm" title="Disconnect uplink">✕</button></form>
+        {{else if $.Uplinks}}
+          <form method="post" action="/networks/tenant/{{.ID}}/uplink" style="display:inline">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <select name="uplink_id" style="font-size:12px"><option value="">internal</option>{{range $.Uplinks}}<option value="{{.ID}}">{{.Name}} ({{.Mode}})</option>{{end}}</select>
+            <button class="btn sm">Connect</button>
+          </form>
+        {{else}}<span class="muted" style="font-size:12px">internal</span>{{end}}
+      </td>
+      <td>{{if eq .State "applied"}}<span class="pill running">● applied</span>{{else if eq .State "error"}}<span class="pill" style="color:var(--danger)" title="{{.Error}}">● error</span>{{else}}<span class="pill">{{.State}}</span>{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/networks/tenant/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete tenant network {{.Name}}? Refused if VMs are still attached.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No segments yet. Add one to give this organization a private, isolated network.</div>{{end}}
+  {{if .Uplinks}}<p class="muted" style="margin:10px 0 0;font-size:12px">Uplinks are provisioned by your instance admin; connect a segment to one to give it external access. You never see or set the real VLAN — that's handled upstream.</p>{{end}}
+</div>
+{{end}}
+
 {{if .P.IsAdmin}}
 <!-- ===================== Uplinks / Link Aggregation ===================== -->
 <div class="card">
@@ -52,10 +91,10 @@
 <div class="card">
   <div class="card-head">
     <h2>Port Groups &amp; VXLAN networks</h2>
-    <div style="display:flex;gap:8px">
+    {{if .P.IsAdmin}}<div style="display:flex;gap:8px">
       <button class="btn" data-modal="m-vxlan">+ VXLAN network</button>
       <button class="btn primary" data-modal="m-pg">+ Add port group</button>
-    </div>
+    </div>{{end}}
   </div>
   {{if .Networks}}
   <table>
@@ -67,7 +106,7 @@
       <td class="muted">{{if .Bridge}}{{.Bridge}}{{end}}{{if .VLANID}} · vlan {{.VLANID}}{{end}}</td>
       <td class="mono" style="font-size:12px">{{.CIDR}}</td>
       <td class="muted">{{if .PoolStart}}{{.PoolStart}}–{{.PoolEnd}}{{end}}</td>
-      <td style="text-align:right"><form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+      <td style="text-align:right">{{if $.P.IsAdmin}}<form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
     </tr>
     {{end}}
   </table>
@@ -213,6 +252,20 @@
  })();
 </script>
 {{end}}
+
+<div class="modal" id="m-tnet"><div class="modal-card lg">
+  <div class="modal-head"><h3>Add segment</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/networks/tenant">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="private-net" required></label>
+    <label class="fld">CIDR<input type="text" name="cidr" placeholder="10.50.0.0/24"></label>
+    <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.50.0.1 — leave blank for a routed segment" title="Set a gateway for a standalone segment; leave blank to attach it to a router (the router leg becomes its gateway)."></label>
+    <label class="fld">DHCP<select name="dhcp"><option value="1">serve DHCP on this segment</option><option value="0">no DHCP (static / routed)</option></select></label>
+    <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.50.0.100-200"></label>
+    <label class="fld">DHCP DNS<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create segment</button></div>
+  </form>
+</div></div>
 
 <div class="modal" id="m-pg"><div class="modal-card lg">
   <div class="modal-head"><h3>Add port group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>

@@ -36,8 +36,9 @@
     <div class="card-head" style="border:0;padding:0;margin:0 0 8px">
       <h3 style="margin:0;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Interfaces</h3>
       <span>
-        <button class="btn sm" data-modal="m-tr-{{$vrid}}">+ Transit link</button>
-        <button class="btn sm" data-modal="m-in-{{$vrid}}">+ Internal port group</button>
+        {{if $.InstAdmin}}<button class="btn sm" data-modal="m-tr-{{$vrid}}">+ Transit link</button>{{end}}
+        <button class="btn sm" data-modal="m-seg-{{$vrid}}">+ Attach segment</button>
+        {{if $.InstAdmin}}<button class="btn sm" data-modal="m-in-{{$vrid}}">+ Internal port group</button>{{end}}
       </span>
     </div>
     {{if .Legs}}
@@ -53,7 +54,7 @@
         <td class="muted mono" style="font-size:12px">{{if .DHCPDNS}}{{.DHCPDNS}}{{else}}—{{end}}</td>
         <td style="text-align:right;white-space:nowrap">
           {{if eq .Kind "transit"}}<button class="btn sm" data-modal="m-tre-{{$vrid}}">Edit</button>{{end}}
-          {{if eq .Kind "internal"}}<button class="btn sm" data-modal="m-ine-{{$vrid}}-{{.Idx}}">Edit</button> <button class="btn sm" data-modal="m-dhcp-{{$vrid}}-{{.Idx}}">DHCP</button>{{end}}
+          {{if eq .Kind "internal"}}<button class="btn sm" data-modal="m-ine-{{$vrid}}-{{.Idx}}">Edit</button> <button class="btn sm" data-modal="m-dhcp-{{$vrid}}-{{.Idx}}">DHCP</button>{{if .NetworkID}} <form method="post" action="/vrouters/{{$vrid}}/segment/detach" style="display:inline" onsubmit="return confirm('Detach this segment from the router? The segment and its VMs are kept.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="net_id" value="{{.NetworkID}}"><button class="btn sm">Detach</button></form>{{end}}{{end}}
         </td>
       </tr>
       {{end}}
@@ -214,6 +215,30 @@
     </div>
 
     <!-- Per-vRouter modals -->
+    <div class="modal" id="m-seg-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Attach a segment — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/segment/attach">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        {{if $.Segments}}
+        <label class="fld">Segment
+          <select name="tnet_id" required>
+            {{range $.Segments}}<option value="{{.ID}}">{{.Name}}{{if .CIDR}} ({{.CIDR}}){{end}}</option>{{end}}
+          </select>
+        </label>
+        <label class="fld">vRouter gateway IP / CIDR<input type="text" name="gateway" placeholder="10.60.0.1/24" required></label>
+        <label class="vdx-chk" style="display:inline-flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;font-weight:500"><input type="checkbox" name="dhcp" value="1"> Serve DHCP on this segment (from the router)</label>
+        <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.60.0.100,10.60.0.200"></label>
+        <label class="fld">DNS servers (handed out via DHCP, comma-separated)<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
+        <p class="muted" style="margin:0">Only <strong>routed</strong> (gatewayless) segments appear here. The router leg becomes the segment's gateway, so VMs on any attached segment can reach each other at L3. Create a gatewayless segment on the Networks page (leave its gateway blank).</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Attach</button></div>
+        {{else}}
+        <p class="muted" style="margin:0">No routed segments are available to attach. On the <a href="/networks">Networks</a> page, add a segment and leave its gateway blank to make it routable, then attach it here.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+        {{end}}
+      </form>
+    </div></div>
+
+    {{if $.InstAdmin}}
     <div class="modal" id="m-tr-{{$vrid}}"><div class="modal-card">
       <div class="modal-head"><h3>Add transit link — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
       <form class="mform" method="post" action="/vrouters/{{$vrid}}/transit">
@@ -244,6 +269,7 @@
         <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Attach</button></div>
       </form>
     </div></div>
+    {{end}}
 
     <div class="modal" id="m-sr-{{$vrid}}"><div class="modal-card">
       <div class="modal-head"><h3>Add static route — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
@@ -298,9 +324,9 @@
     <label class="fld">Name<input type="text" name="name" placeholder="edge-1" required></label>
     <label class="fld">Runtime
       <select name="runtime" required>
-        {{if index .Runtimes "lxc"}}<option value="lxc">LXC container + FRR (recommended)</option>{{end}}
+        {{if .InstAdmin}}{{if index .Runtimes "lxc"}}<option value="lxc">LXC container + FRR (recommended)</option>{{end}}{{end}}
         {{if index .Runtimes "netns"}}<option value="netns">Network namespace + FRR (lightweight)</option>{{end}}
-        <option value="vm" disabled>VM appliance (coming soon)</option>
+        {{if .InstAdmin}}<option value="vm" disabled>VM appliance (coming soon)</option>{{end}}
       </select>
     </label>
     <div class="row" style="gap:10px">

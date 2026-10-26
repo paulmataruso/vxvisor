@@ -853,6 +853,199 @@ CREATE TABLE IF NOT EXISTS vm_folder_members (
 );
 CREATE INDEX IF NOT EXISTS idx_vm_folder_members_folder ON vm_folder_members(folder_id);
 `},
+	{44, "tenant-networks", `
+-- Tenant networks: a first-class, per-org isolated network. v1 ships the
+-- "isolated" mode — a dedicated per-org Linux bridge (device vdxt<network_id>)
+-- that is its own L2 broadcast domain with no uplink, so two orgs' VMs can never
+-- share a segment. Each tenant network OWNS a backing 'networks' row (the normal
+-- port group VMs attach to via the existing tap path); network_id references it
+-- with the DEFAULT (NO ACTION / RESTRICT) foreign-key action ON PURPOSE, so the
+-- raw /networks delete errors on a tenant-owned row and callers must go through
+-- DeleteTenantNetwork (which tears down the host bridge). ext_mode/ext_ref/
+-- vrouter_id are reserved for the routed/l2bridge/vrouter external modes landing
+-- in a later release. Deleting an org cascades the row away (there is no
+-- DeleteOrg yet; when added it must tear down host devices explicitly first).
+CREATE TABLE IF NOT EXISTS tenant_networks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id      INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    network_id  INTEGER NOT NULL REFERENCES networks(id),
+    ext_mode    TEXT NOT NULL DEFAULT 'isolated',
+    ext_ref     TEXT NOT NULL DEFAULT '',
+    vrouter_id  INTEGER NOT NULL DEFAULT 0,
+    state       TEXT NOT NULL DEFAULT 'applied',
+    error       TEXT NOT NULL DEFAULT '',
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(org_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_tnet_org ON tenant_networks(org_id);
+CREATE INDEX IF NOT EXISTS idx_tnet_network ON tenant_networks(network_id);
+`},
+	{45, "tenant-net-v2", `
+-- Tenant networking v2. Two changes:
+--
+-- (1) net_segments: a transactional allocator that reserves a globally-unique
+--     segment identity (a VXLAN VNI) per tenant segment. In v2 this is an
+--     IDENTITY ONLY — no vxlan device is created from it (segments realize as
+--     plain uplink-less bridges, which is stronger isolation on a single host
+--     than a peerless vxlan that would expose a host-wide UDP:4789 ingress). The
+--     reserved VNI + cluster-wide allocator + device materialization are the v3
+--     multi-host growth path. The composite PRIMARY KEY makes a double allocation
+--     impossible.
+CREATE TABLE IF NOT EXISTS net_segments (
+    seg_type   TEXT NOT NULL,              -- 'vxlan' (v2); 'vlan' reserved
+    seg_id     INTEGER NOT NULL,           -- the allocated VNI (identity)
+    org_id     INTEGER NOT NULL,
+    net_id     INTEGER NOT NULL,           -- backing networks.id this identity belongs to
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (seg_type, seg_id)
+);
+CREATE INDEX IF NOT EXISTS idx_net_segments_net ON net_segments(net_id);
+CREATE INDEX IF NOT EXISTS idx_net_segments_org ON net_segments(org_id);
+
+-- (2) Rebuild vrouters so router names are unique PER ORG, not globally. The old
+--     column-level "name TEXT NOT NULL UNIQUE" collided across tenants (two orgs
+--     could not both name a router "core") and leaked another org's name via the
+--     constraint error. SQLite cannot drop a column constraint in place, so we
+--     rebuild. This runs with foreign_keys=ON: we first copy vrouter_legs into a
+--     constraint-free temp table and DROP the real vrouter_legs, so that when we
+--     DROP vrouters nothing references it (no implicit cascade can wipe legs),
+--     then we recreate vrouters with UNIQUE(org_id,name) and restore the legs.
+CREATE TABLE vrouter_legs_tmp45 AS SELECT * FROM vrouter_legs;
+DROP TABLE vrouter_legs;
+CREATE TABLE vrouters_new45 (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id         INTEGER NOT NULL,
+    owner_id       INTEGER NOT NULL DEFAULT 0,
+    name           TEXT NOT NULL,
+    runtime        TEXT NOT NULL DEFAULT 'lxc',
+    container_name TEXT NOT NULL DEFAULT '',
+    netns_name     TEXT NOT NULL DEFAULT '',
+    vm_session_id  TEXT NOT NULL DEFAULT '',
+    image          TEXT NOT NULL DEFAULT '',
+    lxcpath        TEXT NOT NULL DEFAULT '',
+    dist           TEXT NOT NULL DEFAULT 'debian',
+    release        TEXT NOT NULL DEFAULT 'trixie',
+    cpus           INTEGER NOT NULL DEFAULT 1,
+    mem_mb         INTEGER NOT NULL DEFAULT 512,
+    frr_json       TEXT NOT NULL DEFAULT '{}',
+    status         TEXT NOT NULL DEFAULT 'creating',
+    error          TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    fw_json        TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(org_id, name)
+);
+INSERT INTO vrouters_new45 (id,org_id,owner_id,name,runtime,container_name,netns_name,vm_session_id,image,lxcpath,dist,release,cpus,mem_mb,frr_json,status,error,created_at,fw_json)
+    SELECT id,org_id,owner_id,name,runtime,container_name,netns_name,vm_session_id,image,lxcpath,dist,release,cpus,mem_mb,frr_json,status,error,created_at,fw_json FROM vrouters;
+DROP TABLE vrouters;
+ALTER TABLE vrouters_new45 RENAME TO vrouters;
+CREATE INDEX IF NOT EXISTS idx_vrouters_org ON vrouters(org_id);
+CREATE TABLE vrouter_legs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    vrouter_id  INTEGER NOT NULL REFERENCES vrouters(id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    bridge      TEXT NOT NULL DEFAULT '',
+    phys_iface  TEXT NOT NULL DEFAULT '',
+    network_id  INTEGER NOT NULL DEFAULT 0,
+    iface_name  TEXT NOT NULL DEFAULT '',
+    cidr        TEXT NOT NULL DEFAULT '',
+    mac         TEXT NOT NULL DEFAULT '',
+    dhcp        INTEGER NOT NULL DEFAULT 0,
+    dhcp_range  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    dhcp_dns    TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO vrouter_legs (id,vrouter_id,idx,kind,bridge,phys_iface,network_id,iface_name,cidr,mac,dhcp,dhcp_range,created_at,dhcp_dns)
+    SELECT id,vrouter_id,idx,kind,bridge,phys_iface,network_id,iface_name,cidr,mac,dhcp,dhcp_range,created_at,dhcp_dns FROM vrouter_legs_tmp45;
+CREATE INDEX IF NOT EXISTS idx_vrouter_legs_vr ON vrouter_legs(vrouter_id);
+DROP TABLE vrouter_legs_tmp45;
+`},
+	{46, "tenant-net-v3", `
+-- Tenant networking v3: virtual uplinks + admin egress-mapping console.
+--
+-- STRICTLY ADDITIVE: new tables + one nullable column on tenant_networks, NO
+-- table rebuilds, NO data mutation (unlike migration 45). An older binary rolled
+-- back over this schema runs zero migrations (the runner only applies versions
+-- greater than MAX(version)) and serves correctly, because the networks/sessions
+-- scans use explicit column lists. Statement ORDER matters: ext_trunks and
+-- tenant_uplinks must exist before the ALTER that references them. Partial
+-- uniqueness is a STANDALONE index (an inline "UNIQUE(...) WHERE" is a syntax
+-- error on modernc and would quarantine the live DB via OpenResilient).
+
+-- ext_trunks: a physical NIC/bond the instance admin designates as external-
+-- capable and ROLE-DEDICATED (never also a raw vSwitch uplink — enforced by a
+-- service-layer guard). It is the parent for per-tenant VLAN subinterfaces
+-- (<iface>.<vid>), not enslaved to any bridge. orig_mtu/orig_offload capture the
+-- pre-designation state ONCE so teardown restores it byte-for-byte;
+-- teardown_pending makes the boot-reapply converge-to-desired-state (crash-safe).
+CREATE TABLE IF NOT EXISTS ext_trunks (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    iface            TEXT NOT NULL UNIQUE,
+    kind             TEXT NOT NULL DEFAULT 'nic',     -- 'nic' | 'bond'
+    mtu              INTEGER NOT NULL DEFAULT 1600,
+    qinq_capable     INTEGER NOT NULL DEFAULT 0,
+    offload_disabled INTEGER NOT NULL DEFAULT 0,
+    orig_mtu         INTEGER NOT NULL DEFAULT 0,
+    orig_offload     TEXT NOT NULL DEFAULT '',
+    teardown_pending INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- tenant_vlan_pools: an admin-reserved allocatable outer-VID range per (org,
+-- trunk). Mirrors Neutron network_vlan_ranges / Network Segment Ranges.
+CREATE TABLE IF NOT EXISTS tenant_vlan_pools (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id    INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    trunk_id  INTEGER NOT NULL REFERENCES ext_trunks(id) ON DELETE RESTRICT,
+    vid_min   INTEGER NOT NULL,
+    vid_max   INTEGER NOT NULL,
+    UNIQUE(org_id, trunk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vlan_pools_org ON tenant_vlan_pools(org_id);
+
+-- tenant_uplinks: the realized egress binding a tenant connects a vSwitch to by
+-- name. mode: 'access' (single 802.1q tag), 'qinq' (802.1ad S-tag, inner tags
+-- preserved), 'dedicated' (a whole NIC). outer_vid=0 is the sentinel for
+-- dedicated/unbound rows; the partial unique index below lets many 0-rows coexist
+-- on a trunk while rejecting a duplicate non-zero tag. The admin owns this table;
+-- an org admin only picks which of THEIR uplinks a network connects to.
+CREATE TABLE IF NOT EXISTS tenant_uplinks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    trunk_id        INTEGER REFERENCES ext_trunks(id) ON DELETE RESTRICT,
+    mode            TEXT NOT NULL DEFAULT 'access',
+    outer_vid       INTEGER NOT NULL DEFAULT 0,
+    dedicated_iface TEXT NOT NULL DEFAULT '',
+    egress_bridge   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'unbound',  -- 'unbound' | 'bound' | 'error'
+    error           TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(org_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_uplinks_org ON tenant_uplinks(org_id);
+CREATE INDEX IF NOT EXISTS idx_uplinks_trunk ON tenant_uplinks(trunk_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_uplink_trunk_vid ON tenant_uplinks(trunk_id, outer_vid) WHERE outer_vid > 0;
+
+-- The tenant-facing reference lives on tenant_networks (the v2 substrate, behind
+-- its RESTRICT FK) — NOT on networks — so there is one source of truth and the
+-- v2 lifecycle is preserved. NULL = internal/no egress (an old "segment").
+ALTER TABLE tenant_networks ADD COLUMN uplink_id INTEGER REFERENCES tenant_uplinks(id);
+`},
+	{47, "ext-trunk-shared", `
+-- A "shared" external trunk is a NIC/bond that is ALSO the management vSwitch's
+-- uplink (e.g. the mgmt bond): the admin wants tenant egress to ride the same
+-- physical link as management, separated only by VLAN tag. It is access-only
+-- (single 802.1q subinterfaces) and the parent is NEVER modified (no MTU raise,
+-- no offload toggles) so management is never disturbed; QinQ (which must change
+-- the parent's MTU/offload) is refused on a shared trunk in the service layer.
+-- STRICTLY ADDITIVE: one column with a constant default — an older binary rolled
+-- back over this schema ignores it (its ext_trunks scan uses an explicit column
+-- list) and behaves exactly as before.
+ALTER TABLE ext_trunks ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

@@ -50,12 +50,17 @@ func (s *Service) vrouterRuntimeOK(rt string) bool {
 	return rt == vrouter.RuntimeLXC || rt == vrouter.RuntimeNetns
 }
 
-// VRouterAvailable reports whether the admin can use any vRouter runtime here.
+// VRouterAvailable reports whether the caller (an org admin or instance admin)
+// can use any vRouter runtime here. A per-org admin gets the netns runtime; an
+// instance admin additionally gets lxc.
 func (s *Service) VRouterAvailable(p *Principal) bool {
-	if p == nil || !p.IsAdmin {
+	if p == nil || !p.atLeast("admin") {
 		return false
 	}
-	return vrouter.Available(vrouter.RuntimeLXC) || vrouter.Available(vrouter.RuntimeNetns)
+	if p.IsAdmin {
+		return vrouter.Available(vrouter.RuntimeLXC) || vrouter.Available(vrouter.RuntimeNetns)
+	}
+	return vrouter.Available(vrouter.RuntimeNetns)
 }
 
 // NetworkModeUser reports whether the daemon runs SLIRP (user-mode) networking,
@@ -122,7 +127,7 @@ func (s *Service) loadLegs(vrID int64) ([]vrouter.Leg, error) {
 
 // ListVRouters returns all vRouters for the org with live backend status.
 func (s *Service) ListVRouters(p *Principal) ([]VRouterView, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return nil, ErrUnauthorized
 	}
 	rows, err := s.db.Query(`SELECT `+vrouterCols+` FROM vrouters WHERE org_id=? ORDER BY name`, p.OrgID)
@@ -164,7 +169,7 @@ func (s *Service) ListVRouters(p *Principal) ([]VRouterView, error) {
 
 // GetVRouterView returns one vRouter with legs + live status.
 func (s *Service) GetVRouterView(p *Principal, id int64) (VRouterView, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return VRouterView{}, ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, id)
@@ -187,7 +192,7 @@ func (s *Service) GetVRouterView(p *Principal, id int64) (VRouterView, error) {
 // VRouterLive returns the vRouter's live routing state (route table, BGP/OSPF
 // neighbors) for the status poller. Cheap-ish (a few vtysh calls in the runtime).
 func (s *Service) VRouterLive(p *Principal, id int64) (vrouter.LiveStatus, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return vrouter.LiveStatus{}, ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, id)
@@ -206,12 +211,18 @@ func (s *Service) VRouterLive(p *Principal, id int64) (vrouter.LiveStatus, error
 
 // CreateVRouter inserts a creating-status row and provisions the runtime async.
 func (s *Service) CreateVRouter(p *Principal, in VRouterInput, ip string) (int64, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return 0, ErrUnauthorized
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		return 0, fmt.Errorf("a name is required")
+	}
+	// A per-org (non-instance) admin may only create the unprivileged netns
+	// runtime — an lxc vRouter is a privileged container on the host, which a
+	// tenant must never spawn. (Instance admins keep both.)
+	if !p.IsAdmin && in.Runtime != vrouter.RuntimeNetns {
+		return 0, fmt.Errorf("choose the netns runtime")
 	}
 	if !s.vrouterRuntimeOK(in.Runtime) {
 		if in.Runtime == vrouter.RuntimeVM {
@@ -221,6 +232,13 @@ func (s *Service) CreateVRouter(p *Principal, in VRouterInput, ip string) (int64
 	}
 	if !vrouter.Available(in.Runtime) {
 		return 0, fmt.Errorf("the %s runtime is not available on this host", in.Runtime)
+	}
+	// Router names are unique per ORG (migration 45). Check explicitly for a
+	// friendly message instead of surfacing the UNIQUE(org_id,name) constraint.
+	var dupe int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM vrouters WHERE org_id=? AND name=?`, p.OrgID, name).Scan(&dupe)
+	if dupe > 0 {
+		return 0, fmt.Errorf("a router named %q already exists in this organization", name)
 	}
 	cpus, mem := in.CPUs, in.MemMB
 	if cpus < 1 {
@@ -367,6 +385,9 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 	if err := s.guardMgmt(physIface); err != nil {
 		return err
 	}
+	if err := s.guardTrunk(physIface); err != nil {
+		return err
+	}
 	cands, _ := s.TransitCandidates(p)
 	ok := false
 	for _, c := range cands {
@@ -408,12 +429,15 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 // vRouter (its leg IP is the gateway) and attaches a new leg. Optionally runs
 // DHCP on the leg.
 func (s *Service) AttachInternalNetwork(p *Principal, vrID int64, name, cidr, gatewayCIDR string, dhcp bool, dhcpRange, dns, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
 	if err != nil {
 		return err
+	}
+	if v.Status == "creating" {
+		return fmt.Errorf("the router is still being created — wait a moment, then attach")
 	}
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(gatewayCIDR) == "" {
 		return fmt.Errorf("a name and the vRouter's gateway IP/CIDR are required")
@@ -460,10 +484,143 @@ func (s *Service) AttachInternalNetwork(p *Principal, vrID int64, name, cidr, ga
 	return nil
 }
 
+// AttachSegment attaches an EXISTING, owned tenant segment (resolved by its
+// tenant_networks id, scoped to the caller's org) as an internal leg of a
+// vRouter. The leg lands on the SEGMENT's own bridge — derived from the row,
+// never from client input (so a crafted request can't land a leg on a shared or
+// foreign bridge). Only a GATEWAYLESS segment may be attached: the router leg
+// becomes its sole gateway (no live gateway-ownership handoff). The leg's
+// gateway IP (gatewayCIDR) must sit inside the segment's subnet.
+func (s *Service) AttachSegment(p *Principal, vrID, tnetID int64, gatewayCIDR string, dhcp bool, dhcpRange, dns, ip string) error {
+	if !p.atLeast("admin") {
+		return ErrUnauthorized
+	}
+	v, err := s.getVRouter(p, vrID)
+	if err != nil {
+		return err
+	}
+	// Don't attach while the router is still provisioning: applyAndPush would race
+	// the background Provision goroutine (half-built FRR dir → zebra never loads
+	// the leg config). Make the caller wait until it reaches stopped/running.
+	if v.Status == "creating" {
+		return fmt.Errorf("the router is still being created — wait a moment, then attach the segment")
+	}
+	if v.Status == "error" {
+		return fmt.Errorf("the router is in an error state (%s) — fix or recreate it before attaching", v.Error)
+	}
+	// Resolve the segment, scoped to the caller's org. Anything not owned by the
+	// org (or not a tenant segment) is rejected here.
+	var netID, attachedTo int64
+	var bridge, segCIDR, segGW, segName string
+	err = s.db.QueryRow(`SELECT t.network_id,t.vrouter_id,t.name,COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,'')
+		FROM tenant_networks t JOIN networks n ON n.id=t.network_id WHERE t.id=? AND t.org_id=?`, tnetID, p.OrgID).
+		Scan(&netID, &attachedTo, &segName, &bridge, &segCIDR, &segGW)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("segment not found in this organization")
+	}
+	if err != nil {
+		return err
+	}
+	if bridge == "" || bridge == s.mgmtIface() {
+		return fmt.Errorf("refusing to attach a router leg to %q", bridge)
+	}
+	if attachedTo != 0 {
+		return fmt.Errorf("that segment is already attached to a router")
+	}
+	if strings.TrimSpace(segGW) != "" {
+		return fmt.Errorf("that segment has its own gateway — detach its gateway, or create a routed (gatewayless) segment, before attaching it to a router")
+	}
+	gatewayCIDR = strings.TrimSpace(gatewayCIDR)
+	gwIP := gatewayCIDR
+	if i := strings.IndexByte(gwIP, '/'); i >= 0 {
+		gwIP = gwIP[:i]
+	}
+	if net.ParseIP(gwIP) == nil {
+		return fmt.Errorf("a gateway IP/CIDR for the router leg is required (e.g. 10.50.0.1/24)")
+	}
+	if segCIDR != "" {
+		if _, ipnet, e := net.ParseCIDR(segCIDR); e == nil && !ipnet.Contains(net.ParseIP(gwIP)) {
+			return fmt.Errorf("gateway %s is not inside the segment subnet %s", gwIP, segCIDR)
+		}
+	}
+	if dhcp {
+		if err := validDHCPRange(dhcpRange); err != nil {
+			return err
+		}
+	}
+	idx := s.nextLegIdx(vrID)
+	if idx == 0 {
+		idx = 1
+	}
+	// Record the gateway on the segment's networks row (display + default route
+	// source for VMs); the router leg actually answers for it on the same L2.
+	if _, err := s.db.Exec(`UPDATE networks SET gateway=? WHERE id=?`, gwIP, netID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT INTO vrouter_legs(vrouter_id,idx,kind,bridge,network_id,iface_name,cidr,dhcp,dhcp_range,dhcp_dns)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`, vrID, idx, vrouter.LegInternal, bridge, netID, "eth"+strconv.Itoa(idx),
+		gatewayCIDR, b2iDHCP(dhcp), dhcpRange, dns); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tenant_networks SET vrouter_id=? WHERE id=?`, vrID, tnetID); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "vrouter.segment.attach", "vrouter", v.Name, ip,
+		map[string]any{"segment": segName, "gateway": gwIP, "dhcp": dhcp})
+	if err := s.applyAndPush(vrID); err != nil {
+		return err
+	}
+	if dhcp {
+		return s.applyDHCP(vrID, idx)
+	}
+	return nil
+}
+
+// DetachSegment removes a tenant segment's leg from a vRouter without destroying
+// the segment (its bridge/networks row + any VMs survive). It deletes the in-ns
+// interface (which removes the veth pair, leaving the segment bridge intact),
+// drops the leg row, clears the gateway, and re-pushes FRR.
+func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) error {
+	if !p.atLeast("admin") {
+		return ErrUnauthorized
+	}
+	v, err := s.getVRouter(p, vrID)
+	if err != nil {
+		return err
+	}
+	// Resolve the owning tenant segment by its backing networks id, scoped to the
+	// org — rejects a foreign/non-segment network_id.
+	var tnetID int64
+	var segName string
+	err = s.db.QueryRow(`SELECT id,name FROM tenant_networks WHERE network_id=? AND org_id=?`, netID, p.OrgID).Scan(&tnetID, &segName)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("segment not found in this organization")
+	}
+	if err != nil {
+		return err
+	}
+	var idx int
+	if err := s.db.QueryRow(`SELECT idx FROM vrouter_legs WHERE vrouter_id=? AND network_id=? AND kind='internal'`, vrID, netID).Scan(&idx); err == sql.ErrNoRows {
+		return fmt.Errorf("that segment is not attached to this router")
+	} else if err != nil {
+		return err
+	}
+	if v.NetnsName != "" {
+		netdrv.NetnsDelLink(v.NetnsName, "eth"+strconv.Itoa(idx))
+	}
+	if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND network_id=? AND kind='internal'`, vrID, netID); err != nil {
+		return err
+	}
+	s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE id=?`, tnetID)
+	s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, netID)
+	s.audit(p, p.OrgID, "vrouter.segment.detach", "vrouter", v.Name, ip, map[string]any{"segment": segName})
+	return s.applyAndPush(vrID)
+}
+
 // UpdateInternalDHCP changes an internal port group's DHCP settings (enable,
 // range, DNS) after creation and re-applies dnsmasq. idx identifies the leg.
 func (s *Service) UpdateInternalDHCP(p *Principal, vrID int64, idx int, dhcp bool, dhcpRange, dns, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -598,7 +755,7 @@ func (s *Service) renderVRouterFRR(v vrouter.VRouter, legs []vrouter.Leg) (strin
 // mutateVRouterFRR loads the stored routing.Config, applies fn, persists, audits,
 // re-renders and pushes it into the runtime.
 func (s *Service) mutateVRouterFRR(p *Principal, vrID int64, ip, action string, fn func(*routing.Config)) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -772,7 +929,7 @@ func (s *Service) UpdateTransitLink(p *Principal, vrID int64, cidr, ip string) e
 // vRouter's gateway IP on it (idx = leg index). Re-renders FRR (zebra re-assigns
 // the leg IP) and re-applies DHCP if enabled.
 func (s *Service) UpdateInternalNetwork(p *Principal, vrID int64, idx int, name, cidr, gatewayCIDR, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -806,7 +963,7 @@ func (s *Service) UpdateInternalNetwork(p *Principal, vrID int64, idx int, name,
 // ---- lifecycle -----------------------------------------------------------
 
 func (s *Service) StartVRouter(p *Principal, vrID int64, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -818,7 +975,7 @@ func (s *Service) StartVRouter(p *Principal, vrID int64, ip string) error {
 }
 
 func (s *Service) StopVRouter(p *Principal, vrID int64, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -837,9 +994,24 @@ func (s *Service) StopVRouter(p *Principal, vrID int64, ip string) error {
 	return nil
 }
 
-// DeleteVRouter tears everything down in a safe order.
+// isTenantSegment reports whether a networks row is an ATTACHED tenant segment
+// (owned by the tenant-networks lifecycle), as opposed to an internal port group
+// this vRouter created itself. Attached segments survive the router.
+func (s *Service) isTenantSegment(netID int64) bool {
+	if netID == 0 {
+		return false
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM tenant_networks WHERE network_id=?`, netID).Scan(&n)
+	return n > 0
+}
+
+// DeleteVRouter tears everything down in a safe order. Legs that are ATTACHED
+// tenant segments are only detached (their networks row + bridge are owned by
+// the tenant-networks lifecycle and may still run VMs); only internal port
+// groups this router created are torn down.
 func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -847,9 +1019,21 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 		return err
 	}
 	legs, _ := s.loadLegs(vrID)
-	// Refuse if any VM is still bound to an internal port group.
+	// A transit leg holds a physical NIC — only an INSTANCE admin may cause its
+	// detach. Per-org admins build netns routers with no transit, so this never
+	// blocks them; it stops a tenant from triggering a host-plane NIC change.
+	if !p.IsAdmin {
+		for _, l := range legs {
+			if l.Kind == vrouter.LegTransit {
+				return fmt.Errorf("this router has an uplink (transit) link — an instance administrator must remove it first")
+			}
+		}
+	}
+	// Refuse only if a VM is still bound to an OWNED internal port group (one
+	// this router created). Attached tenant segments have their own lifecycle
+	// and survive the router, so they do not block the delete.
 	for _, l := range legs {
-		if l.Kind == vrouter.LegInternal && l.NetworkID != 0 {
+		if l.Kind == vrouter.LegInternal && l.NetworkID != 0 && !s.isTenantSegment(l.NetworkID) {
 			var n int
 			s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE network_id=? AND deleted_at IS NULL`, l.NetworkID).Scan(&n)
 			if n > 0 {
@@ -862,10 +1046,20 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 		_ = b.Stop(v)
 		_ = b.Destroy(v)
 	}
-	// Release transit NIC, delete internal networks + bridges.
+	// Release transit NIC, delete OWNED internal networks + bridges, detach
+	// attached segments without destroying them.
 	for _, l := range legs {
 		if l.Kind == vrouter.LegTransit && l.PhysIface != "" {
 			_ = netdrv.DetachFromBridge(l.PhysIface)
+		}
+		if l.Kind == vrouter.LegInternal && s.isTenantSegment(l.NetworkID) {
+			// Attached tenant segment: release the attach link only. Its
+			// networks row and bridge are torn down by DeleteTenantNetwork.
+			// Also clear the gateway the router owned, so the segment returns to
+			// an attachable (gatewayless) state.
+			s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE network_id=?`, l.NetworkID)
+			s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, l.NetworkID)
+			continue
 		}
 		if l.Kind == vrouter.LegInternal && l.NetworkID != 0 {
 			_ = s.DeleteNetwork(p, l.NetworkID, ip)
@@ -968,9 +1162,9 @@ func delStr(s []string, i int) []string {
 // VRDiagram is the data for the vRouter network diagram (port groups → vRouter →
 // transit → external ports).
 type VRDiagram struct {
-	Name     string             `json:"name"`
-	Internal []VRDiagInternal   `json:"internal"`
-	Transit  *VRDiagTransit     `json:"transit,omitempty"`
+	Name     string           `json:"name"`
+	Internal []VRDiagInternal `json:"internal"`
+	Transit  *VRDiagTransit   `json:"transit,omitempty"`
 }
 type VRDiagInternal struct {
 	Name  string `json:"name"`  // port-group name
@@ -988,7 +1182,7 @@ type VRDiagTransit struct {
 
 // VRouterDiagram builds the diagram data for one vRouter.
 func (s *Service) VRouterDiagram(p *Principal, id int64) (*VRDiagram, error) {
-	if !p.IsAdmin {
+	if !p.atLeast("admin") {
 		return nil, ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, id)

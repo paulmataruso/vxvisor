@@ -1,0 +1,155 @@
+{{define "trunks.html"}}{{template "head" .}}
+<div class="card">
+  <p class="muted" style="margin:0">This is the <b>admin</b> side of tenant networking. Tenants build their own networks normally and connect them to a named <b>uplink</b>; here you decide what that uplink <em>really</em> is on the wire. Designate a physical NIC or bond as an <b>external trunk</b>, then give each tenant an uplink that egresses as a <b>dedicated VLAN</b> (single 802.1Q tag), <b>QinQ</b> (a per-tenant outer tag with the tenant's own VLANs carried inside), or a <b>dedicated interface</b>. Everything past the trunk — routing the tags where they belong — is your physical fabric's job.</p>
+</div>
+
+<!-- ===================== External trunks ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>External trunks</h2>
+    <button class="btn primary" data-modal="m-trunk">+ Designate trunk</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px">A <strong>dedicated</strong> trunk (a free NIC/bond) can't also be a vSwitch uplink, bond member, or vRouter transit NIC, and can carry QinQ (which raises MTU and disables VLAN offload — original state recorded and restored on removal). A <strong>shared</strong> trunk is your management uplink itself: tenant traffic rides it as access VLANs beside untagged management, the parent is never modified, and QinQ is not available there.</p>
+  {{if .Trunks}}
+  <table>
+    <tr><th>Interface</th><th>Kind</th><th>MTU</th><th>Mode</th><th>Slaves</th><th>Uplinks</th><th></th></tr>
+    {{range .Trunks}}
+    <tr{{if .TeardownPending}} style="opacity:.5"{{end}}>
+      <td class="mono"><strong>{{.Iface}}</strong>{{if .Shared}} <span class="pill" title="Shares the management uplink — tenant egress rides it as access VLANs; the parent is never modified">shared w/ mgmt</span>{{end}}</td>
+      <td><span class="pill">{{.Kind}}</span></td>
+      <td class="mono">{{.MTU}}</td>
+      <td>{{if .QinQCapable}}<span class="pill">QinQ (802.1ad)</span>{{else}}<span class="pill">802.1Q</span>{{end}}</td>
+      <td class="mono muted" style="font-size:12px">{{range .Slaves}}{{.}} {{end}}</td>
+      <td class="mono">{{.UplinkCount}}</td>
+      <td style="text-align:right">
+        {{if .QinQCapable}}<button class="btn sm" onclick="verifyQinQ({{.ID}},this)">Verify QinQ</button>{{end}}
+        <form method="post" action="/trunks/{{.ID}}/undesignate" style="display:inline" onsubmit="return confirm('Remove trunk {{.Iface}}? Restores its original MTU/offload. Refused if uplinks/pools still reference it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No external trunks yet. Designate a free NIC or bond to carry tenant egress.</div>{{end}}
+</div>
+
+<!-- ===================== VLAN pools ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Per-tenant VLAN pools</h2>
+    <button class="btn primary" data-modal="m-pool"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Set pool</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px">Reserve an outer-VLAN range for a tenant on a trunk (matching what you've configured switch-side). Uplinks then auto-allocate tags from it — or you can type an explicit tag per uplink.</p>
+  {{if .Pools}}
+  <table>
+    <tr><th>Org</th><th>Trunk</th><th>Range</th><th>Used</th><th>Available</th><th></th></tr>
+    {{range .Pools}}
+    <tr><td class="mono">{{.OrgID}}</td><td class="mono">{{.TrunkID}}</td><td class="mono">{{.VidMin}}–{{.VidMax}}</td><td class="mono">{{.Used}}</td><td class="mono">{{.Available}}</td>
+      <td style="text-align:right"><form method="post" action="/trunks/pool/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this VLAN pool? Refused if uplinks still use a tag from it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No pools yet. Optional — you can also assign explicit tags per uplink.</div>{{end}}
+</div>
+
+<!-- ===================== Tenant uplinks ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>Tenant uplinks</h2>
+    <button class="btn primary" data-modal="m-uplink"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Create uplink</button>
+  </div>
+  <p class="muted" style="margin:0 0 10px">Each uplink is what one tenant network will egress through. The tenant connects a network to it by name from their own Networks page — they never see the trunk or the tag.</p>
+  {{if .Uplinks}}
+  <table>
+    <tr><th>Org</th><th>Uplink</th><th>Mode</th><th>Tag / NIC</th><th>Trunk</th><th>Connected to</th><th>Status</th><th></th></tr>
+    {{range .Uplinks}}
+    <tr>
+      <td>{{.OrgName}}</td>
+      <td><strong>{{.Name}}</strong></td>
+      <td><span class="pill">{{.Mode}}</span></td>
+      <td class="mono">{{if eq .Mode "dedicated"}}{{.DedIface}}{{else}}VLAN {{.OuterVID}}{{end}}</td>
+      <td class="mono muted">{{.TrunkName}}</td>
+      <td class="muted">{{if .InUseBy}}{{.InUseBy}}{{else}}—{{end}}</td>
+      <td>{{if eq .Status "bound"}}<span class="pill running">● bound</span>{{else if eq .Status "error"}}<span class="pill" style="color:var(--danger)" title="{{.Error}}">● error</span>{{else}}<span class="pill">unbound</span>{{end}}</td>
+      <td style="text-align:right"><form method="post" action="/trunks/uplink/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete uplink {{.Name}}? Tears down its subinterface. Refused if a VM is live on its network.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No uplinks yet.</div>{{end}}
+</div>
+
+<!-- ===================== Danger: disable ===================== -->
+{{if .Trunks}}
+<div class="card">
+  <div class="card-head"><h2>Roll back</h2></div>
+  <p class="muted" style="margin:0 0 10px">Tear down <strong>all</strong> tenant egress: delete every uplink subinterface, restore every trunk's original MTU/offload, and remove all trunks and pools. Host management and the default vSwitch are untouched. Internal (unconnected) tenant networks keep working.</p>
+  <form method="post" action="/trunks/disable" onsubmit="return confirm('Disable ALL tenant egress and restore trunks to their pre-feature state?')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn danger">Disable tenant egress</button></form>
+</div>
+{{end}}
+
+<!-- ===================== modals ===================== -->
+<div class="modal" id="m-trunk"><div class="modal-card">
+  <div class="modal-head"><h3>Designate external trunk</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/trunks/designate">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Interface
+      <select name="iface" id="trunkiface" onchange="trunkIface()" required><option value="">— pick an interface —</option>
+        {{if .Candidates}}<optgroup label="Dedicated (free NIC/bond — supports QinQ)">{{range .Candidates}}<option value="{{.Name}}">{{.Name}}{{if .Neighbor}} ({{.Neighbor}}){{end}}</option>{{end}}</optgroup>{{end}}
+        {{if .SharedCands}}<optgroup label="Shared with management (access VLANs only)">{{range .SharedCands}}<option value="{{.Name}}" data-shared="1">{{.Name}} — shares mgmt uplink</option>{{end}}</optgroup>{{end}}
+      </select>
+    </label>
+    <label class="fld" id="fld-trunkmtu">MTU<input type="number" name="mtu" id="trunkmtu" value="1600" min="1500" max="9000" title="Raised so tagged/double-tagged frames aren't dropped; +4 for one tag, +8 for QinQ."></label>
+    <label class="fld" id="fld-trunkqinq">QinQ capable<select name="qinq" id="trunkqinq"><option value="0">no — single 802.1Q tags only</option><option value="1">yes — allow QinQ (disables NIC VLAN offload)</option></select></label>
+    <p class="muted" id="sharednote" style="display:none;margin:0;font-size:12px">This interface carries host <b>management</b>. It will be shared as an <b>access</b> trunk: tenant networks egress as single-tagged VLANs alongside untagged management, and the parent is never modified (no MTU/offload change). QinQ isn't available on a shared uplink.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Designate</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-pool"><div class="modal-card">
+  <div class="modal-head"><h3>Set VLAN pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/trunks/pool">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Org<select name="org_id" required>{{range .Orgs}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Trunk<select name="trunk_id" required>{{range .Trunks}}<option value="{{.ID}}">{{.Iface}}</option>{{end}}</select></label>
+    <label class="fld">VLAN min<input type="number" name="vid_min" min="2" max="4094" placeholder="1000" required></label>
+    <label class="fld">VLAN max<input type="number" name="vid_max" min="2" max="4094" placeholder="1099" required></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save pool</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-uplink"><div class="modal-card">
+  <div class="modal-head"><h3>Create tenant uplink</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/trunks/uplink">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Org<select name="org_id" required>{{range .Orgs}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Uplink name<input type="text" name="name" placeholder="wan" required></label>
+    <label class="fld">Mode<select name="mode" id="uplinkmode" onchange="uplinkMode()"><option value="access">dedicated VLAN (single 802.1Q tag)</option><option value="qinq">QinQ (per-tenant outer tag, inner VLANs preserved)</option><option value="dedicated">dedicated interface (whole NIC)</option></select></label>
+    <label class="fld" id="fld-trunk">Trunk<select name="trunk_id">{{range .Trunks}}<option value="{{.ID}}">{{.Iface}}</option>{{end}}</select></label>
+    <label class="fld" id="fld-vid">Tag<input type="number" name="vid" value="0" min="0" max="4094" title="0 = auto-allocate from the tenant's pool; or type an explicit tag"></label>
+    <label class="fld" id="fld-ded" style="display:none">Dedicated NIC<select name="ded_iface"><option value="">— pick a free NIC —</option>{{range .Candidates}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create uplink</button></div>
+  </form>
+</div></div>
+
+<script>
+function trunkIface(){
+  var sel=document.getElementById('trunkiface');
+  var opt=sel.options[sel.selectedIndex];
+  var shared=opt&&opt.getAttribute('data-shared')==='1';
+  var q=document.getElementById('trunkqinq'), m=document.getElementById('trunkmtu');
+  document.getElementById('sharednote').style.display=shared?'':'none';
+  document.getElementById('fld-trunkqinq').style.display=shared?'none':'';
+  document.getElementById('fld-trunkmtu').style.display=shared?'none':'';
+  if(shared){ q.value='0'; }            // shared trunks are access-only; parent MTU untouched
+}
+function uplinkMode(){
+  var m=document.getElementById('uplinkmode').value;
+  document.getElementById('fld-trunk').style.display=(m==='dedicated')?'none':'';
+  document.getElementById('fld-vid').style.display=(m==='dedicated')?'none':'';
+  document.getElementById('fld-ded').style.display=(m==='dedicated')?'':'none';
+}
+function verifyQinQ(id,btn){
+  btn.disabled=true;btn.textContent='Checking…';
+  fetch('/trunks/'+id+'/verify').then(function(r){return r.json()}).then(function(j){
+    alert(j.ok?('QinQ looks OK:\n'+j.detail):('QinQ NOT ready:\n'+j.detail));
+  }).catch(function(e){alert('verify failed: '+e)}).finally(function(){btn.disabled=false;btn.textContent='Verify QinQ'});
+}
+</script>
+{{template "foot" .}}{{end}}

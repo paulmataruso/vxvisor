@@ -16,16 +16,27 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	}
 	bonds, _ := s.svc.ListBonds(p)
 	vswitches, _ := s.svc.ListVSwitches(p)
+	tnets, _ := s.svc.ListTenantNetworks(p)
+	uplinks, _ := s.svc.AttachableUplinks(p)
 	s.render(w, p, "networks.html", "networks", map[string]any{
-		"Networks":     list,
-		"Bonds":        bonds,
-		"VSwitches":    vswitches,
-		"MgmtBridge":   s.svc.MgmtInterface(),
-		"ClusterPeers": s.svc.ClusterPeerUnderlayIPs(p),
+		"Networks":       list,
+		"TenantNetworks": tnets,
+		"Uplinks":        uplinks,
+		"Bonds":          bonds,
+		"VSwitches":      vswitches,
+		"MgmtBridge":     s.svc.MgmtInterface(),
+		"ClusterPeers":   s.svc.ClusterPeerUnderlayIPs(p),
 	})
 }
 
 func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		// Raw port groups / VXLAN networks bind vSwitch uplinks and host underlay
+		// NICs — physical infrastructure. Per-org admins create isolated segments
+		// instead (the Segments card), which can't reach the physical network.
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)
 		return
@@ -55,6 +66,10 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *servic
 }
 
 func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !p.IsAdmin {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)
 		return
@@ -62,6 +77,62 @@ func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *servic
 	if err := s.svc.DeleteNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		http.Error(w, err.Error(), statusFor(err))
 		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// ---- tenant networks -----------------------------------------------------
+
+func (s *Server) createTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	dhcp := r.FormValue("dhcp") == "1"
+	if _, err := s.svc.CreateTenantNetwork(p, r.FormValue("name"), r.FormValue("cidr"), r.FormValue("gateway"),
+		dhcp, r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) deleteTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		http.Error(w, err.Error(), statusFor(err))
+		return
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// connectUplink connects a tenant network to one of the org's admin-provisioned
+// uplinks (org admin); the uplink device is realized into the network's bridge.
+func (s *Server) connectUplink(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.ConnectNetworkUplink(p, atoi(r.PathValue("id")), atoi(r.FormValue("uplink_id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Network connected to the uplink — it now has external egress.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) disconnectUplink(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DisconnectNetworkUplink(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Network disconnected from its uplink.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

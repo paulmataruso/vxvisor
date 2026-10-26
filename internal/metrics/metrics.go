@@ -33,7 +33,7 @@ type Sample struct {
 	IOWait    float64 `json:"iowait"`     // host CPU iowait %
 	CPUPres   float64 `json:"cpu_pres"`   // PSI cpu "some" avg10 (host)
 	MemPres   float64 `json:"mem_pres"`   // PSI memory "some" avg10 (host)
-	IOPres    float64 `json:"io_pres"`    // PSI io "some" avg10 (host)
+	IOPres    float64 `json:"io_pres"`    // busiest physical disk utilization % (REAL device busy; NOT PSI io — see hostDiskBusy)
 	TS        string  `json:"ts"`
 }
 
@@ -67,6 +67,9 @@ type Collector struct {
 	mu       sync.Mutex
 	prevHost cpuJiffies
 	prevDisk ioCounters
+
+	prevDiskTicks   map[string]uint64 // per-device io_ticks (ms) for device-busy %
+	prevDiskTicksAt time.Time
 	prevNet  ioCounters
 	prevVM   map[int]vmCPU
 	hostRing []Sample
@@ -88,7 +91,12 @@ func (c *Collector) Collect() {
 
 	host := Sample{Scope: "host", Name: "host", TS: ts}
 	host.CPUPct, host.IOWait = c.hostCPU()
-	host.CPUPres, host.MemPres, host.IOPres = readPSI()
+	host.CPUPres, host.MemPres, _ = readPSI()
+	// I/O "pressure" is reported as the busiest physical disk's real utilization
+	// (io_ticks delta), NOT PSI io: PSI io over-reports on some kernels (observed
+	// pinned ~85% with zero D-state tasks, zero blkio-wait, idle devices), which
+	// alarmed operators with a phantom. Device busy % reflects actual saturation.
+	host.IOPres = c.hostDiskBusy(now)
 	host.MemUsed, host.MemTotal = hostMem()
 	host.DiskUsed, host.DiskTotal = diskUsage(c.diskDir)
 	host.DiskRead, host.DiskWrite = c.hostDiskIO(now)
@@ -286,6 +294,71 @@ func (c *Collector) hostNetIO(now time.Time) (rxBps, txBps int64) {
 	}
 	ds := now.Sub(prev.at).Seconds()
 	return rate(rx, prev.a, ds), rate(tx, prev.b, ds)
+}
+
+// hostDiskBusy returns the busiest physical disk's utilization % since the last
+// sample, from /sys/block/<dev>/stat field 10 (io_ticks: milliseconds during
+// which the device had I/O in flight). busy% = Δio_ticks / Δwall_ms * 100. This
+// is the same quantity `iostat -x` prints as %util and reflects REAL device
+// saturation — unlike PSI io, which can read high with no actual I/O happening.
+func (c *Collector) hostDiskBusy(now time.Time) float64 {
+	cur := readBlockIOTicks()
+	c.mu.Lock()
+	prev := c.prevDiskTicks
+	prevAt := c.prevDiskTicksAt
+	c.prevDiskTicks = cur
+	c.prevDiskTicksAt = now
+	c.mu.Unlock()
+	if prevAt.IsZero() {
+		return 0
+	}
+	ms := now.Sub(prevAt).Seconds() * 1000
+	if ms <= 0 {
+		return 0
+	}
+	var max float64
+	for dev, t := range cur {
+		p, ok := prev[dev]
+		if !ok || t < p {
+			continue
+		}
+		if busy := 100 * float64(t-p) / ms; busy > max {
+			max = busy
+		}
+	}
+	if max > 100 {
+		max = 100
+	}
+	return round2(max)
+}
+
+// readBlockIOTicks reads per-device io_ticks (ms with I/O in flight) for whole
+// physical disks, skipping virtual/loopback/ram/dm devices.
+func readBlockIOTicks() map[string]uint64 {
+	out := map[string]uint64{}
+	ents, err := os.ReadDir("/sys/block")
+	if err != nil {
+		return out
+	}
+	for _, e := range ents {
+		name := e.Name()
+		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") ||
+			strings.HasPrefix(name, "dm-") || strings.HasPrefix(name, "zram") ||
+			strings.HasPrefix(name, "sr") || strings.HasPrefix(name, "md") {
+			continue
+		}
+		data, err := os.ReadFile("/sys/block/" + name + "/stat")
+		if err != nil {
+			continue
+		}
+		f := strings.Fields(string(data))
+		if len(f) < 10 {
+			continue
+		}
+		ticks, _ := strconv.ParseUint(f[9], 10, 64) // field 10: io_ticks (ms)
+		out[name] = ticks
+	}
+	return out
 }
 
 // readBlockBytes sums read/written bytes across whole physical disks (via

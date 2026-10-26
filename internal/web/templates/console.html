@@ -58,6 +58,7 @@
     <option value="/console/{{.Session.ID}}" selected>VNC (noVNC)</option>
     <option value="/console/{{.Session.ID}}/serial">Serial (text)</option>
   </select>
+  {{if .GuacEnabled}}<a class="cbtn" id="k-adv" href="/console/{{.Session.ID}}/advanced" target="_blank" rel="noopener" title="Open this VM's console through the RustGuac gateway (browser VNC/SPICE) in a new tab">⚡ RustGuac</a>{{end}}
   <span class="sep"></span>
   <button class="cbtn" id="k-cad" title="Ctrl+Alt+Del">Ctrl+Alt+Del</button>
   <select class="cbtn" id="k-combo" title="Send a key combo">

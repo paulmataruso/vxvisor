@@ -29,6 +29,26 @@ func (s *Service) CreateNetwork(p *Principal, n netdrv.Network, ip string) (int6
 	if n.Mode == "" {
 		n.Mode = "user"
 	}
+	// A raw VXLAN port group binds a host underlay NIC and takes a free-form VNI
+	// — an instance-admin-only operation. Per-org admins build isolated segments
+	// through the tenant-network path (server-chosen bridge, allocated identity),
+	// never this free-text form. (Internal callers pass p as an instance admin.)
+	if n.Mode == "vxlan" && !p.IsAdmin {
+		return 0, ErrUnauthorized
+	}
+	// Cross-tenant collision guard: refuse a TAGGED port group (vlan_id>0) whose
+	// bridge+VLAN is already claimed by a DIFFERENT org — that would merge two
+	// tenants onto one 802.1q segment. Untagged (vlan_id=0) is intentionally left
+	// alone so the historical shared-bridge default still works. Advisory: internal
+	// inserts (default port group, vRouter legs, VXLAN realize) bypass this method.
+	if n.VLANID > 0 && n.Bridge != "" {
+		var other int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM networks WHERE bridge=? AND vlan_id=? AND org_id<>?`,
+			n.Bridge, n.VLANID, p.OrgID).Scan(&other)
+		if other > 0 {
+			return 0, fmt.Errorf("VLAN %d on bridge %s is already in use by another organization", n.VLANID, n.Bridge)
+		}
+	}
 	id, err := s.net.CreateNetwork(n)
 	if err != nil {
 		return 0, err

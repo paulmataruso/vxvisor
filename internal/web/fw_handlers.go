@@ -12,7 +12,7 @@ import (
 // fetch (?ajax=1 → JSON) and a classic form POST (→ redirect) fallback.
 
 func (s *Server) fwPage(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	if !p.IsAdmin {
+	if !p.OrgAdmin() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

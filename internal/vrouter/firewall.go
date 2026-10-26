@@ -176,7 +176,7 @@ func RenderFirewall(vr VRouter, legs []Leg, f VRFirewall) string {
 		if z.Builtin {
 			idxs = nil
 			for _, l := range legs {
-				if l.Kind == LegTransit {
+				if l.Kind == LegTransit || l.Kind == LegUplink {
 					idxs = append(idxs, l.Idx)
 				}
 			}

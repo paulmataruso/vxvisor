@@ -22,6 +22,28 @@ type Config struct {
 	AD      ADConfig      `toml:"ad"`
 	Update  UpdateConfig  `toml:"update"`
 	License LicenseConfig `toml:"license"`
+	Guac    GuacConfig    `toml:"guac"`
+}
+
+// GuacConfig is the OPTIONAL rustguac "advanced console" integration — a test
+// add-on that fronts a local rustguac+guacd (browser SSH/RDP/VNC/SPICE) through
+// vdxd's own authentication. It is OFF unless Enabled is true and Upstream +
+// APIKey are set, so leaving the [guac] section out (or Enabled=false) is a
+// complete rollback: vdxd behaves exactly as before and noVNC is untouched.
+type GuacConfig struct {
+	// Enabled turns the whole feature on. Default false.
+	Enabled bool `toml:"enabled"`
+	// Upstream is the loopback address of the local rustguac server (never
+	// network-exposed), e.g. "127.0.0.1:8089".
+	Upstream string `toml:"upstream"`
+	// APIKey is the rustguac admin API key vdxd uses server-to-server to mint
+	// sessions and single-use WebSocket tickets. Never sent to the browser.
+	APIKey string `toml:"api_key"`
+	// ProxyAddr is the address vdxd's cookie-gated reverse proxy for rustguac
+	// listens on (a browser-reachable mgmt address + port, e.g.
+	// "172.16.0.163:8767"). rustguac itself stays on loopback; this is the only
+	// path a browser can reach it, and it requires a valid vdxd session.
+	ProxyAddr string `toml:"proxy_addr"`
 }
 
 // ClusterConfig describes multi-node operation: the VXLAN overlay that stitches
@@ -122,10 +144,10 @@ type OIDCConfig struct {
 	// Enabled turns on the "Sign in with SSO" button. All fields come from the
 	// operator's identity provider; nothing is hard-coded or phoned home.
 	Enabled      bool   `toml:"enabled"`
-	Issuer       string `toml:"issuer"`        // e.g. https://accounts.example.com
+	Issuer       string `toml:"issuer"` // e.g. https://accounts.example.com
 	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
-	RedirectURL  string `toml:"redirect_url"`  // https://<this-host>/oidc/callback
+	RedirectURL  string `toml:"redirect_url"` // https://<this-host>/oidc/callback
 }
 
 // ADConfig configures Active Directory / LDAP bind authentication. When enabled,
@@ -134,19 +156,19 @@ type OIDCConfig struct {
 // Set up is intentionally minimal: URL + domain is enough for UPN-bind auth; the
 // service-account + group fields are only needed for admin-group → role mapping.
 type ADConfig struct {
-	Enabled bool   `toml:"enabled"`
-	URL     string `toml:"url"`     // ldap://dc.example.com:389 or ldaps://dc.example.com:636
-	Domain  string `toml:"domain"`  // AD domain for UPN bind, e.g. corp.example.com (user → user@domain)
-	StartTLS bool  `toml:"starttls"` // upgrade a plain ldic:// connection to TLS before bind
-	Insecure bool  `toml:"insecure"` // skip TLS cert verification (lab/self-signed only)
+	Enabled  bool   `toml:"enabled"`
+	URL      string `toml:"url"`      // ldap://dc.example.com:389 or ldaps://dc.example.com:636
+	Domain   string `toml:"domain"`   // AD domain for UPN bind, e.g. corp.example.com (user → user@domain)
+	StartTLS bool   `toml:"starttls"` // upgrade a plain ldic:// connection to TLS before bind
+	Insecure bool   `toml:"insecure"` // skip TLS cert verification (lab/self-signed only)
 
 	// Optional directory search (for role mapping and/or sAMAccountName→DN). Needs
 	// a read-only service account to bind as first.
-	BindDN       string `toml:"bind_dn"`       // service account DN (or UPN)
+	BindDN       string `toml:"bind_dn"` // service account DN (or UPN)
 	BindPassword string `toml:"bind_password"`
-	BaseDN       string `toml:"base_dn"`       // search base, e.g. DC=corp,DC=example,DC=com
-	UserFilter   string `toml:"user_filter"`   // default (&(objectClass=user)(sAMAccountName=%s))
-	AdminGroup   string `toml:"admin_group"`   // users in this group (CN or full DN) become instance admins
+	BaseDN       string `toml:"base_dn"`     // search base, e.g. DC=corp,DC=example,DC=com
+	UserFilter   string `toml:"user_filter"` // default (&(objectClass=user)(sAMAccountName=%s))
+	AdminGroup   string `toml:"admin_group"` // users in this group (CN or full DN) become instance admins
 }
 
 type UpdateConfig struct {

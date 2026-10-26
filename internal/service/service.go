@@ -233,6 +233,13 @@ func (p *Principal) effectiveRank() int {
 
 func (p *Principal) atLeast(role string) bool { return p.effectiveRank() >= roleRank[role] }
 
+// OrgAdmin reports whether the caller may administer the CURRENT org's own
+// resources (segments, internal routers, firewall). True for an org admin/owner
+// or an instance admin. Exposed to templates (which otherwise only have
+// .P.IsAdmin) to gate the per-tenant network surface. It does NOT grant access
+// to host/physical resources — those stay gated on IsAdmin.
+func (p *Principal) OrgAdmin() bool { return p.atLeast("admin") }
+
 // SwitchOrg changes the caller's current org after verifying access.
 func (s *Service) SwitchOrg(p *Principal, orgID int64) error {
 	for _, o := range p.Orgs {
@@ -722,6 +729,10 @@ func (s *Service) CreateOrg(p *Principal, name, slug, ip string) (int64, error) 
 		return 0, err
 	}
 	_ = s.store.AddMember(id, p.User.ID, "owner")
+	// Isolate the new org by default: give it a dedicated isolated tenant network
+	// so its VMs don't share an L2 segment with other orgs. Best-effort — a
+	// failure here must not fail org creation.
+	s.provisionDefaultForOrg(id)
 	s.audit(p, id, "org.create", "org", slug, ip, map[string]any{"name": name})
 	return id, nil
 }

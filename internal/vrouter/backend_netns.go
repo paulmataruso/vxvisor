@@ -23,8 +23,11 @@ import (
 // (see persist.go). Per-daemon crash supervision is a documented follow-up.
 type netnsBackend struct{}
 
-func (netnsBackend) Kind() string    { return RuntimeNetns }
-func (netnsBackend) available() bool { _, err := exec.LookPath("ip"); return err == nil && frrBinsPresent() }
+func (netnsBackend) Kind() string { return RuntimeNetns }
+func (netnsBackend) available() bool {
+	_, err := exec.LookPath("ip")
+	return err == nil && frrBinsPresent()
+}
 
 func frrBinsPresent() bool {
 	for _, d := range []string{"zebra", "staticd"} {
@@ -35,7 +38,7 @@ func frrBinsPresent() bool {
 	return true
 }
 
-func nsPath(vr VRouter) string  { return strconv.FormatInt(vr.ID, 10) } // FRR -N pathspace
+func nsPath(vr VRouter) string   { return strconv.FormatInt(vr.ID, 10) } // FRR -N pathspace
 func nsFrrDir(vr VRouter) string { return "/etc/frr/" + nsPath(vr) }
 func nsRunDir(vr VRouter) string { return "/run/frr/" + nsPath(vr) }
 func nsStateDir(vr VRouter) string {
@@ -71,13 +74,18 @@ func (netnsBackend) Provision(vr VRouter, legs []Leg) error {
 	// Seed a daemons file in the pathspace (enables the routing daemons).
 	daemons := "zebra=yes\nstaticd=yes\nospfd=yes\nbgpd=yes\neigrpd=yes\nvtysh_enable=yes\n"
 	_ = os.WriteFile(filepath.Join(nsFrrDir(vr), "daemons"), []byte(daemons), 0o640)
+	// Seed vtysh.conf in the pathspace: vtysh/frr-reload look for it there and
+	// error ("Can't open .../vtysh.conf") without it. integrated-vtysh-config
+	// makes the single frr.conf the source of truth for all daemons.
+	_ = os.WriteFile(filepath.Join(nsFrrDir(vr), "vtysh.conf"), []byte("service integrated-vtysh-config\n"), 0o640)
+	_, _ = nsrun(10*time.Second, "chown", "-R", "frr:frr", nsFrrDir(vr))
 	// Bring up loopback inside the namespace.
 	_, _ = nsrun(10*time.Second, "ip", "netns", "exec", vr.NetnsName, "ip", "link", "set", "lo", "up")
 	return nil
 }
 
-func (b netnsBackend) Start(vr VRouter) error  { return b.startDaemons(vr) }
-func (b netnsBackend) Stop(vr VRouter) error   { b.killDaemons(vr); return nil }
+func (b netnsBackend) Start(vr VRouter) error { return b.startDaemons(vr) }
+func (b netnsBackend) Stop(vr VRouter) error  { b.killDaemons(vr); return nil }
 func (b netnsBackend) Destroy(vr VRouter) error {
 	b.killDaemons(vr)
 	// Remove veths (host ends) then the namespace + state dirs.
@@ -88,8 +96,23 @@ func (b netnsBackend) Destroy(vr VRouter) error {
 	return nil
 }
 
+// netnsIfacePresent reports whether an interface exists INSIDE the namespace.
+func netnsIfacePresent(ns, iface string) bool {
+	_, err := nsrun(5*time.Second, "ip", "netns", "exec", ns, "ip", "link", "show", iface)
+	return err == nil
+}
+
 // ApplyLegs builds veth pairs for each leg: host end enslaved to the leg bridge,
 // peer moved into the namespace and renamed ethN. veths can be added live.
+//
+// IDEMPOTENT: applyAndPush re-passes EVERY leg on every change (e.g. adding a
+// second internal leg re-applies the first). A leg whose in-namespace iface is
+// already present is fully wired, so we SKIP it — re-running MoveToNetns on a
+// peer that has already been moved would fail ("Cannot find device") and take
+// the whole apply (and every other leg/tenant on this router) down with it.
+// A leg that is only half-applied (peer moved but not renamed, or a stale pair)
+// is torn down and rebuilt clean: deleting the host end removes the veth pair
+// wherever its peer landed, and we also clear any stale un-renamed peer in the ns.
 func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 	for _, l := range legs {
 		host := "vrh" + strconv.FormatInt(vr.ID, 10) + "e" + strconv.Itoa(l.Idx)
@@ -97,6 +120,12 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 		if len(host) > 15 || len(peer) > 15 {
 			return fmt.Errorf("veth name %q too long", host)
 		}
+		if netnsIfacePresent(vr.NetnsName, l.IfaceName) {
+			continue // already fully wired
+		}
+		// Clear any half-applied remnants so the rebuild starts from a clean slate.
+		netdrv.DeleteLink(host)                                                                     // host-ns end (removes the pair wherever the peer is)
+		_, _ = nsrun(5*time.Second, "ip", "netns", "exec", vr.NetnsName, "ip", "link", "del", peer) // stale un-renamed peer in the ns
 		if err := netdrv.EnsureVethPair(host, peer); err != nil {
 			return err
 		}
@@ -123,8 +152,14 @@ func (b netnsBackend) PushFRR(vr VRouter, frrConf string) error {
 	}
 	_, _ = nsrun(5*time.Second, "chown", "frr:frr", filepath.Join(nsFrrDir(vr), "frr.conf"))
 	if !b.daemonsRunning(vr) {
-		return b.startDaemons(vr)
+		if err := b.startDaemons(vr); err != nil {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond) // let the daemons open their vty sockets
 	}
+	// Always load the config via a reload — on first bring-up too, so the leg
+	// addresses/protocols actually take effect (starting the daemons alone leaves
+	// them with an empty config).
 	_, err := nsrun(30*time.Second, "ip", "netns", "exec", vr.NetnsName,
 		"/usr/lib/frr/frr-reload.py", "-N", nsPath(vr), "--reload", filepath.Join(nsFrrDir(vr), "frr.conf"))
 	return err
@@ -202,7 +237,13 @@ func (b netnsBackend) startDaemons(vr VRouter) error {
 		if _, err := os.Stat(bin); err != nil {
 			continue // e.g. eigrpd absent on some distros
 		}
-		if _, err := nsrun(15*time.Second, "ip", "netns", "exec", vr.NetnsName, bin, "-N", nsPath(vr), "-d"); err != nil {
+		// Redirect the daemon's stdio to /dev/null: with -d it double-forks and
+		// daemonizes, but if it inherits our stdout/stderr pipe the exec never
+		// sees EOF and blocks until the context deadline (every daemon then costs
+		// ~15s and the whole apply hangs). Detaching stdio lets the start return
+		// immediately.
+		start := "exec ip netns exec " + vr.NetnsName + " " + bin + " -N " + nsPath(vr) + " -d </dev/null >/dev/null 2>&1"
+		if _, err := nsrun(15*time.Second, "sh", "-c", start); err != nil {
 			return fmt.Errorf("start %s: %w", d, err)
 		}
 		if d == "zebra" {

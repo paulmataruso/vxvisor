@@ -144,6 +144,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /console/{id}/ws", s.auth(s.vncProxy))
 	mux.HandleFunc("GET /console/{id}/serial", s.auth(s.serialConsole))
 	mux.HandleFunc("GET /console/{id}/serial/ws", s.auth(s.serialProxy))
+	// Optional rustguac advanced console (browser VNC/SPICE/RDP/SSH via the local
+	// rustguac add-on). Inert unless the [guac] config section is enabled.
+	mux.HandleFunc("GET /console/{id}/advanced", s.auth(s.advancedConsole))
 
 	// M3: images & storage
 	mux.HandleFunc("GET /clients", s.auth(s.clientsPage))
@@ -270,6 +273,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /networks", s.auth(s.networks))
 	mux.HandleFunc("POST /networks", s.auth(s.createNetwork))
 	mux.HandleFunc("POST /networks/{id}/delete", s.auth(s.deleteNetwork))
+	mux.HandleFunc("POST /networks/tenant", s.auth(s.createTenantNetwork))
+	mux.HandleFunc("POST /networks/tenant/{id}/delete", s.auth(s.deleteTenantNetwork))
+	mux.HandleFunc("POST /networks/tenant/{id}/uplink", s.auth(s.connectUplink))
+	mux.HandleFunc("POST /networks/tenant/{id}/uplink/disconnect", s.auth(s.disconnectUplink))
 	// VMware-style data plane: bonds (LACP/etherchannel) + vSwitches (VLAN trunks).
 	mux.HandleFunc("POST /networks/bonds", s.auth(s.createBond))
 	mux.HandleFunc("POST /networks/bonds/{name}/delete", s.auth(s.deleteBond))
@@ -278,6 +285,15 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))
 	// NSX-lite virtual routers (vRouter): a per-tenant FRR routing instance (LXC
 	// container or network namespace) between a transit link and internal port groups.
+	mux.HandleFunc("GET /trunks", s.auth(s.trunksPage))
+	mux.HandleFunc("POST /trunks/designate", s.auth(s.designateTrunk))
+	mux.HandleFunc("POST /trunks/{id}/undesignate", s.auth(s.undesignateTrunk))
+	mux.HandleFunc("GET /trunks/{id}/verify", s.auth(s.verifyTrunkQinQ))
+	mux.HandleFunc("POST /trunks/pool", s.auth(s.setVlanPool))
+	mux.HandleFunc("POST /trunks/pool/{id}/delete", s.auth(s.deleteVlanPool))
+	mux.HandleFunc("POST /trunks/uplink", s.auth(s.createUplink))
+	mux.HandleFunc("POST /trunks/uplink/{id}/delete", s.auth(s.deleteUplink))
+	mux.HandleFunc("POST /trunks/disable", s.auth(s.disableTenantEgress))
 	mux.HandleFunc("GET /vrouters", s.auth(s.vroutersPage))
 	mux.HandleFunc("GET /vrouters/{id}/status", s.auth(s.apiVRouterStatus))
 	mux.HandleFunc("GET /vrouters/{id}/diagram", s.auth(s.apiVRouterDiagram))
@@ -287,6 +303,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /vrouters/{id}/delete", s.auth(s.deleteVRouter))
 	mux.HandleFunc("POST /vrouters/{id}/transit", s.auth(s.addTransitLink))
 	mux.HandleFunc("POST /vrouters/{id}/internal", s.auth(s.attachInternal))
+	mux.HandleFunc("POST /vrouters/{id}/segment/attach", s.auth(s.attachSegment))
+	mux.HandleFunc("POST /vrouters/{id}/segment/detach", s.auth(s.detachSegment))
 	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/dhcp", s.auth(s.updateInternalDHCP))
 	mux.HandleFunc("POST /vrouters/{id}/internal/{idx}/update", s.auth(s.updateInternalNetwork))
 	mux.HandleFunc("POST /vrouters/{id}/transit/update", s.auth(s.updateTransitLink))
