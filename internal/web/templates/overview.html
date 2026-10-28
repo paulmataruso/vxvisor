@@ -137,7 +137,7 @@
     <div class="hero-leg" style="margin-top:14px"><span>No instances yet — <a href="/instances">create one</a>.</span></div>
     {{end}}
   </div>
-  <div class="hero-r">
+  {{if $.P.IsAdmin}}<div class="hero-r">
     <div class="gauge">
       <div class="ring" id="g-cpu-ring" style="--pct:0"><div class="hole"><b id="g-cpu">—</b></div></div>
       <div class="gl"><div class="gl-t">Host CPU</div><div class="gl-s">{{.VCPUs}} vCPU allocated</div></div>
@@ -166,11 +166,11 @@
       <div class="ring" id="g-iowait-ring" style="--pct:0"><div class="hole"><b id="g-iowait">—</b></div></div>
       <div class="gl"><div class="gl-t">CPU iowait</div><div class="gl-s">time waiting on I/O</div></div>
     </div>
-  </div>
+  </div>{{end}}
 </div>
 
-<!-- ============ live performance strip ============ -->
-<div class="live">
+<!-- ============ live performance strip (host — provider only) ============ -->
+{{if $.P.IsAdmin}}<div class="live">
   <div class="live-c">
     <div class="live-split">
       <div class="live-main">
@@ -213,7 +213,7 @@
       </div>
     </div>
   </div>
-</div>
+</div>{{end}}
 
 <!-- ============ grouped panels ============ -->
 <div class="ovg">

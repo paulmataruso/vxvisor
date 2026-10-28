@@ -18,6 +18,8 @@ func (s *Service) LiveMetrics(p *Principal) metrics.LiveSnapshot {
 	if p.IsAdmin {
 		return snap
 	}
+	// Tenants never see the physical host's figures, only their own VMs.
+	snap.Host = metrics.Sample{}
 	// Restrict VM rows to the caller's current org.
 	ids := map[string]bool{}
 	rows, err := s.db.Query(`SELECT id FROM sessions WHERE org_id=? AND deleted_at IS NULL`, p.OrgID)
@@ -41,7 +43,7 @@ func (s *Service) LiveMetrics(p *Principal) metrics.LiveSnapshot {
 }
 
 func (s *Service) HostHistory(p *Principal) []metrics.Sample {
-	if s.mc == nil {
+	if s.mc == nil || !p.IsAdmin {
 		return nil
 	}
 	return s.mc.HostHistory()
@@ -54,7 +56,10 @@ func (s *Service) MetricHistory(p *Principal, scope, target string, mins int) []
 	if s.mc == nil || p.OrgID == 0 {
 		return nil
 	}
-	if scope == "vm" && !p.IsAdmin {
+	if !p.IsAdmin {
+		if scope != "vm" { // host-scope history is provider-only
+			return nil
+		}
 		if _, err := s.sessionInOrg(p, target); err != nil {
 			return nil
 		}

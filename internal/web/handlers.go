@@ -531,7 +531,7 @@ func (s *Server) members(w http.ResponseWriter, r *http.Request, p *service.Prin
 	}
 	s.render(w, p, "members.html", "members", map[string]any{
 		"Members": members,
-		"IsAdmin": p.IsAdmin,
+		"IsAdmin": p.ProviderAdmin,
 		"Self":    self,
 		"PWFlash": flash,
 	})

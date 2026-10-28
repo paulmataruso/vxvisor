@@ -103,8 +103,17 @@ type Principal struct {
 	User      *auth.User
 	OrgID     int64
 	OrgRole   string // role within the current org
-	IsAdmin   bool   // instance admin
-	Orgs      []store.Org
+	IsAdmin   bool   // instance admin, acting in the provider (Default) org
+	// ProviderAdmin is the caller's real instance-admin role, whatever the current
+	// org. It differs from IsAdmin only in TenantView.
+	ProviderAdmin bool
+	// TenantView: an instance admin switched into a tenant (non-Default) org sees
+	// and may do exactly what that org's owner can — host/physical surfaces are
+	// hidden and refused (IsAdmin=false, OrgRole="owner"). Only provider-on-tenant
+	// actions (the org's quota, resetting a member's password) stay gated on
+	// ProviderAdmin. Host administration happens from the Default org.
+	TenantView bool
+	Orgs       []store.Org
 	ActorKind string   // "user" | "apikey"
 	Scopes    []string // for apikey principals; users are unrestricted
 	token     string
@@ -153,16 +162,28 @@ func (s *Service) Principal(r *http.Request) *Principal {
 		return false
 	}
 
+	provider, perr := s.store.DefaultOrgID()
+	hasProvider := perr == nil && accessible(provider)
+
 	cur, ok := s.store.CurrentOrg(token)
 	if !ok || !accessible(cur) {
 		cur = 0
-		if len(orgs) > 0 {
+		if isAdmin && hasProvider {
+			cur = provider // an admin with no current org lands in the provider view
+		} else if len(orgs) > 0 {
 			cur = orgs[0].ID
+		}
+		if cur != 0 {
 			_ = s.store.SetCurrentOrg(token, cur)
 		}
 	}
 	role, _ := s.store.OrgRole(cur, u.ID)
-	return &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: isAdmin, Orgs: orgs, ActorKind: "user", token: token}
+	p := &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: isAdmin, ProviderAdmin: isAdmin,
+		Orgs: orgs, ActorKind: "user", token: token}
+	if isAdmin && hasProvider && cur != 0 && cur != provider {
+		p.IsAdmin, p.TenantView, p.OrgRole = false, true, "owner"
+	}
+	return p
 }
 
 // TrustedAdminPrincipal builds a principal for an authenticated cluster-admin
@@ -181,7 +202,7 @@ func (s *Service) TrustedAdminPrincipal(username string) *Principal {
 		cur = orgs[0].ID
 	}
 	role, _ := s.store.OrgRole(cur, u.ID)
-	return &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: true, Orgs: orgs,
+	return &Principal{User: u, OrgID: cur, OrgRole: role, IsAdmin: true, ProviderAdmin: true, Orgs: orgs,
 		ActorKind: "user", TrustedPeer: true}
 }
 
@@ -826,7 +847,7 @@ func (s *Service) ChangeOwnPassword(p *Principal, current, next, ip string) erro
 // knowing the current one. Guarded to the cluster leader like other account
 // writes so the change replicates.
 func (s *Service) AdminResetPassword(p *Principal, userID int64, next, ip string) error {
-	if !p.IsAdmin {
+	if !p.ProviderAdmin { // provider-on-tenant action: also allowed in TenantView
 		return ErrUnauthorized
 	}
 	if err := s.guardClusterWrite(); err != nil {

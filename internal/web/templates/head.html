@@ -250,7 +250,7 @@
     <a href="/settings/auth" class="{{if eq .Active "settings"}}on{{end}}"><svg class="ic"><use href="#i-key"/></svg><span>Authentication</span></a>
     <a href="/update" class="{{if eq .Active "update"}}on{{end}}"><svg class="ic"><use href="#i-download"/></svg><span>Updates</span></a>{{end}}
   </div>
-  <div class="foot"><svg class="ic ic-sm"><use href="#i-users"/></svg><span class="uname">{{.P.User.Username}}{{if .P.IsAdmin}} · admin{{end}}</span></div>
+  <div class="foot"><svg class="ic ic-sm"><use href="#i-users"/></svg><span class="uname">{{.P.User.Username}}{{if .P.ProviderAdmin}} · admin{{if .P.TenantView}} (tenant view){{end}}{{end}}</span></div>
 </nav>
 <div class="main">
   <div class="topbar">
@@ -279,6 +279,7 @@
     <form method="post" action="/logout"><button class="btn sm"><svg class="ic"><use href="#i-logout"/></svg>Sign out</button></form>
   </div>
   <div class="content">
+{{if .P.TenantView}}<div class="card" style="border-left:3px solid var(--warn);padding:10px 14px;font-size:13px"><strong>Tenant view</strong> — you are seeing exactly what this organization's owner sees. Host and physical administration (NICs, vSwitch uplinks, routing, Tenant Egress, storage backends, cluster, settings) is hidden here; switch the org to <strong>Default</strong> to manage the host.</div>{{end}}
 <style>
  .btn.sm.hp-restart{background:#b06a00;border-color:#8a5400;color:#fff;font-weight:600}
  .btn.sm.hp-restart:hover{background:#9a5c00}

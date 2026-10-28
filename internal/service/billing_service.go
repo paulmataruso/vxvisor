@@ -29,8 +29,8 @@ func (s *Service) GetQuota(orgID int64) Quota {
 }
 
 func (s *Service) SetQuota(p *Principal, q Quota, ip string) error {
-	if !p.IsAdmin {
-		return ErrUnauthorized // instance admins set org quotas
+	if !p.ProviderAdmin {
+		return ErrUnauthorized // instance admins set org quotas (also from TenantView)
 	}
 	_, err := s.db.Exec(`INSERT INTO org_quotas(org_id,max_servers,max_running,max_vcpus,max_memory_mb,max_disk_gb,updated_at)
 		VALUES(?,?,?,?,?,?,datetime('now'))

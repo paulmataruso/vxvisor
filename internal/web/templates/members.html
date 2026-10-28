@@ -14,7 +14,7 @@
       <td><strong>{{.Username}}</strong></td>
       <td><span class="pill">{{.Role}}</span></td>
       <td style="text-align:right">
-        {{if $.IsAdmin}}<button class="btn sm" data-modal="m-pw-{{.UserID}}">Reset password</button>{{end}}
+        {{if $.IsAdmin}}<button class="btn sm" data-modal="m-pw-{{.UserID}}"{{if $.P.TenantView}} title="Provider action — the tenant can't do this"{{end}}>Reset password{{if $.P.TenantView}} · provider{{end}}</button>{{end}}
         <form method="post" action="/members/{{.UserID}}/remove" style="display:inline" onsubmit="return confirm('Remove {{.Username}}?')">
           <input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button>
         </form>
