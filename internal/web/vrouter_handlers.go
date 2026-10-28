@@ -2,6 +2,8 @@ package web
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"vdxclone/internal/service"
 )
@@ -20,14 +22,18 @@ func (s *Server) vroutersPage(w http.ResponseWriter, r *http.Request, p *service
 		transit, _ = s.svc.TransitCandidates(p)
 	}
 	segs, _ := s.svc.AttachableSegments(p)
+	pgs, _ := s.svc.AttachablePortGroups(p)
+	upl, _ := s.svc.UplinkLegChoices(p)
 	s.render(w, p, "vrouters.html", "vrouters", map[string]any{
-		"VRouters":  views,
-		"Transit":   transit,
-		"Segments":  segs,
-		"Runtimes":  s.svc.VRouterRuntimes(),
-		"Available": s.svc.VRouterAvailable(p),
-		"UserMode":  s.svc.NetworkModeUser(),
-		"InstAdmin": p.IsAdmin,
+		"VRouters":   views,
+		"Transit":    transit,
+		"Segments":   segs,
+		"PortGroups": pgs,
+		"UplinkLegs": upl,
+		"Runtimes":   s.svc.VRouterRuntimes(),
+		"Available":  s.svc.VRouterAvailable(p),
+		"UserMode":   s.svc.NetworkModeUser(),
+		"InstAdmin":  p.IsAdmin,
 	})
 }
 
@@ -87,6 +93,29 @@ func (s *Server) detachSegment(w http.ResponseWriter, r *http.Request, p *servic
 	s.vrDo(w, r, p, func(vrID int64) error {
 		return s.svc.DetachSegment(p, vrID, int64(atoi(r.FormValue("net_id"))), clientIP(r))
 	})
+}
+
+// attachPortGroup makes a router the gateway of a gatewayless VLAN port group.
+func (s *Server) attachPortGroup(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(vrID int64) error {
+		return s.svc.AttachPortGroup(p, vrID, int64(atoi(r.FormValue("pg_id"))), r.FormValue("gateway"),
+			r.FormValue("dhcp") == "1", r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r))
+	})
+}
+
+// attachUplinkLeg gives a router its WAN leg on an uplink-carried port group;
+// "leg" is "<vSwitch id>:<vlan>" (see service.UplinkLegChoice.Value).
+func (s *Server) attachUplinkLeg(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(vrID int64) error {
+		tn, vl, _ := strings.Cut(r.FormValue("leg"), ":")
+		vlan, _ := strconv.Atoi(vl)
+		return s.svc.AttachUplinkLeg(p, vrID, int64(atoi(tn)), vlan, r.FormValue("cidr"), r.FormValue("upstream_gw"),
+			r.FormValue("snat") == "1", clientIP(r))
+	})
+}
+
+func (s *Server) detachUplinkLeg(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(vrID int64) error { return s.svc.DetachUplinkLeg(p, vrID, clientIP(r)) })
 }
 
 // vrDo wraps a mutation: CSRF, run, redirect back to /vrouters with a flash.

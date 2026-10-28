@@ -82,9 +82,46 @@ type Leg struct {
 	DHCP      bool
 	DHCPRange string
 	DHCPDNS   string // CSV of DNS servers to hand out (dnsmasq option 6); "" = none
+	// VLAN is the port group this leg joins on a VLAN-filtering tenant vSwitch
+	// (its host veth end becomes an access port of it); 0 = untagged.
+	VLAN int
+	// Uplink legs only: the upstream next hop (installed as the router's default
+	// route) and whether to masquerade traffic leaving this leg.
+	UpstreamGW string
+	SNAT       bool
 	// Joined from the networks row (internal legs) for display/edit pre-fill.
 	NetworkName string
 	NetworkCIDR string // the port-group subnet (networks.cidr), vs CIDR = the leg's gateway IP/mask
+}
+
+// EdgeApplier is implemented by runtimes that apply a router's edge state
+// themselves: IPv4 forwarding on, and source NAT out of SNAT uplink legs.
+// Idempotent; called after every leg change and on rebuild.
+type EdgeApplier interface {
+	ApplyEdge(vr VRouter, legs []Leg) error
+}
+
+// NATTable is the nftables table (inside the runtime) holding uplink SNAT.
+const NATTable = "vdxnat"
+
+// RenderEdgeNAT builds the runtime's SNAT table: masquerade out of every SNAT
+// uplink leg. With none it only removes the table (declare-then-delete keeps
+// the load idempotent).
+func RenderEdgeNAT(legs []Leg) string {
+	var b strings.Builder
+	b.WriteString("table ip " + NATTable + " {}\ndelete table ip " + NATTable + "\n")
+	var out []string
+	for _, l := range legs {
+		if l.Kind == LegUplink && l.SNAT && l.IfaceName != "" {
+			out = append(out, `    oifname "`+l.IfaceName+`" masquerade`)
+		}
+	}
+	if len(out) == 0 {
+		return b.String()
+	}
+	b.WriteString("table ip " + NATTable + " {\n  chain postrouting {\n    type nat hook postrouting priority srcnat; policy accept;\n")
+	b.WriteString(strings.Join(out, "\n") + "\n  }\n}\n")
+	return b.String()
 }
 
 // Backend is the per-runtime driver. Implementations live in backend_lxc.go /
@@ -174,6 +211,24 @@ func RenderForVRouter(vr VRouter, legs []Leg, cfg routing.Config) (string, error
 			continue
 		}
 		cfg.Prefixes = append(cfg.Prefixes, routing.IfPrefix{Iface: l.IfaceName, CIDR: l.CIDR})
+	}
+	// An uplink leg's upstream next hop is the router's default route, unless
+	// the operator already set a default static route of their own.
+	hasDefault := false
+	for _, r := range cfg.Static {
+		if r.Dest == "0.0.0.0/0" || r.Dest == "default" {
+			hasDefault = true
+		}
+	}
+	if !hasDefault {
+		for _, l := range legs {
+			if l.Kind == LegUplink && l.UpstreamGW != "" {
+				// Copy: cfg.Static may share its backing array with the caller.
+				cfg.Static = append(append([]routing.Route(nil), cfg.Static...),
+					routing.Route{Dest: "0.0.0.0/0", NextHop: l.UpstreamGW})
+				break
+			}
+		}
 	}
 	return routing.RenderFRR(cfg)
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 
 	"vdxclone/internal/hostinfo"
@@ -69,7 +70,7 @@ func (s *Service) SaveRoutingConfig(p *Principal, c routing.Config, ip string) e
 		"static_routes": len(c.Static), "firewall_rules": len(c.Firewall),
 	})
 	// Apply to the host. Surface errors but keep the saved config.
-	return routing.Apply(c)
+	return s.applyHostRouting(c)
 }
 
 // RoutingStatus returns the live FRR route table (admin only).
@@ -107,7 +108,7 @@ func (s *Service) mutateRouting(p *Principal, ip, action string, fn func(*routin
 		return err
 	}
 	s.audit(p, p.OrgID, "routing."+action, "routing", "l3", ip, nil)
-	return routing.Apply(c)
+	return s.applyHostRouting(c)
 }
 
 func (s *Service) SetRoutingUplink(p *Principal, uplink, ip string) error {
@@ -232,4 +233,15 @@ func (s *Service) AddEIGRPNetwork(p *Principal, cidr, ip string) error {
 }
 func (s *Service) DeleteEIGRPNetwork(p *Principal, idx int, ip string) error {
 	return s.mutateRouting(p, ip, "eigrp.network.delete", func(c *routing.Config) { c.EIGRP.Networks = delAt(c.EIGRP.Networks, idx) })
+}
+
+// applyHostRouting applies the host routing config, then re-fences the tenant
+// networks: rewriting the global ip_forward resets every interface's forwarding
+// flag, including the ones that keep the host from routing for a tenant.
+func (s *Service) applyHostRouting(c routing.Config) error {
+	err := routing.Apply(c)
+	if ierr := s.applyTenantIsolation(); ierr != nil {
+		log.Printf("routing: re-apply tenant isolation: %v", ierr)
+	}
+	return err
 }

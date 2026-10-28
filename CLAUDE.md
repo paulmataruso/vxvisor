@@ -65,8 +65,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **47**
-  (`ext-trunk-shared`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **48**
+  (`tenant-portgroups`). Add `{N, "name", "SQL"}`.
 - **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
   inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
   quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
@@ -227,8 +227,7 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   teardown (crash-safe via `teardown_pending`) deletes every subinterface and restores every trunk;
   migration 46 is strictly additive so a binary rollback is clean. Boot: `ReensureExtTrunks` (before
   tenant nets) + `ReensureUplinks` (after). The vRouter external leg (`vrouter.LegUplink`) is modeled
-  (WAN-zone classified) but its attach path is deferred — it rides the netns-FRR runtime that's
-  independently broken on this host.
+  (WAN-zone classified); its attach path shipped in v1.106 (`AttachUplinkLeg`, below).
   - **Shared mgmt-uplink trunks** (migration 47, `ext_trunks.shared`): a trunk may be the management
     vSwitch's own uplink (e.g. the mgmt bond). It's **access-only** (single 802.1q subinterfaces) and the
     **parent is NEVER modified** — no MTU raise, no offload toggle — so management is never disturbed; tenant
@@ -238,6 +237,33 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
     doesn't fight the mgmt vSwitch) and from every `EnsureTrunk`/`RestoreTrunk` path
     (Reensure/Undesignate/DisableTenantEgress). `SharedTrunkCandidates` surfaces the mgmt uplink in the
     designate modal under a separate "shared with management" group.
+
+- **Tenant view + tenant vSwitches / port groups** (migration 48, v1.106): an instance admin switched
+  into a tenant org sees exactly that org (`Principal.TenantView`; `ProviderAdmin` keeps only quota /
+  member-password actions). A **tenant network IS the tenant's vSwitch** (bridge `vdxt<network_id>`,
+  its backing `networks` row = the untagged default port group); `tenant_portgroups` adds VLAN 2–4094
+  port groups on the same bridge (`service/tenantpg_service.go`, host driver `netdrv/tenantvlan.go`).
+  The bridge turns on `vlan_filtering` only once it has a tagged PG. Uplink port VLANs: carries the
+  vSwitch's **native** PG untagged (`native_vlan`, 0 = untagged PG); access = only that one, QinQ /
+  dedicated = also every other PG tagged. A PG **carried out the uplink** has its host gateway + DHCP
+  **suspended** (the host must never answer DHCP / hold an IP on the provider's wire) and can't be
+  router-gatewayed. **Host isolation**: every tenant bridge / `<bridge>.<vid>` gets per-iface
+  `forwarding=0` + `disable_ipv6=1` and the host nft `table inet vdxtenant` (in: DHCP + ping of the
+  iface's own IP only; forward: never route in/out) — rebuilt by `applyTenantIsolation()`, re-run after
+  host `routing.Apply`. Tenant DHCP dnsmasq is `port=0` (no host resolver). L3 out = a netns router with
+  a **VLAN leg** on a routed PG (`AttachPortGroup`) and an **uplink leg** on the carried PG
+  (`AttachUplinkLeg`: default route via upstream GW rendered into FRR, SNAT `table ip vdxnat` + netns
+  `ip_forward=1` via `vrouter.EdgeApplier`). Uplink disconnect **keeps** its outer VID (only delete /
+  global teardown frees it). `DeleteVRouter` never deletes a tenant vSwitch bridge (PG + uplink legs
+  just release). Live E2E verified all of it, incl. netns leg addresses + default route (needs the next bullet).
+- **netns vRouter FRR vs AppArmor (Ubuntu 26.04)** — the old "netns runtime broken" root cause:
+  the stock `abstractions/frr` allows only flat `/run/frr/<daemon>.pid`; a `-N <id>` pathspace puts it in
+  `/run/frr/<id>/`, so confined staticd/bgpd/ospfd died at start → no leg addresses / routes. Fixed by the
+  site file `deploy/apparmor/frr.d-vxvisor` (same grants one dir down), which `install.sh` installs as
+  `/etc/apparmor.d/abstractions/frr.d/vxvisor` + `apparmor_parser -r` of every profile including the
+  abstraction (owner-approved 2026-10-28; profiles stay in enforce mode). In-app updates replace only the
+  binary — an existing host needs install.sh re-run (or the file + reload) once. FRR ≥9 also needs
+  `mgmtd` for static routes; the netns launcher starts it after zebra.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

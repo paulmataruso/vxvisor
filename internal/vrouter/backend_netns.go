@@ -23,6 +23,8 @@ import (
 // (see persist.go). Per-daemon crash supervision is a documented follow-up.
 type netnsBackend struct{}
 
+var _ EdgeApplier = netnsBackend{}
+
 func (netnsBackend) Kind() string { return RuntimeNetns }
 func (netnsBackend) available() bool {
 	_, err := exec.LookPath("ip")
@@ -121,6 +123,9 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 			return fmt.Errorf("veth name %q too long", host)
 		}
 		if netnsIfacePresent(vr.NetnsName, l.IfaceName) {
+			if err := legAccessVlan(host, l); err != nil {
+				return err
+			}
 			continue // already fully wired
 		}
 		// Clear any half-applied remnants so the rebuild starts from a clean slate.
@@ -132,6 +137,9 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 		if err := netdrv.EnslaveToBridge(host, l.Bridge); err != nil {
 			return err
 		}
+		if err := legAccessVlan(host, l); err != nil {
+			return err
+		}
 		if err := netdrv.MoveToNetns(peer, vr.NetnsName); err != nil {
 			return err
 		}
@@ -141,6 +149,35 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 		if err := netdrv.NetnsLinkUp(vr.NetnsName, l.IfaceName); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// legAccessVlan makes a VLAN leg's host veth end an access port of its port
+// group on the (VLAN-filtering) tenant vSwitch. Untagged legs keep the default.
+func legAccessVlan(host string, l Leg) error {
+	if l.VLAN <= 0 {
+		return nil
+	}
+	if err := netdrv.SetAccessVlan(host, l.VLAN); err != nil {
+		return fmt.Errorf("leg %s VLAN %d: %w", l.IfaceName, l.VLAN, err)
+	}
+	return nil
+}
+
+// ApplyEdge turns IPv4 forwarding on inside the namespace (a router must
+// forward; never inherited-by-accident from the host) and loads the SNAT table.
+func (netnsBackend) ApplyEdge(vr VRouter, legs []Leg) error {
+	if _, err := nsrun(5*time.Second, "ip", "netns", "exec", vr.NetnsName, "sysctl", "-qw", "net.ipv4.ip_forward=1"); err != nil {
+		return fmt.Errorf("enable forwarding in netns %s: %w", vr.NetnsName, err)
+	}
+	_ = os.MkdirAll(nsStateDir(vr), 0o755)
+	confPath := filepath.Join(nsStateDir(vr), "nftables-vdxnat.conf")
+	if err := os.WriteFile(confPath, []byte(RenderEdgeNAT(legs)), 0o640); err != nil {
+		return err
+	}
+	if _, err := nsrun(15*time.Second, "ip", "netns", "exec", vr.NetnsName, "nft", "-f", confPath); err != nil {
+		return fmt.Errorf("apply SNAT in netns %s: %w", vr.NetnsName, err)
 	}
 	return nil
 }
@@ -231,7 +268,10 @@ func (b netnsBackend) startDaemons(vr VRouter) error {
 		_ = os.MkdirAll(d, 0o755)
 	}
 	_, _ = nsrun(10*time.Second, "chown", "-R", "frr:frr", nsRunDir(vr), nsFrrDir(vr))
-	order := []string{"zebra", "staticd", "ospfd", "bgpd", "eigrpd"}
+	// mgmtd right after zebra: since FRR 9, static-route config is applied
+	// through mgmtd (staticd is its backend), so without it frr-reload can't
+	// install the leg routes. Absent on older FRR — skipped below.
+	order := []string{"zebra", "mgmtd", "staticd", "ospfd", "bgpd", "eigrpd"}
 	for _, d := range order {
 		bin := "/usr/lib/frr/" + d
 		if _, err := os.Stat(bin); err != nil {

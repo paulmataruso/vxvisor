@@ -602,3 +602,68 @@ create two gatewayless segments + attach both → VMs route between them, not to
 page usable and rules scoped to the org; confirm a per-org admin can NOT reach bonds/vSwitches/raw
 VXLAN/host routing/transit, cannot delete a transit-bearing router, and cannot attach a foreign/shared
 bridge; confirm mgmt/SSH never drops; confirm org A ops leave org B untouched.
+
+---
+
+# v4 — Tenant vSwitches, VLAN port groups, L2 + L3 out (migration 48, v1.106)
+
+## 25. Model
+- **Tenant view.** An instance admin switched into a tenant org is that org's owner (`TenantView`):
+  host/physical surfaces hidden and refused; only the org quota and member-password reset stay gated
+  on `ProviderAdmin`. Host administration happens from the Default (provider) org.
+- **vSwitch = tenant network.** Its bridge `vdxt<network_id>` and backing `networks` row (the
+  **untagged** default port group). New VMs land there; `CreateUplink` auto-connects a new uplink to
+  the org's default vSwitch if it has none.
+- **VLAN port groups** (`tenant_portgroups`): VLAN 2–4094, unique per vSwitch (standalone unique
+  indexes), each with its own backing `networks` row (bridge = the vSwitch, `vlan_id` = the PG), so VM
+  attach is the normal port-group path (`SetupTapAccess` → access port). The tenant's VLAN numbering is
+  private — it never touches another tenant's. `vlan_filtering` is on only while a PG exists.
+- **PG kinds:** *standalone* (host gateway on `<bridge>.<vid>` + optional DHCP, local only — never
+  routed by the host), *routed* (gatewayless, a netns router leg is its gateway), *L2-out*
+  (gatewayless, carried out the uplink; the upstream routes it).
+
+## 26. The uplink port
+`uplinkPortVlans(mode, native, pgs)`: PVID = native PG (`native_vlan`, 0 → bridge VLAN 1 = the untagged
+PG). **access** uplink = one 802.1q tag on the wire → carries only the native PG. **QinQ / dedicated**
+→ also every other PG tagged with its own VID (inner tags survive the S-tag / the dedicated NIC).
+`carriedOut()` mirrors this and drives two invariants:
+1. A carried PG's host gateway + DHCP are **suspended** (`syncVSwitch` removes the address / stops
+   dnsmasq; restored when no longer carried) — the host never answers DHCP on the provider's wire.
+2. A carried PG can't be router-gatewayed, and an uplink/native change that would carry a routed PG
+   is refused (`checkCarry`) — no second gateway on the upstream L2.
+Uplink **disconnect keeps the outer VID** (`unrealizeUplink(..., free=false)`); only `DeleteUplink` /
+`DisableTenantEgress` free it (was a bug: reconnect then built `<trunk>.0`).
+
+## 27. Host isolation (closes the standalone-segment gap)
+A standalone tenant gateway lives on the host. Before v4 the host (ip_forward=1, forward accept)
+would route a tenant VM to the management LAN and expose sshd/the admin UI. Now, for every tenant
+bridge and PG interface: `net.ipv4.conf.<dev>.forwarding=0`, `ipv6 disable_ipv6=1`, and the host nft
+`table inet vdxtenant` — input: established/related, DHCP (udp 67), ICMP echo to the ingress
+interface's own address (`fib daddr . iif type local`), else drop; forward: drop routed traffic in or
+out of a tenant interface (br_netfilter-aware: with bridge-nf on, only tenant↔non-tenant crossings).
+Tenant dnsmasq runs `port=0` (no host resolver). `applyTenantIsolation()` is the single rebuild point;
+it runs after every vSwitch change, at boot, and after host `routing.Apply` (rewriting ip_forward resets
+per-iface flags). The guard set lists exact names only — VM taps (also `vdxt…`) are never in it.
+
+## 28. L3 out (netns router)
+- `AttachPortGroup`: router leg on a gatewayless, non-carried PG; the leg's host veth end becomes an
+  access port of that VLAN (`Leg.VLAN` → `netdrv.SetAccessVlan` in `netnsBackend.ApplyLegs`).
+- `AttachUplinkLeg` (one per router): `LegUplink` on a **carried** PG; `cidr` = router's upstream
+  address, `upstream_gw` → default static route rendered by `RenderForVRouter` (unless the operator set
+  their own default), `snat` → `table ip vdxnat` masquerade. Applied by `vrouter.EdgeApplier`
+  (`netnsBackend.ApplyEdge`, which also sets the netns `ip_forward=1` explicitly). `LegUplink` is in the
+  firewall External zone. netns-only.
+- `DeleteVRouter` releases PG/uplink legs without touching the tenant vSwitch bridge.
+
+## 29. Verification (v1.106.2 on the test host, org "test")
+Unit: carry/port-VLAN matrix, leg addressing, SNAT + default-route render, guard render (`nft -c`),
+migration 48 on the real driver and on a copy of the live DB, page render (networks/vRouters as
+tenant + admin). Live E2E (service layer as the tenant admin, real DB + kernel, full teardown):
+vSwitch + standalone PG (vlan_filtering, `<br>.<vid>` gateway + DHCP, per-iface isolation, guard set),
+routed PG (no host iface; router leg = VLAN access port), access-uplink VID retention across
+disconnect/reconnect, native VLAN → uplink port PVID, gateway suspend/restore, carried-PG refusals,
+WAN leg VLAN + SNAT table + netns forwarding, zebra/mgmtd/staticd up in the router's pathspace, leg
+address + default route via the upstream inside the netns, no AppArmor FRR denials, guard restored to
+its initial set. The netns FRR daemons need `deploy/apparmor/frr.d-vxvisor` on Ubuntu 26.04 (stock
+AppArmor only allows the flat `/run/frr/` paths; installed by `install.sh` — see CLAUDE.md).
+

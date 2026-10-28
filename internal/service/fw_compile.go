@@ -257,7 +257,7 @@ func compileVRouterFW(f *OrgFirewall, m fwMaps, legs []vrouter.Leg) vrouter.VRFi
 	var internalLegIdx []int
 	hasExternal := false // a transit leg must exist for External to resolve to an iface
 	for _, l := range legs {
-		if l.Kind == vrouter.LegTransit && l.IfaceName != "" {
+		if (l.Kind == vrouter.LegTransit || l.Kind == vrouter.LegUplink) && l.IfaceName != "" {
 			hasExternal = true
 		}
 	}

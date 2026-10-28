@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 
 	"vdxclone/internal/hostinfo"
@@ -480,7 +481,23 @@ func (s *Service) CreateUplink(p *Principal, orgID int64, name, mode string, tru
 		}
 	}
 	s.audit(p, orgID, "uplink.create", "uplink", name, ip, map[string]any{"mode": mode})
+	s.autoConnectDefault(orgID, id)
 	return id, nil
+}
+
+// autoConnectDefault connects a new uplink to the org's default vSwitch when that
+// vSwitch has no uplink yet, so a tenant sees its default network wired out with
+// no extra step. Best effort: on failure the uplink is simply left unconnected
+// (the tenant can connect it from Networks).
+func (s *Service) autoConnectDefault(orgID, uplinkID int64) {
+	var tnetID, netID int64
+	if err := s.db.QueryRow(`SELECT id,network_id FROM tenant_networks WHERE org_id=? AND is_default=1 AND uplink_id IS NULL LIMIT 1`,
+		orgID).Scan(&tnetID, &netID); err != nil {
+		return
+	}
+	if err := s.connectUplink(tnetID, netID, uplinkID); err != nil {
+		log.Printf("uplink %d: auto-connect to org %d default vSwitch: %v", uplinkID, orgID, err)
+	}
 }
 
 // DeleteUplink removes an uplink after clearing any tenant-network reference and
@@ -490,7 +507,7 @@ func (s *Service) DeleteUplink(p *Principal, id int64, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
-	if err := s.unrealizeUplink(id, true); err != nil {
+	if err := s.unrealizeUplink(id, true, true); err != nil {
 		return err
 	}
 	// Clear any network reference (the FK is RESTRICT), then delete.
@@ -547,10 +564,13 @@ func (s *Service) realizeUplink(id int64, egressBridge string) error {
 }
 
 // unrealizeUplink tears the uplink device down. For access/qinq it deletes the
-// subinterface and (only after confirming it's gone) frees the VID back to the
-// pool. For dedicated it detaches the NIC. If guardLiveVMs, it refuses when a VM
-// tap is still on the egress bridge.
-func (s *Service) unrealizeUplink(id int64, guardLiveVMs bool) error {
+// subinterface; with free it then (only after confirming the device is gone)
+// releases the VID back to the pool. A tenant disconnect passes free=false: the
+// uplink keeps its admin-assigned tag so it can be reconnected — only deleting
+// the uplink (or the global teardown) gives the tag back. For dedicated it
+// detaches the NIC. If guardLiveVMs, it refuses when a VM tap is still on the
+// egress bridge.
+func (s *Service) unrealizeUplink(id int64, guardLiveVMs, free bool) error {
 	var mode, dedIface, egress string
 	var vid int
 	var trunkID sql.NullInt64
@@ -574,7 +594,11 @@ func (s *Service) unrealizeUplink(id int64, guardLiveVMs bool) error {
 				}
 			}
 		}
-		s.FreeVID(id) // only reached after the device is confirmed gone
+		if free {
+			s.FreeVID(id) // only reached after the device is confirmed gone
+		} else {
+			_, _ = s.db.Exec(`UPDATE tenant_uplinks SET status='unbound', egress_bridge='' WHERE id=?`, id)
+		}
 	case "dedicated":
 		if dedIface != "" {
 			_ = netdrv.DetachFromBridge(dedIface)
@@ -669,6 +693,7 @@ func (s *Service) ReensureUplinks() {
 			_ = s.realizeUplink(x.id, x.bridge)
 		}
 	}
+	s.syncAllVSwitches() // re-enslaved ports start at VLAN 1 — set their port groups
 }
 
 // DisableTenantEgress is the global rollback hammer: tear down every uplink's
@@ -690,7 +715,7 @@ func (s *Service) DisableTenantEgress(p *Principal, ip string) error {
 	rows.Close()
 	var firstErr error
 	for _, id := range ids {
-		if err := s.unrealizeUplink(id, false); err != nil && firstErr == nil {
+		if err := s.unrealizeUplink(id, false, true); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE uplink_id=?`, id)

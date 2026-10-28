@@ -35,6 +35,27 @@ type TenantNetwork struct {
 	// v3 egress: the connected uplink, if any (empty = internal/no egress).
 	UplinkID   int64
 	UplinkName string
+	UplinkMode string
+	// vSwitch view: the port group carried untagged on the uplink (0 = the
+	// untagged default) and the VLAN port groups on this vSwitch.
+	NativeVLAN     int
+	PortGroups     []TenantPortGroup
+	VMs            int  // live instances on the untagged default port group
+	DefaultCarried bool // the untagged default port group leaves on the uplink
+	VRouterID      int64
+}
+
+// DefaultKind is the untagged default port group's role, like TenantPortGroup.Kind.
+func (t TenantNetwork) DefaultKind() string {
+	switch {
+	case t.VRouterID != 0:
+		return "routed"
+	case t.DefaultCarried:
+		return "uplink"
+	case t.Gateway != "":
+		return "standalone"
+	}
+	return "l2"
 }
 
 func tenantBridgeName(networkID int64) string { return fmt.Sprintf("vdxt%d", networkID) }
@@ -46,7 +67,9 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 	}
 	rows, err := s.db.Query(`SELECT t.id,t.org_id,t.name,t.network_id,t.ext_mode,t.state,t.error,t.is_default,t.created_at,
 		COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,''),
-		COALESCE(t.uplink_id,0),COALESCE((SELECT u.name FROM tenant_uplinks u WHERE u.id=t.uplink_id),'')
+		COALESCE(t.uplink_id,0),COALESCE((SELECT u.name FROM tenant_uplinks u WHERE u.id=t.uplink_id),''),
+		COALESCE((SELECT u.mode FROM tenant_uplinks u WHERE u.id=t.uplink_id),''),t.native_vlan,
+		(SELECT COUNT(*) FROM sessions s WHERE s.network_id=t.network_id AND s.deleted_at IS NULL),t.vrouter_id
 		FROM tenant_networks t LEFT JOIN networks n ON n.id=t.network_id
 		WHERE t.org_id=? ORDER BY t.is_default DESC, t.name`, p.OrgID)
 	if err != nil {
@@ -58,13 +81,31 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 		var t TenantNetwork
 		var def int
 		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.NetworkID, &t.ExtMode, &t.State, &t.Error, &def,
-			&t.CreatedAt, &t.Bridge, &t.CIDR, &t.Gateway, &t.UplinkID, &t.UplinkName); err != nil {
+			&t.CreatedAt, &t.Bridge, &t.CIDR, &t.Gateway, &t.UplinkID, &t.UplinkName, &t.UplinkMode, &t.NativeVLAN, &t.VMs, &t.VRouterID); err != nil {
 			return nil, err
 		}
 		t.IsDefault = def == 1
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	pgs, err := s.ListTenantPortGroups(p)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		t := &out[i]
+		t.DefaultCarried = carriedOut(t.UplinkMode, t.NativeVLAN, 0)
+		for _, pg := range pgs {
+			if pg.TnetID == t.ID {
+				pg.Carried = carriedOut(t.UplinkMode, t.NativeVLAN, pg.VLAN)
+				t.PortGroups = append(t.PortGroups, pg)
+			}
+		}
+	}
+	return out, nil
 }
 
 // AttachableSegments returns the org's segments eligible to attach to a router:
@@ -139,14 +180,38 @@ func (s *Service) ConnectNetworkUplink(p *Principal, tnetID, uplinkID int64, ip 
 	if used > 0 {
 		return fmt.Errorf("that uplink is already connected to a network")
 	}
-	if _, err := s.db.Exec(`UPDATE tenant_networks SET uplink_id=? WHERE id=?`, uplinkID, tnetID); err != nil {
-		return err
-	}
-	if err := s.realizeUplink(uplinkID, tenantBridgeName(netID)); err != nil {
-		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
+	if err := s.connectUplink(tnetID, netID, uplinkID); err != nil {
 		return err
 	}
 	s.audit(p, p.OrgID, "uplink.connect", "tenant_network", fmt.Sprint(tnetID), ip, map[string]any{"uplink": uplinkID})
+	return nil
+}
+
+// connectUplink records the uplink on the vSwitch, wires its device into the
+// bridge and sets the port's VLANs; on any failure it is fully undone.
+func (s *Service) connectUplink(tnetID, netID, uplinkID int64) error {
+	var mode string
+	var native int
+	if err := s.db.QueryRow(`SELECT mode FROM tenant_uplinks WHERE id=?`, uplinkID).Scan(&mode); err != nil {
+		return err
+	}
+	_ = s.db.QueryRow(`SELECT native_vlan FROM tenant_networks WHERE id=?`, tnetID).Scan(&native)
+	if err := s.checkCarry(tnetID, mode, native); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tenant_networks SET uplink_id=? WHERE id=?`, uplinkID, tnetID); err != nil {
+		return err
+	}
+	err := s.realizeUplink(uplinkID, tenantBridgeName(netID))
+	if err == nil {
+		if err = s.resyncVSwitch(tnetID); err != nil {
+			_ = s.unrealizeUplink(uplinkID, false, false)
+		}
+	}
+	if err != nil {
+		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
+		return err
+	}
 	return nil
 }
 
@@ -163,10 +228,14 @@ func (s *Service) DisconnectNetworkUplink(p *Principal, tnetID int64, ip string)
 	if !uplinkID.Valid {
 		return nil // already disconnected
 	}
-	if err := s.unrealizeUplink(uplinkID.Int64, true); err != nil {
+	if err := s.unrealizeUplink(uplinkID.Int64, true, false); err != nil {
 		return err
 	}
 	_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
+	// Port groups the uplink carried get their host gateway/DHCP back.
+	if err := s.resyncVSwitch(tnetID); err != nil {
+		log.Printf("tenant-net: resync vSwitch %d after disconnect: %v", tnetID, err)
+	}
 	s.audit(p, p.OrgID, "uplink.disconnect", "tenant_network", fmt.Sprint(tnetID), ip, nil)
 	return nil
 }
@@ -239,8 +308,13 @@ func (s *Service) createTenantNetwork(orgID int64, name, cidr, gateway string, d
 		return 0, err
 	}
 	tnID, _ := res.LastInsertId()
-	// Realize the host segment. On failure, roll the whole thing back.
-	if err := s.provisionIsolated(bridge, cidr, gateway, dhcp, dhcpRange, dns); err != nil {
+	// Realize the host segment and fence it off from the host (fail closed: an
+	// unguarded tenant bridge is never left behind). On failure, roll back.
+	err = s.provisionIsolated(bridge, cidr, gateway, dhcp, dhcpRange, dns)
+	if err == nil {
+		err = s.applyTenantIsolation()
+	}
+	if err != nil {
 		netdrv.StopTenantDHCP(bridge)
 		netdrv.DelLink(bridge)
 		_, _ = s.db.Exec(`DELETE FROM tenant_networks WHERE id=?`, tnID)
@@ -294,12 +368,25 @@ func (s *Service) DeleteTenantNetwork(p *Principal, id int64, ip string) error {
 	if vrouterID != 0 {
 		return fmt.Errorf("this segment is attached to a router — detach it from the router first")
 	}
+	var pgs int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tenant_portgroups WHERE tnet_id=?`, id).Scan(&pgs)
+	if pgs > 0 {
+		return fmt.Errorf("this vSwitch still has %d port group(s) — delete them first", pgs)
+	}
 	var attached int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE network_id=? AND deleted_at IS NULL`, netID).Scan(&attached)
 	if attached > 0 {
 		return fmt.Errorf("%d instance(s) are still attached to this network — detach or delete them first", attached)
 	}
 	bridge := tenantBridgeName(netID)
+	// Disconnect its uplink first (the uplink keeps its tag for reuse).
+	var uplinkID sql.NullInt64
+	_ = s.db.QueryRow(`SELECT uplink_id FROM tenant_networks WHERE id=?`, id).Scan(&uplinkID)
+	if uplinkID.Valid {
+		if err := s.unrealizeUplink(uplinkID.Int64, true, false); err != nil {
+			return err
+		}
+	}
 	if _, err := s.db.Exec(`DELETE FROM tenant_networks WHERE id=?`, id); err != nil {
 		return err
 	}
@@ -311,6 +398,9 @@ func (s *Service) DeleteTenantNetwork(p *Principal, id int64, ip string) error {
 	// Device is gone — now release the reserved segment identity (never before,
 	// so a concurrent allocation can't reuse the VNI while the bridge lingers).
 	s.FreeVNI(netID)
+	if err := s.applyTenantIsolation(); err != nil {
+		log.Printf("tenant-net: isolation after delete: %v", err)
+	}
 	if netdrv.IfaceExists(bridge) {
 		// Row is gone but the device lingered (should not happen for an empty
 		// bridge); surface it so the operator can clean up.
@@ -356,8 +446,9 @@ func (s *Service) ReensureTenantNetworks() {
 	// Skip segments attached to a router (vrouter_id!=0): the router leg owns
 	// their gateway + DHCP, so re-adding a host gateway IP here would create a
 	// duplicate gateway on that L2. Standalone segments (vrouter_id=0) rebuild.
-	rows, err := s.db.Query(`SELECT t.network_id,COALESCE(n.cidr,''),COALESCE(n.gateway,'')
-		FROM tenant_networks t JOIN networks n ON n.id=t.network_id WHERE t.ext_mode='isolated' AND t.vrouter_id=0`)
+	rows, err := s.db.Query(`SELECT t.network_id,COALESCE(n.cidr,''),COALESCE(n.gateway,''),COALESCE(u.mode,''),t.native_vlan
+		FROM tenant_networks t JOIN networks n ON n.id=t.network_id LEFT JOIN tenant_uplinks u ON u.id=t.uplink_id
+		WHERE t.ext_mode='isolated' AND t.vrouter_id=0`)
 	if err != nil {
 		return
 	}
@@ -368,7 +459,12 @@ func (s *Service) ReensureTenantNetworks() {
 	var list []row
 	for rows.Next() {
 		var r row
-		if rows.Scan(&r.netID, &r.cidr, &r.gateway) == nil {
+		var mode string
+		var native int
+		if rows.Scan(&r.netID, &r.cidr, &r.gateway, &mode, &native) == nil {
+			if carriedOut(mode, native, 0) {
+				r.gateway = "" // upstream owns this L2: bridge only, no host gateway/DHCP
+			}
 			list = append(list, r)
 		}
 	}
@@ -386,6 +482,9 @@ func (s *Service) ReensureTenantNetworks() {
 			log.Printf("tenant-net: reensure %s: %v", bridge, err)
 		}
 	}
+	// Port groups + host isolation for every vSwitch (uplink ports are set again
+	// once ReensureUplinks has re-wired them).
+	s.syncAllVSwitches()
 }
 
 // gatewayCIDRMask turns a gateway IP + a network CIDR into "gwip/prefix" and the

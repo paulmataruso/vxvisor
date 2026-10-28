@@ -34,6 +34,9 @@ type OverviewData struct {
 	PortGroups int
 	VSwitches  int
 	Bonds      int
+	// tenant view: the org's own vSwitches and how many reach an uplink
+	TenantVSwitches int
+	TenantUplinks   int
 	// storage
 	Pools         int
 	PoolUsedBytes int64
@@ -261,6 +264,14 @@ func (s *Service) Overview(p *Principal) OverviewData {
 	}
 	if bl, err := s.ListBonds(p); err == nil {
 		d.Bonds = len(bl)
+	}
+	if tn, err := s.ListTenantNetworks(p); err == nil {
+		d.TenantVSwitches = len(tn)
+		for _, t := range tn {
+			if t.UplinkID != 0 {
+				d.TenantUplinks++
+			}
+		}
 	}
 
 	if pools, err := s.ListPools(p); err == nil {

@@ -38,6 +38,9 @@
       <span>
         {{if $.InstAdmin}}<button class="btn sm" data-modal="m-tr-{{$vrid}}">+ Transit link</button>{{end}}
         <button class="btn sm" data-modal="m-seg-{{$vrid}}">+ Attach segment</button>
+        {{if eq .Runtime "netns"}}<button class="btn sm" data-modal="m-pga-{{$vrid}}">+ Attach port group</button>
+        {{$hasUp := false}}{{range .Legs}}{{if eq .Kind "uplink"}}{{$hasUp = true}}{{end}}{{end}}
+        {{if not $hasUp}}<button class="btn sm" data-modal="m-upl-{{$vrid}}">+ Uplink (WAN)</button>{{end}}{{end}}
         {{if $.InstAdmin}}<button class="btn sm" data-modal="m-in-{{$vrid}}">+ Internal port group</button>{{end}}
       </span>
     </div>
@@ -46,14 +49,15 @@
       <tr><th>Role</th><th>Iface</th><th>Bridge / NIC</th><th>Address</th><th>DHCP</th><th>DNS</th><th></th></tr>
       {{range .Legs}}
       <tr>
-        <td><span class="pill {{if eq .Kind "transit"}}running{{end}}">{{.Kind}}</span></td>
+        <td><span class="pill {{if or (eq .Kind "transit") (eq .Kind "uplink")}}running{{end}}">{{.Kind}}</span></td>
         <td class="mono">{{.IfaceName}}</td>
-        <td class="muted" style="font-size:12px">{{if eq .Kind "transit"}}<span class="mono">{{.PhysIface}}</span> → {{end}}<span class="mono">{{.Bridge}}</span></td>
-        <td class="mono" style="font-size:12px">{{.CIDR}}</td>
-        <td class="muted" style="font-size:12px">{{if .DHCP}}<span class="pill running">on</span> <span class="mono">{{.DHCPRange}}</span>{{else}}off{{end}}</td>
+        <td class="muted" style="font-size:12px">{{if eq .Kind "transit"}}<span class="mono">{{.PhysIface}}</span> → {{end}}<span class="mono">{{.Bridge}}</span>{{if .VLAN}} · VLAN {{.VLAN}}{{end}}{{if and .NetworkName (ne .Kind "transit")}} <span class="muted">({{.NetworkName}})</span>{{end}}</td>
+        <td class="mono" style="font-size:12px">{{.CIDR}}{{if .UpstreamGW}} <span class="muted">→ {{.UpstreamGW}}</span>{{end}}</td>
+        <td class="muted" style="font-size:12px">{{if eq .Kind "uplink"}}{{if .SNAT}}<span class="pill running">SNAT</span>{{else}}no NAT{{end}}{{else if .DHCP}}<span class="pill running">on</span> <span class="mono">{{.DHCPRange}}</span>{{else}}off{{end}}</td>
         <td class="muted mono" style="font-size:12px">{{if .DHCPDNS}}{{.DHCPDNS}}{{else}}—{{end}}</td>
         <td style="text-align:right;white-space:nowrap">
           {{if eq .Kind "transit"}}<button class="btn sm" data-modal="m-tre-{{$vrid}}">Edit</button>{{end}}
+          {{if eq .Kind "uplink"}}<form method="post" action="/vrouters/{{$vrid}}/uplink/detach" style="display:inline" onsubmit="return confirm('Detach the uplink leg? The router loses its default route and NAT.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Detach</button></form>{{end}}
           {{if eq .Kind "internal"}}<button class="btn sm" data-modal="m-ine-{{$vrid}}-{{.Idx}}">Edit</button> <button class="btn sm" data-modal="m-dhcp-{{$vrid}}-{{.Idx}}">DHCP</button>{{if .NetworkID}} <form method="post" action="/vrouters/{{$vrid}}/segment/detach" style="display:inline" onsubmit="return confirm('Detach this segment from the router? The segment and its VMs are kept.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="net_id" value="{{.NetworkID}}"><button class="btn sm">Detach</button></form>{{end}}{{end}}
         </td>
       </tr>
@@ -237,6 +241,49 @@
         {{end}}
       </form>
     </div></div>
+    {{if eq .Runtime "netns"}}
+    <div class="modal" id="m-pga-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Attach a port group — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/portgroup/attach">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        {{if $.PortGroups}}
+        <label class="fld">Port group
+          <select name="pg_id" required>
+            {{range $.PortGroups}}<option value="{{.ID}}">{{.Name}} · VLAN {{.VLAN}}{{if .CIDR}} ({{.CIDR}}){{end}}</option>{{end}}
+          </select>
+        </label>
+        <label class="fld">vRouter gateway IP / CIDR<input type="text" name="gateway" placeholder="10.60.0.1/24" required></label>
+        <label class="vdx-chk" style="display:inline-flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;font-weight:500"><input type="checkbox" name="dhcp" value="1"> Serve DHCP on this port group (from the router)</label>
+        <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.60.0.100,10.60.0.200"></label>
+        <label class="fld">DNS servers (handed out via DHCP, comma-separated)<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
+        <p class="muted" style="margin:0">The router joins the port group's VLAN on its vSwitch and becomes its gateway. Only port groups created without a gateway (and not carried out an uplink) appear here.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Attach</button></div>
+        {{else}}
+        <p class="muted" style="margin:0">No routable port groups. On the <a href="/networks">Networks</a> page, add a port group to a vSwitch and leave its gateway blank, then attach it here.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+        {{end}}
+      </form>
+    </div></div>
+    <div class="modal" id="m-upl-{{$vrid}}"><div class="modal-card">
+      <div class="modal-head"><h3>Uplink (WAN) leg — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+      <form class="mform" method="post" action="/vrouters/{{$vrid}}/uplink/attach">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        {{if $.UplinkLegs}}
+        <label class="fld">Uplink port group
+          <select name="leg" required>{{range $.UplinkLegs}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
+        </label>
+        <label class="fld">Router's address on the upstream network<input type="text" name="cidr" placeholder="203.0.113.10/29" required></label>
+        <label class="fld">Upstream gateway (default route)<input type="text" name="upstream_gw" placeholder="203.0.113.9"></label>
+        <label class="vdx-chk" style="display:inline-flex;align-items:center;gap:8px;margin:4px 0;font-size:13px;font-weight:500"><input type="checkbox" name="snat" value="1" checked> NAT (masquerade) traffic leaving this leg</label>
+        <p class="muted" style="margin:0">The router joins the port group your uplink carries to the physical network and routes your other networks out through it. With NAT on, VMs reach the outside from the router's upstream address; turn it off if the upstream routes your subnets back to this router.</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Attach uplink</button></div>
+        {{else}}
+        <p class="muted" style="margin:0">None of your vSwitches is connected to an uplink. On the <a href="/networks">Networks</a> page, connect a vSwitch to an uplink first (your provider assigns uplinks).</p>
+        <div class="modal-actions"><button type="button" class="btn" data-close>Close</button></div>
+        {{end}}
+      </form>
+    </div></div>
+    {{end}}
 
     {{if $.InstAdmin}}
     <div class="modal" id="m-tr-{{$vrid}}"><div class="modal-card">

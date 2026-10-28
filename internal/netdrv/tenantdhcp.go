@@ -36,6 +36,9 @@ func StartTenantDHCP(bridge, gatewayIP, dhcpRange, mask, dns string) error {
 	b.WriteString("interface=" + bridge + "\n")
 	b.WriteString("bind-interfaces\n")
 	b.WriteString("except-interface=lo\n")
+	// DHCP only: no DNS listener, so a tenant can't use the host's resolver (and
+	// its view of internal names). Clients get their resolvers via option 6.
+	b.WriteString("port=0\n")
 	if mask != "" {
 		b.WriteString("dhcp-range=" + dhcpRange + "," + mask + ",12h\n")
 	} else {
@@ -62,4 +65,18 @@ func StopTenantDHCP(bridge string) error {
 		_ = os.Remove(pid)
 	}
 	return nil
+}
+
+// TenantDHCPRunning reports whether the dnsmasq for this interface is alive.
+func TenantDHCPRunning(bridge string) bool {
+	data, err := os.ReadFile(filepath.Join(tenantDHCPDir, bridge+".pid"))
+	if err != nil {
+		return false
+	}
+	pid := strings.TrimSpace(string(data))
+	if pid == "" {
+		return false
+	}
+	_, err = os.Stat("/proc/" + pid)
+	return err == nil
 }

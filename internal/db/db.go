@@ -1046,6 +1046,43 @@ ALTER TABLE tenant_networks ADD COLUMN uplink_id INTEGER REFERENCES tenant_uplin
 -- list) and behaves exactly as before.
 ALTER TABLE ext_trunks ADD COLUMN shared INTEGER NOT NULL DEFAULT 0;
 `},
+	{48, "tenant-portgroups", `
+-- Tenant vSwitches + port groups. A tenant network (tenant_networks row) IS the
+-- tenant's vSwitch: its bridge vdxt<network_id>, its uplink, and its untagged
+-- default port group (the backing networks row). A tenant port group is an extra
+-- 802.1q VLAN (2-4094, private to the vSwitch, so two tenants' VLAN 10s never
+-- meet) on that bridge, with its own backing networks row (bridge + vlan_id)
+-- that VMs attach to as an access port. The bridge turns vlan_filtering on only
+-- once it has a tagged port group, so existing segments are untouched.
+-- STRICTLY ADDITIVE: a new table + constant-default columns.
+CREATE TABLE tenant_portgroups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id      INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    tnet_id     INTEGER NOT NULL REFERENCES tenant_networks(id) ON DELETE RESTRICT,
+    name        TEXT NOT NULL,
+    vlan_id     INTEGER NOT NULL CHECK (vlan_id BETWEEN 2 AND 4094),
+    network_id  INTEGER NOT NULL REFERENCES networks(id) ON DELETE RESTRICT,
+    dhcp        INTEGER NOT NULL DEFAULT 0,
+    dhcp_range  TEXT NOT NULL DEFAULT '',
+    dhcp_dns    TEXT NOT NULL DEFAULT '',
+    vrouter_id  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tpg_vswitch_vlan ON tenant_portgroups(tnet_id, vlan_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tpg_vswitch_name ON tenant_portgroups(tnet_id, name);
+
+-- Which port group rides an ACCESS uplink untagged (0 = the untagged default
+-- port group). QinQ / dedicated uplinks carry every port group tagged.
+ALTER TABLE tenant_networks ADD COLUMN native_vlan INTEGER NOT NULL DEFAULT 0;
+
+-- vRouter legs on a tenant port group sit on the vSwitch bridge as an access
+-- port of that VLAN. An "uplink" leg (the router's external side, on the port
+-- group that leaves through the vSwitch's uplink) carries the upstream gateway
+-- (installed as the router's default route) and whether to SNAT out of it.
+ALTER TABLE vrouter_legs ADD COLUMN vlan_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE vrouter_legs ADD COLUMN upstream_gw TEXT NOT NULL DEFAULT '';
+ALTER TABLE vrouter_legs ADD COLUMN snat INTEGER NOT NULL DEFAULT 0;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

@@ -18,6 +18,22 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 	vswitches, _ := s.svc.ListVSwitches(p)
 	tnets, _ := s.svc.ListTenantNetworks(p)
 	uplinks, _ := s.svc.AttachableUplinks(p)
+	// Tenant vSwitch / port-group rows are shown in the vSwitches card — keep the
+	// raw Port Groups card to everything else.
+	tenantNet := map[int64]bool{}
+	for _, t := range tnets {
+		tenantNet[t.NetworkID] = true
+		for _, pg := range t.PortGroups {
+			tenantNet[pg.NetworkID] = true
+		}
+	}
+	var others []netdrv.Network
+	for _, n := range list {
+		if !tenantNet[n.ID] {
+			others = append(others, n)
+		}
+	}
+	list = others
 	s.render(w, p, "networks.html", "networks", map[string]any{
 		"Networks":       list,
 		"TenantNetworks": tnets,
@@ -89,10 +105,19 @@ func (s *Server) createTenantNetwork(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	dhcp := r.FormValue("dhcp") == "1"
-	if _, err := s.svc.CreateTenantNetwork(p, r.FormValue("name"), r.FormValue("cidr"), r.FormValue("gateway"),
-		dhcp, r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
+	id, err := s.svc.CreateTenantNetwork(p, r.FormValue("name"), r.FormValue("cidr"), r.FormValue("gateway"),
+		dhcp, r.FormValue("dhcp_range"), r.FormValue("dhcp_dns"), clientIP(r))
+	switch {
+	case err != nil:
+		setFlash(w, err.Error())
+	case atoi(r.FormValue("uplink_id")) > 0:
+		if err := s.svc.ConnectNetworkUplink(p, id, atoi(r.FormValue("uplink_id")), clientIP(r)); err != nil {
+			setFlash(w, "vSwitch created, but connecting the uplink failed: "+err.Error())
+		} else {
+			setFlashOK(w, "vSwitch created and connected to its uplink.")
+		}
+	default:
+		setFlashOK(w, "vSwitch created.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }
@@ -103,8 +128,50 @@ func (s *Server) deleteTenantNetwork(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	if err := s.svc.DeleteTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
+		setFlash(w, err.Error())
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// createTenantPortGroup adds a VLAN port group to one of the org's vSwitches.
+func (s *Server) createTenantPortGroup(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
 		return
+	}
+	vlan, _ := strconv.Atoi(r.FormValue("vlan_id"))
+	if _, err := s.svc.CreateTenantPortGroup(p, atoi(r.PathValue("id")), r.FormValue("name"), vlan,
+		r.FormValue("cidr"), r.FormValue("gateway"), r.FormValue("dhcp") == "1", r.FormValue("dhcp_range"),
+		r.FormValue("dhcp_dns"), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Port group added.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+func (s *Server) deleteTenantPortGroup(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.DeleteTenantPortGroup(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// setVSwitchNative picks the port group a vSwitch's uplink carries untagged.
+func (s *Server) setVSwitchNative(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	vlan, _ := strconv.Atoi(r.FormValue("vlan"))
+	if err := s.svc.SetVSwitchNative(p, atoi(r.PathValue("id")), vlan, clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Native port group updated.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

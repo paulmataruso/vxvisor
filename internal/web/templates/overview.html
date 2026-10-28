@@ -272,8 +272,10 @@
   <div class="pan">
     <div class="pan-h"><h2><svg class="ic"><use href="#i-network"/></svg>Networking</h2><a href="/networks">Topology →</a></div>
     <div class="kv"><span class="k">Port groups</span><span class="v">{{.PortGroups}}</span></div>
-    <div class="kv"><span class="k">vSwitches</span><span class="v">{{.VSwitches}}</span></div>
+    {{if $.P.IsAdmin}}<div class="kv"><span class="k">vSwitches</span><span class="v">{{.VSwitches}}</span></div>
     <div class="kv"><span class="k">Uplinks / LAG</span><span class="v">{{.Bonds}}</span></div>
+    {{else}}<div class="kv"><span class="k">vSwitches</span><span class="v">{{.TenantVSwitches}}</span></div>
+    <div class="kv"><span class="k">Connected to an uplink</span><span class="v">{{.TenantUplinks}}</span></div>{{end}}
     {{if $.P.IsAdmin}}<div class="kv"><span class="k">L3 routing</span><span class="v">{{if eq .Routing "configured"}}<span class="pill running">on</span>{{else}}<span class="pill">off</span>{{end}}</span></div>{{end}}
   </div>
 

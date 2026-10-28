@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -105,7 +106,8 @@ func (s *Service) getVRouter(p *Principal, id int64) (vrouter.VRouter, error) {
 }
 
 func (s *Service) loadLegs(vrID int64) ([]vrouter.Leg, error) {
-	rows, err := s.db.Query(`SELECT l.id,l.vrouter_id,l.idx,l.kind,l.bridge,l.phys_iface,l.network_id,l.iface_name,l.cidr,l.mac,l.dhcp,l.dhcp_range,l.dhcp_dns,COALESCE(n.name,''),COALESCE(n.cidr,'')
+	rows, err := s.db.Query(`SELECT l.id,l.vrouter_id,l.idx,l.kind,l.bridge,l.phys_iface,l.network_id,l.iface_name,l.cidr,l.mac,l.dhcp,l.dhcp_range,l.dhcp_dns,
+		l.vlan_id,l.upstream_gw,l.snat,COALESCE(n.name,''),COALESCE(n.cidr,'')
 		FROM vrouter_legs l LEFT JOIN networks n ON n.id=l.network_id WHERE l.vrouter_id=? ORDER BY l.idx`, vrID)
 	if err != nil {
 		return nil, err
@@ -114,12 +116,14 @@ func (s *Service) loadLegs(vrID int64) ([]vrouter.Leg, error) {
 	var out []vrouter.Leg
 	for rows.Next() {
 		var l vrouter.Leg
-		var dhcp int
+		var dhcp, snat int
 		if err := rows.Scan(&l.ID, &l.VRouterID, &l.Idx, &l.Kind, &l.Bridge, &l.PhysIface, &l.NetworkID,
-			&l.IfaceName, &l.CIDR, &l.MAC, &dhcp, &l.DHCPRange, &l.DHCPDNS, &l.NetworkName, &l.NetworkCIDR); err != nil {
+			&l.IfaceName, &l.CIDR, &l.MAC, &dhcp, &l.DHCPRange, &l.DHCPDNS, &l.VLAN, &l.UpstreamGW, &snat,
+			&l.NetworkName, &l.NetworkCIDR); err != nil {
 			return nil, err
 		}
 		l.DHCP = dhcp != 0
+		l.SNAT = snat != 0
 		out = append(out, l)
 	}
 	return out, rows.Err()
@@ -530,6 +534,9 @@ func (s *Service) AttachSegment(p *Principal, vrID, tnetID int64, gatewayCIDR st
 	if strings.TrimSpace(segGW) != "" {
 		return fmt.Errorf("that segment has its own gateway — detach its gateway, or create a routed (gatewayless) segment, before attaching it to a router")
 	}
+	if mode, native := s.vswitchEgress(tnetID); carriedOut(mode, native, 0) {
+		return fmt.Errorf("that vSwitch's untagged port group is carried out its uplink (the upstream network owns its gateway) — connect the router to the uplink instead")
+	}
 	gatewayCIDR = strings.TrimSpace(gatewayCIDR)
 	gwIP := gatewayCIDR
 	if i := strings.IndexByte(gwIP, '/'); i >= 0 {
@@ -588,11 +595,14 @@ func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) erro
 	if err != nil {
 		return err
 	}
-	// Resolve the owning tenant segment by its backing networks id, scoped to the
-	// org — rejects a foreign/non-segment network_id.
-	var tnetID int64
+	// Resolve the owning tenant segment (or vSwitch port group) by its backing
+	// networks id, scoped to the org — rejects a foreign/non-segment network_id.
+	var tnetID, pgID int64
 	var segName string
 	err = s.db.QueryRow(`SELECT id,name FROM tenant_networks WHERE network_id=? AND org_id=?`, netID, p.OrgID).Scan(&tnetID, &segName)
+	if err == sql.ErrNoRows {
+		err = s.db.QueryRow(`SELECT id,name FROM tenant_portgroups WHERE network_id=? AND org_id=?`, netID, p.OrgID).Scan(&pgID, &segName)
+	}
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("segment not found in this organization")
 	}
@@ -611,7 +621,11 @@ func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) erro
 	if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND network_id=? AND kind='internal'`, vrID, netID); err != nil {
 		return err
 	}
-	s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE id=?`, tnetID)
+	if pgID != 0 {
+		s.db.Exec(`UPDATE tenant_portgroups SET vrouter_id=0 WHERE id=?`, pgID)
+	} else {
+		s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE id=?`, tnetID)
+	}
 	s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, netID)
 	s.audit(p, p.OrgID, "vrouter.segment.detach", "vrouter", v.Name, ip, map[string]any{"segment": segName})
 	return s.applyAndPush(vrID)
@@ -701,6 +715,11 @@ func (s *Service) applyAndPush(vrID int64) error {
 	// empty netfilter instance, so the ruleset must be re-pushed after legs change.
 	if err := b.PushFirewall(v, vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON))); err != nil {
 		return err
+	}
+	if ea, ok := b.(vrouter.EdgeApplier); ok {
+		if err := ea.ApplyEdge(v, legs); err != nil {
+			return err
+		}
 	}
 	s.db.Exec(`UPDATE vrouters SET status='running', error='' WHERE id=?`, vrID)
 	return nil
@@ -995,14 +1014,16 @@ func (s *Service) StopVRouter(p *Principal, vrID int64, ip string) error {
 }
 
 // isTenantSegment reports whether a networks row is an ATTACHED tenant segment
-// (owned by the tenant-networks lifecycle), as opposed to an internal port group
-// this vRouter created itself. Attached segments survive the router.
+// or tenant port group (owned by the tenant-networks lifecycle), as opposed to
+// an internal port group this vRouter created itself. Attached segments survive
+// the router.
 func (s *Service) isTenantSegment(netID int64) bool {
 	if netID == 0 {
 		return false
 	}
 	var n int
-	s.db.QueryRow(`SELECT COUNT(*) FROM tenant_networks WHERE network_id=?`, netID).Scan(&n)
+	s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM tenant_networks WHERE network_id=?)+
+		(SELECT COUNT(*) FROM tenant_portgroups WHERE network_id=?)`, netID, netID).Scan(&n)
 	return n > 0
 }
 
@@ -1052,12 +1073,16 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 		if l.Kind == vrouter.LegTransit && l.PhysIface != "" {
 			_ = netdrv.DetachFromBridge(l.PhysIface)
 		}
+		if l.Kind == vrouter.LegUplink {
+			continue // sits on a tenant vSwitch: the veth died with the runtime, the bridge stays
+		}
 		if l.Kind == vrouter.LegInternal && s.isTenantSegment(l.NetworkID) {
-			// Attached tenant segment: release the attach link only. Its
-			// networks row and bridge are torn down by DeleteTenantNetwork.
-			// Also clear the gateway the router owned, so the segment returns to
-			// an attachable (gatewayless) state.
+			// Attached tenant segment / port group: release the attach link only.
+			// Its networks row and bridge belong to the tenant vSwitch. Also clear
+			// the gateway the router owned, so it returns to an attachable
+			// (gatewayless) state.
 			s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE network_id=?`, l.NetworkID)
+			s.db.Exec(`UPDATE tenant_portgroups SET vrouter_id=0 WHERE network_id=?`, l.NetworkID)
 			s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, l.NetworkID)
 			continue
 		}
@@ -1125,6 +1150,11 @@ func (s *Service) ReensureVRouters() {
 		// Re-apply the zone firewall (the rebuilt runtime has an empty netfilter
 		// instance after a host reboot).
 		_ = b.PushFirewall(v, vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON)))
+		if ea, ok := b.(vrouter.EdgeApplier); ok {
+			if err := ea.ApplyEdge(v, legs); err != nil {
+				log.Printf("vrouter %s: edge: %v", v.Name, err)
+			}
+		}
 		for _, l := range legs {
 			if l.Kind == vrouter.LegInternal && l.DHCP {
 				_ = b.SetDHCP(v, l)
@@ -1202,6 +1232,10 @@ func (s *Service) VRouterDiagram(p *Principal, id int64) (*VRDiagram, error) {
 		case vrouter.LegTransit:
 			sw, port, mgmt, descr := s.LLDPDetail(l.PhysIface)
 			d.Transit = &VRDiagTransit{CIDR: l.CIDR, Phys: l.PhysIface, Switch: sw, Port: port, Mgmt: mgmt, Descr: descr}
+		case vrouter.LegUplink:
+			if d.Transit == nil {
+				d.Transit = &VRDiagTransit{CIDR: l.CIDR, Phys: "uplink · " + l.NetworkName}
+			}
 		}
 	}
 	return d, nil
