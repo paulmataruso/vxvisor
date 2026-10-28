@@ -1,8 +1,12 @@
 package qemu
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestArgsBindLoopback is the regression guard for the B1 security fix: QEMU
@@ -115,4 +119,27 @@ func TestArgsNoPasswordWhenUnset(t *testing.T) {
 	if !strings.Contains(a, "127.0.0.1:0,websocket=127.0.0.1:6900") {
 		t.Errorf("default websocket port wrong: %s", a)
 	}
+}
+
+// TestLaunchReapsExitedChild guards the zombie leak: when QEMU exits, Launch's
+// child must be reaped so /proc/<pid> disappears. A zombie keeps its /proc entry
+// and still answers kill(pid, 0), which made dead VMs look alive forever.
+func TestLaunchReapsExitedChild(t *testing.T) {
+	old := qemuBinary
+	qemuBinary = "true" // exits immediately, ignores QEMU's argv
+	defer func() { qemuBinary = old }()
+
+	s := Spec{ID: "z", DiskPath: "/d", CPUs: 1, MemoryMB: 512, VNCPort: 5900, UserNet: true}
+	proc, err := Launch(s, filepath.Join(t.TempDir(), "z.log"))
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	stat := "/proc/" + strconv.Itoa(proc.Pid) + "/stat"
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(stat); os.IsNotExist(err) {
+			return // reaped
+		}
+	}
+	data, _ := os.ReadFile(stat)
+	t.Fatalf("exited child %d was never reaped (zombie): %s", proc.Pid, data)
 }

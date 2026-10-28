@@ -583,13 +583,22 @@ func (s Spec) netQueues() int {
 	return s.CPUs
 }
 
-// Launch starts QEMU detached and returns the running process.
+// qemuBinary is the emulator Launch runs (a var so tests can substitute a stub).
+var qemuBinary = "qemu-system-x86_64"
+
+// Launch starts QEMU detached and returns the running process. A goroutine reaps
+// the child when it exits: otherwise a guest that powers off (or a QEMU that
+// crashes) lingers as a zombie, and kill(pid, 0) + /proc/<pid>/stat keep
+// reporting it alive — so Stop waits out every timeout and Reconcile never marks
+// the VM stopped.
 func Launch(s Spec, logPath string) (*os.Process, error) {
 	logf, err := os.Create(logPath)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command("qemu-system-x86_64", s.Args()...)
+	// QEMU inherits its own copy of the log fd; ours is not needed past Start.
+	defer logf.Close()
+	cmd := exec.Command(qemuBinary, s.Args()...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	// Privilege separation: launch the VM under a dedicated unprivileged uid/gid
@@ -600,9 +609,9 @@ func Launch(s Spec, logPath string) (*os.Process, error) {
 		}
 	}
 	if err := cmd.Start(); err != nil {
-		logf.Close()
 		return nil, err
 	}
+	go func() { _ = cmd.Wait() }()
 	return cmd.Process, nil
 }
 

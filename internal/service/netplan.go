@@ -175,9 +175,8 @@ func applyNetplanWithRollback(content string, verify func() bool) error {
 	wd := exec.Command("setsid", "bash", "-c",
 		fmt.Sprintf("sleep 180; [ -f /run/vdx-netok ] && exit 0; rm -f %s; cp %s/*.yaml /etc/netplan/ 2>/dev/null; netplan apply",
 			mgmtNetplanFile, backup))
-	_ = wd.Start()
-	if wd.Process != nil {
-		_ = wd.Process.Release()
+	if wd.Start() == nil {
+		go func() { _ = wd.Wait() }() // reap it when it exits (no zombie)
 	}
 
 	_ = exec.Command("netplan", "apply").Run()
