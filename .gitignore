@@ -24,3 +24,6 @@
 # Local Claude session memory snapshot (host IPs/creds) — travels with a manual
 # folder copy, never pushed to the public repo.
 /.claude-memory/
+
+# Local deploy credentials for the VXVisor host (sshpass) — never commit.
+/.secrets/
