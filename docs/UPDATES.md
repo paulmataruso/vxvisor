@@ -47,36 +47,33 @@ whole flow; read it before touching anything under the "Code map" below.
 
 ## Tier 1 — desktop client self-update (from its server)
 
-**Server endpoints** (`internal/web/clients_handlers.go`, served to the client's
-`vdx_session` cookie):
+The client is a thin **Wails** webview shell (`desktop/`, module `vxconsole`) that
+navigates to the server and renders the server's own web UI (pivoted from Fyne
+2026-10-24). Its version is baked in with `-ldflags -X main.version=<ver>` by
+`desktop/build.sh`.
+
+**Server endpoints** (`internal/web/clients_handlers.go`, registered in `server.go`).
+These are **public** (no `vdx_session`) — the binaries aren't secret, and the shell
+checks before the user logs in:
 - `GET /clients/latest?os=<goos>&arch=<goarch>` → JSON
   `{version, filename, url, sha256, size}` for the newest matching `vxconsole-*`
   build in `<DataDir>/clients`. Empty strings if none.
 - `GET /clients/download/{name}` → streams the binary.
 
-**Client** (`desktop/internal/`):
-- `client.LatestClient(goos, goarch)` and `client.DownloadTo(urlPath, w)` (hashes
-  while streaming) in `client/client.go`.
-- `ui/update.go`: `sh.checkForUpdate()` runs in a goroutine after the shell loads
-  (`shell.go` `showShell` → `go sh.checkForUpdate()`). If `versionNewer(latest, Version)`
-  it shows a confirm dialog → downloads to `<exe>.new` → verifies sha256 → `applyUpdate`.
-- `ui/update_apply_{linux,windows,other}.go` (build-tagged):
+**Client** (`desktop/update.go` + build-tagged `desktop/update_apply_*.go`):
+- The connect screen (`frontend/dist/index.html`) awaits the bound `App.CheckUpdate(server)`
+  before navigating. It fetches `/clients/latest`; if `versionNewer(latest, version)` it
+  asks to update → downloads to `<exe>.new` → verifies sha256 → `applyUpdate`. Any error
+  or "no build published" returns silently and the connect proceeds.
+- `update_apply_{linux,windows,other}.go`:
   - **linux:** `chmod 0755`, rename over the running exe, `syscall.Exec` to relaunch.
-  - **windows:** rename running exe → `.old`, move new in, start it, `os.Exit(0)`;
-    the leftover `.old` is deleted on next launch (`cleanupOldBinary()` in `ui.New`).
-  - **other:** unsupported (reports an error, app keeps running).
-- The login screen shows the running version under "Management Console"
-  (`ui/app.go`, from `ui.Version`) — the quickest way to confirm what you're on.
-
-> **Client is now Wails (pivoted 2026-10-24).** The desktop client is no longer a Fyne app
-> that implements each page; it is a thin **Wails** webview shell (`desktop/`, module
-> `vxconsole`) that navigates to the server and renders the server's own web UI. Version is
-> baked straight in with `-ldflags -X main.version=<ver>` (Wails forwards it — no
-> `version_gen.go` dance). The sections below about the Fyne client's in-app self-update
-> (`ui/update.go`, `update_apply_*.go`) describe the **retired** client; **client-side
-> self-update is not yet reimplemented in the Wails shell** (the UI lives server-side now, so
-> the shell rarely changes). Until it is, update a client by downloading it from the
-> `/clients` page. The **asset contract and the server←GitHub tier below are unchanged.**
+  - **windows:** writes `<exe>.update.bat`, which retries `move /Y` until the running exe is
+    unlocked, relaunches it and deletes itself; the process `os.Exit(0)`s. Everything is
+    logged to `<exe>.update.log`. A leftover `<exe>.old` is removed on launch
+    (`App.cleanupOld`).
+  - **other:** unsupported (returns an error; the app keeps running).
+- A client only self-updates if it already contains this code (**v1.84.0+**); older shells
+  must be downloaded once from the `/clients` page.
 
 ## Tier 2 — server self-update (from GitHub Releases)
 
@@ -186,7 +183,7 @@ Safe only if no new DB migration ran since (migrations are forward-only; see CLA
 | Concern | File |
 | --- | --- |
 | Client latest/download endpoints | `internal/web/clients_handlers.go` |
-| Client self-update logic | _(retired with the Fyne client; not yet reimplemented in the Wails shell)_ |
+| Client self-update logic | `desktop/update.go`, `desktop/update_apply_{linux,windows,other}.go` |
 | Client shell (Wails) | `desktop/main.go`, `desktop/app.go`, `desktop/frontend/dist/index.html` |
 | Client version stamp | `desktop/build.sh` → `-ldflags -X main.version=<ver>` |
 | GitHub release client | `internal/platform/github.go` |
@@ -201,9 +198,10 @@ Safe only if no new DB migration ran since (migrations are forward-only; see CLA
 - **Update page says "no published release found":** no release on the selected
   channel (Stable has no non-prerelease yet), or the repo is private (anon 404), or the
   host has no egress to api.github.com.
-- **Client never prompts:** it predates v1.13.0 (no check code) — download once by hand;
-  or it already matches the server's latest; or the check hit an error (silent) — check
-  the login-screen version line to see what it actually is.
-- **Client prompts every launch:** the `main.version` clobber bug (fixed; see Tier 1).
+- **Client never prompts:** it predates v1.84.0 (no Wails check code) — download once by
+  hand; or it already matches the server's latest; or the check hit an error (silent).
+- **Client prompts every launch (Windows):** the swap didn't happen — read
+  `<exe>.update.log` next to the exe. (A past cause: Wails' native Windows dialog returns
+  "Yes"/"No", not the custom button labels; `CheckUpdate` accepts yes/update/ok.)
 - **First release to point at:** until `deploy/release.sh` (or the REST steps) has run at
   least once, Tier 2 has nothing to find.

@@ -177,8 +177,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   `CC=x86_64-w64-mingw32-gcc CGO_ENABLED=1 wails build -s -platform windows/amd64`. Build-host
   deps: wails CLI, `libgtk-3-dev` + `libwebkit2gtk-4.1-dev` (Linux), `gcc-mingw-w64-x86-64`
   (Windows). Version baked via `-ldflags -X main.version` (Wails forwards it, unlike fyne-cross).
-  Shell self-update is not yet implemented (the UI lives server-side now, so the shell rarely
-  changes); until then a new client is downloaded from the `/clients` page.
+  The shell self-updates from its server's public `/clients/latest` before connecting
+  (`desktop/update.go`, v1.84.0+); older shells are downloaded once from the `/clients` page.
 
 - **Tenant networks** (migration 44, `tenant_networks`): first-class per-org isolated
   networks. v1 ships the **isolated** mode — a dedicated per-org bridge `vdxt<network_id>`
