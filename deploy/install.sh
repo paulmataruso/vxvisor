@@ -278,6 +278,22 @@ if [ -f /etc/frr/daemons ]; then
   echo "  frr: $(systemctl is-active frr 2>/dev/null || echo inactive)"
 fi
 
+# netns vRouters run each router's FRR in a pathspace (`-N <id>`), which puts its
+# pid/vty/zserv sockets in /run/frr/<id>/ and config in /etc/frr/<id>/. The stock
+# AppArmor abstraction (recent Ubuntu, e.g. 26.04) only allows the flat /run/frr/ paths, so the
+# confined staticd/bgpd/ospfd die at start. Add the same grants one directory down
+# via the abstraction's frr.d/ hook and reload every profile that includes it.
+if [ -f /etc/apparmor.d/abstractions/frr ]; then
+  say "Allowing netns vRouter FRR pathspaces in AppArmor"
+  [ -f "$SRC_DIR/apparmor/frr.d-vxvisor" ] || die "missing $SRC_DIR/apparmor/frr.d-vxvisor"
+  install -D -o root -g root -m 0644 "$SRC_DIR/apparmor/frr.d-vxvisor" /etc/apparmor.d/abstractions/frr.d/vxvisor
+  if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+    for f in $(grep -ls 'abstractions/frr>' /etc/apparmor.d/*); do
+      apparmor_parser -r "$f" || die "apparmor_parser failed to reload $f"
+    done
+  fi
+fi
+
 # ---- run-as user ---------------------------------------------------------
 say "Creating run-as user 'vdx'"
 if ! id vdx >/dev/null 2>&1; then
@@ -298,6 +314,9 @@ install -d -o vdx -g vdx -m 0750 \
   /var/lib/vdxclone/disks \
   /var/lib/vdxclone/isos \
   /var/lib/vdxclone/backups
+# The unit's TMPDIR (on disk, not tmpfs) — must exist or every tool vdxd runs
+# that honors TMPDIR fails to create its temp files.
+install -d -o root -g root -m 0700 /var/lib/vdxclone/tmp
 
 # ---- virtio-win driver ISO ----------------------------------------------
 # Windows VMs default to virtio devices (fastest), and the Windows installer

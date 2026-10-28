@@ -1,0 +1,22 @@
+# Installed by deploy/install.sh as /etc/apparmor.d/abstractions/frr.d/vxvisor
+# (the stock abstractions/frr ends with `include if exists <abstractions/frr.d>`).
+#
+# VXVisor netns vRouters run each router's FRR in its own pathspace
+# (`<daemon> -N <router-id>`), which moves the daemon's pid/vty/zserv/mgmtd
+# sockets to /run/frr/<id>/ and its config to /etc/frr/<id>/. The stock
+# abstractions/frr only allows the flat /run/frr/ and /etc/frr/ paths, so the
+# confined daemons (staticd, bgpd, ospfd, ...) are denied their pidfiles there
+# and exit at start. This grants exactly the same files one directory down.
+#
+# Install: /etc/apparmor.d/abstractions/frr.d/vxvisor, then
+#   for f in $(grep -l 'abstractions/frr>' /etc/apparmor.d/*); do apparmor_parser -r "$f"; done
+# Remove: delete the file and run the same reload.
+
+  @{run}/frr/*/ r,
+  @{run}/frr/*/zserv.api rw,
+  @{run}/frr/*/@{profile_name}.pid rwk,
+  @{run}/frr/*/@{profile_name}.vty rw,
+  @{run}/frr/*/mgmtd_be.sock rw,
+  /etc/frr/*/ r,
+  /etc/frr/*/@{profile_name}.conf rw,
+  /etc/frr/*/frr.conf rw,
