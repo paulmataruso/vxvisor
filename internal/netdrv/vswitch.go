@@ -172,6 +172,11 @@ func AddTrunkVlan(uplink string, vlan int) error {
 	if uplink == "" || vlan <= 0 {
 		return nil
 	}
+	// VLAN 1 is the port's untagged default (PVID): re-adding it would strip the
+	// uplink's native VLAN.
+	if vlan < 2 || vlan > 4094 {
+		return fmt.Errorf("VLAN %d can't be a tagged trunk VLAN — use 2–4094", vlan)
+	}
 	return run("bridge", "vlan", "add", "dev", uplink, "vid", strconv.Itoa(vlan), "tagged")
 }
 
@@ -237,6 +242,7 @@ func SetupTapAccess(tap, bridge string, vlan, uid int) error {
 	if err := run("ip", "link", "set", tap, "master", bridge); err != nil {
 		return err
 	}
+	FollowBridgeMTU(tap, bridge) // jumbo-frame vSwitch: the VM port matches it
 	if vlan > 0 {
 		// Replace the default VLAN 1 membership with an untagged PVID access port.
 		_ = run("bridge", "vlan", "del", "dev", tap, "vid", "1")

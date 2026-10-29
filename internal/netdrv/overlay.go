@@ -62,6 +62,12 @@ func EnsureOverlay(oc OverlayConfig) error {
 	if oc.Underlay == "" {
 		return fmt.Errorf("overlay: underlay NIC is required (set [cluster].underlay)")
 	}
+	if !ValidIfName(oc.Underlay) || !ValidIfName(oc.Bridge) {
+		return fmt.Errorf("overlay: [cluster].underlay %q / bridge %q must be valid interface names", oc.Underlay, oc.Bridge)
+	}
+	if oc.VNI < MinVNI || oc.VNI > MaxVNI {
+		return fmt.Errorf("overlay: [cluster].vni %d is out of range (1–16777215)", oc.VNI)
+	}
 	if err := EnsureBridge(oc.Bridge); err != nil {
 		return err
 	}
@@ -216,6 +222,9 @@ func EnsureVNINetwork(id int64, underlay, local string, vni, dstport, mtu int, p
 	if mtu <= 0 {
 		mtu = 1450
 	}
+	if err := checkVNINetwork(underlay, local, vni, dstport, mtu, peers, gatewayCIDR); err != nil {
+		return err
+	}
 	bridge, vx := VNINetworkNames(id)
 	if !ifaceExists(bridge) {
 		if err := run("ip", "link", "add", bridge, "type", "bridge"); err != nil {
@@ -262,13 +271,33 @@ func TeardownVNINetwork(id int64) {
 	_ = run("ip", "link", "del", bridge)
 }
 
+// checkVNINetwork is the sink backstop for a VXLAN port group: every value is
+// passed to ip(8) and written into its boot unit.
+func checkVNINetwork(underlay, local string, vni, dstport, mtu int, peers []string, gatewayCIDR string) error {
+	if err := (VXLANParams{VNI: vni, DstPort: dstport, MTU: mtu, Underlay: underlay, Local: local, Peers: peers}).Validate(); err != nil {
+		return fmt.Errorf("vxlan network: %w", err)
+	}
+	if gatewayCIDR != "" {
+		if err := validGatewayCIDR(gatewayCIDR); err != nil {
+			return fmt.Errorf("vxlan network: %w", err)
+		}
+	}
+	return nil
+}
+
 // RenderVNINetworkUnit returns a systemd oneshot unit that recreates the segment
-// at boot (RemainAfterExit) so VXLAN VM networks survive a reboot.
-func RenderVNINetworkUnit(id int64, underlay, local string, vni, dstport, mtu int, peers []string, gatewayCIDR string) string {
+// at boot (RemainAfterExit) so VXLAN VM networks survive a reboot. It loads the
+// VXLAN ingress guard first so the device never comes up unfiltered. Every value
+// is validated (a newline would smuggle in its own ExecStart=).
+func RenderVNINetworkUnit(id int64, underlay, local string, vni, dstport, mtu int, peers []string, gatewayCIDR string) (string, error) {
+	if err := checkVNINetwork(underlay, local, vni, dstport, mtu, peers, gatewayCIDR); err != nil {
+		return "", err
+	}
 	bridge, vx := VNINetworkNames(id)
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Unit]\nDescription=VXVisor VXLAN network %d (%s)\nAfter=network-online.target\nWants=network-online.target\n\n", id, bridge)
 	b.WriteString("[Service]\nType=oneshot\nRemainAfterExit=yes\n")
+	b.WriteString(VXLANGuardExecPre())
 	ex := func(f string, a ...any) { fmt.Fprintf(&b, "ExecStart=-%s\n", fmt.Sprintf(f, a...)) }
 	ex("/sbin/ip link add %s type bridge", bridge)
 	ex("/sbin/ip link set %s mtu %d", bridge, mtu)
@@ -290,5 +319,5 @@ func RenderVNINetworkUnit(id int64, underlay, local string, vni, dstport, mtu in
 		ex("/sbin/ip addr add %s dev %s", gatewayCIDR, bridge)
 	}
 	b.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
-	return b.String()
+	return b.String(), nil
 }

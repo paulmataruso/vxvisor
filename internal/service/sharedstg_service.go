@@ -1,11 +1,14 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	osuser "os/user"
 	"path/filepath"
+	"strings"
 
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/sharedstg"
@@ -74,52 +77,105 @@ func (s *Service) storageNet() (iface, ipStr string, subnet *net.IPNet, err erro
 	if name == "" {
 		return "", "", nil, errors.New("no dedicated storage interface is configured — set one under Storage network first")
 	}
-	ifaces, _ := hostinfo.Interfaces()
-	for _, it := range ifaces {
-		if it.Name != name {
-			continue
-		}
-		for _, a := range it.Addrs {
-			ip, ipnet, e := net.ParseCIDR(a)
-			if e == nil && ip.To4() != nil {
-				return name, ip.String(), ipnet, nil
-			}
+	for _, a := range ifaceAddrs(name) {
+		ip, ipnet, e := net.ParseCIDR(a)
+		if e == nil && ip.To4() != nil {
+			return name, ip.String(), ipnet, nil
 		}
 	}
 	return name, "", nil, fmt.Errorf("storage interface %s is down or has no IPv4 address", name)
 }
 
-// guardStorageTarget enforces that a backend target is on the storage subnet.
+// Host hooks for the storage-NIC rule, replaced by tests.
+var (
+	// ifaceAddrs lists one interface's addresses (CIDR form).
+	ifaceAddrs = func(name string) []string {
+		ifaces, _ := hostinfo.Interfaces()
+		for _, it := range ifaces {
+			if it.Name == name {
+				return it.Addrs
+			}
+		}
+		return nil
+	}
+	// routeDev is the interface the kernel would send to ip through (`ip route get`).
+	routeDev = func(ip string) (string, error) {
+		out, err := exec.Command("ip", "-j", "route", "get", ip).Output()
+		if err != nil {
+			return "", fmt.Errorf("ip route get %s: %v", ip, err)
+		}
+		var rs []struct {
+			Dev string `json:"dev"`
+		}
+		if json.Unmarshal(out, &rs) != nil || len(rs) == 0 || rs[0].Dev == "" {
+			return "", fmt.Errorf("ip route get %s: no route", ip)
+		}
+		return rs[0].Dev, nil
+	}
+	lookupHost = net.LookupHost
+)
+
+// guardStorageTarget enforces the storage-NIC rule for one backend target (an
+// IP or hostname): every address it resolves to must be on the storage subnet,
+// AND the kernel's route to it must leave through the storage interface — a
+// target can sit on the storage subnet yet still be reached over the management
+// NIC (a duplicate subnet or a more specific route there).
 func (s *Service) guardStorageTarget(host string) (iface, ipStr string, err error) {
 	iface, ipStr, subnet, err := s.storageNet()
 	if err != nil {
 		return "", "", err
 	}
-	ip := net.ParseIP(host)
-	if ip == nil { // a hostname — resolve best-effort
-		if addrs, e := net.LookupHost(host); e == nil && len(addrs) > 0 {
-			ip = net.ParseIP(addrs[0])
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return "", "", errors.New("the storage target's address is required")
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = append(ips, ip)
+	} else {
+		addrs, e := lookupHost(host)
+		if e != nil || len(addrs) == 0 {
+			return "", "", fmt.Errorf("can't resolve storage target %q — use its IP address on the storage network", host)
+		}
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil {
+				ips = append(ips, ip)
+			}
 		}
 	}
-	if ip != nil && !subnet.Contains(ip) {
-		return "", "", fmt.Errorf("target %s is not on the storage subnet %s — storage backends must stay on the dedicated storage network", host, subnet.String())
+	for _, ip := range ips {
+		if !subnet.Contains(ip) {
+			if ip.String() != host { // a hostname: say which of its addresses is off
+				return "", "", fmt.Errorf("storage target %s resolves to %s, which is not on the storage subnet %s — use its IP address on the storage network", host, ip, subnet.String())
+			}
+			return "", "", fmt.Errorf("target %s is not on the storage subnet %s — storage backends must stay on the dedicated storage network", host, subnet.String())
+		}
+		if ip.String() == ipStr {
+			continue // this host's own storage address: never leaves the host
+		}
+		dev, err := routeDev(ip.String())
+		if err != nil {
+			return "", "", fmt.Errorf("can't check the route to storage target %s: %v", ip, err)
+		}
+		if dev != iface {
+			return "", "", fmt.Errorf("the route to storage target %s leaves through %s, not the storage interface %s — fix the host's routes (e.g. the same subnet configured on %s too) so storage traffic stays on the storage network", ip, dev, iface, dev)
+		}
 	}
 	return iface, ipStr, nil
 }
 
-func hostOf(spec string) string { // "server:/export" / "ip:port" -> host part
-	if i := indexColon(spec); i >= 0 {
-		return spec[:i]
+// storageHost extracts the host from a backend address: "10.0.0.5:3260",
+// "[fd00::5]:3260", "v2:10.0.0.5:3300" (a Ceph monitor) or a bare host.
+func storageHost(spec string) string {
+	s := strings.TrimSpace(spec)
+	// Ceph msgr2 address-vector pieces: "[v2:10.0.0.5:3300" / "v1:10.0.0.5:6789]".
+	if t := strings.TrimPrefix(s, "["); strings.HasPrefix(t, "v1:") || strings.HasPrefix(t, "v2:") {
+		s = strings.TrimSuffix(t[3:], "]")
 	}
-	return spec
-}
-func indexColon(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == ':' {
-			return i
-		}
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
 	}
-	return -1
+	return strings.Trim(s, "[]")
 }
 
 // ---- mounts (NFS/CIFS/Ceph) -----------------------------------------------
@@ -218,16 +274,23 @@ func (s *Service) AddCeph(p *Principal, name, mons, path, cephName, secret, opts
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
-	first := mons
-	if i := indexColon(mons); i >= 0 {
-		first = mons[:i]
+	// The kernel client talks to every monitor, so every one must ride the
+	// storage network — not just the first.
+	var srcAddr string
+	n := 0
+	for _, m := range strings.Split(mons, ",") {
+		if strings.TrimSpace(m) == "" {
+			continue
+		}
+		n++
+		_, a, err := s.guardStorageTarget(storageHost(m))
+		if err != nil {
+			return err
+		}
+		srcAddr = a
 	}
-	if c := indexComma(first); c >= 0 {
-		first = first[:c]
-	}
-	_, srcAddr, err := s.guardStorageTarget(first)
-	if err != nil {
-		return err
+	if n == 0 {
+		return errors.New("at least one Ceph monitor address is required")
 	}
 	mp := s.mountpointFor(name)
 	if err := sharedstg.CephMount(mons, path, mp, cephName, secret, srcAddr, opts); err != nil {
@@ -340,7 +403,7 @@ func (s *Service) ISCSIDiscover(p *Principal, portal string) ([]string, error) {
 	if !p.IsAdmin {
 		return nil, ErrUnauthorized
 	}
-	if _, _, err := s.guardStorageTarget(hostOf(portal)); err != nil {
+	if _, _, err := s.guardStorageTarget(storageHost(portal)); err != nil {
 		return nil, err
 	}
 	return sharedstg.ISCSIDiscover(portal)
@@ -352,7 +415,7 @@ func (s *Service) ISCSILogin(p *Principal, portal, target string, chap sharedstg
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
-	iface, _, err := s.guardStorageTarget(hostOf(portal))
+	iface, _, err := s.guardStorageTarget(storageHost(portal))
 	if err != nil {
 		return err
 	}
@@ -395,14 +458,6 @@ func trimUNC(s string) string {
 func indexSlash(s string) int {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '/' {
-			return i
-		}
-	}
-	return -1
-}
-func indexComma(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
 			return i
 		}
 	}
