@@ -46,9 +46,7 @@ window.VXChart = (function(){
 
     function rect(x,y,w,h,fill,stroke,r,dash,sw){return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="'+(r||9)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="'+(sw||1)+'"'+(dash?' stroke-dasharray="5 4"':'')+'/>';}
     function txt(x,y,s,fill,anchor,wt,sz){return '<text x="'+x+'" y="'+y+'" fill="'+(fill||C.fg)+'" text-anchor="'+(anchor||'start')+'"'+(wt?' font-weight="'+wt+'"':'')+(sz?' font-size="'+sz+'"':'')+'>'+ESC(s)+'</text>';}
-    // Wires are orthogonal: level when the ends line up, else an elbow (out level,
-    // down/up at the midpoint, in level) so every wire meets a box at 90 degrees.
-    function conn(x1,y1,x2,y2,col,on){var d=(y1===y2)?'M'+x1+' '+y1+' H'+x2:'M'+x1+' '+y1+' H'+((x1+x2)/2)+' V'+y2+' H'+x2;return '<path d="'+d+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+(on?'.85':'.4')+'"'+(on?'':' stroke-dasharray="5 4"')+'/>';}
+    function conn(x1,y1,x2,y2,col,on){var dx=Math.max(30,(x2-x1)/2);return '<path d="M'+x1+' '+y1+' C'+(x1+dx)+' '+y1+' '+(x2-dx)+' '+y2+' '+x2+' '+y2+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+(on?'.85':'.4')+'"'+(on?'':' stroke-dasharray="5 4"')+'/>';}
     function dot(x,y,running){return '<circle cx="'+x+'" cy="'+y+'" r="4" fill="'+(running?C.ok:C.muted)+'"/>';}
     function monitor(x,y,col){ // tiny VM/monitor glyph, top-left at x,y (14x12)
       return '<rect x="'+x+'" y="'+y+'" width="14" height="10" rx="1.5" fill="none" stroke="'+col+'" stroke-width="1.4"/>'+
@@ -272,12 +270,14 @@ window.VXChart = (function(){
         svg+='<text x="'+(pgX+40)+'" y="'+(py+20)+'" fill="'+C.fg+'" font-weight="700" font-size="13"><title>'+ESC(vmk.iface)+'</title>'+ESC(fit(vmk.label,13,700,pgW-vb-60))+'</text>';
         // all IPs on this one adapter, one line each (IPv4 then IPv6)
         ips.forEach(function(ip,i){ svg+=txt(pgX+40,py+36+i*15,fit(ip,11,400,pgW-60),C.muted,'start',400,11); });
-        svg+=conn(pgX+pgW,py+vh/2,swX,py+vh/2,C.ok,true); // level: the vSwitch box spans the block
+        svg+=conn(pgX+pgW,py+vh/2,swX,cy,C.ok,true);
         py+=vh+pgGap;
       });
       pgs.forEach(function(pg){
         var r=pgBox(pgX,py,pg,C.primary); svg+=r.svg;
-        svg+=conn(pgX+pgW,r.exitY,swX,r.exitY,C.primary,true);
+        // A container (LXC) port group's link runs level into the vSwitch box.
+        var lxc=(pg.vms||[]).some(function(v){return v.kind==='container';});
+        svg+=conn(pgX+pgW,r.exitY,swX,lxc?r.exitY:cy,C.primary,true);
         py+=r.h+pgGap;
       });
 
@@ -285,7 +285,7 @@ window.VXChart = (function(){
       var uy=top+(blkH-rightH)/2;
       ups.forEach(function(up){
         var h=upHeight(up), on=up.state!=='down';
-        svg+=conn(swX+swW,uy+h/2,upX,uy+h/2,C.accent,on);
+        svg+=conn(swX+swW,cy,upX,uy+h/2,C.accent,on);
         if(up.kind==='bond'){
           var mem=up.members||[];
           svg+=rect(upX,uy,upW,h,C.panel,C.accent,9,false,1.6);
@@ -357,10 +357,7 @@ window.VXChart = (function(){
         // (single uplink → exact; multiple → their mean). Never ride above the box before it.
         var want=s.anchors.reduce(function(a,b){return a+b.y;},0)/Math.max(s.anchors.length,1)-h/2;
         var boxY=Math.max(floor,want), cy=boxY+h/2;
-        // Each uplink wire lands level on the box: straight when its anchor is within the
-        // box's height, else an elbow into the nearest point on the box's edge.
-        s.anchors.forEach(function(a){ var ty=Math.min(Math.max(a.y,boxY+10),boxY+h-10), mx=(a.x+switchX)/2;
-          svg+='<path d="M'+a.x+' '+a.y+(ty===a.y?'':' H'+mx+' V'+ty)+' H'+switchX+'" fill="none" stroke="'+C.muted+'" stroke-width="2" opacity=".6"/>'; });
+        s.anchors.forEach(function(a){ svg+='<line x1="'+a.x+'" y1="'+a.y+'" x2="'+switchX+'" y2="'+cy+'" stroke="'+C.muted+'" stroke-width="2" opacity=".6"/>'; });
         svg+=upBox(switchX,boxY,switchW,s).svg;
         floor=boxY+h+16;
       });
@@ -434,7 +431,7 @@ window.VXChart = (function(){
           var stackH=0; intl.forEach(function(pg){stackH+=pgHeight(pg);}); stackH+=pgGap*Math.max(intl.length-1,0);
           var exConns=(t&&(t.phys||t.port))?1:0, exH=36+((t&&t.descr)?15:0)+((t&&t.mgmt)?15:0)+exConns*15+14;
           var vrH2=Math.max(96, 54+(1+intl.length)*16+14)+26; // compact box (+26 for the routing tag)
-          var rowH=Math.max(stackH+48,vrH2,exH,pgHdr+vmRow+pgFoot)+10, top=cy0, mid=top+rowH/2;
+          var rowH=Math.max(stackH,vrH2,exH,pgHdr+vmRow+pgFoot)+10, top=cy0, mid=top+rowH/2;
           // Lay the port-group stack out first so we know each PG's exit height.
           var py=mid-stackH/2, pgSvg='', exits=[];
           intl.forEach(function(pg,i){ var c=multi?VRP[i%VRP.length]:C.primary;
@@ -454,13 +451,9 @@ window.VXChart = (function(){
             py+=r.h+pgGap;
           });
           var n=exits.length, midIdx=Math.round((n-1)/2);
-          // Anchor the chain on the MIDDLE port group so the whole
-          // vRouter→transit→external line is 100% horizontal.
+          // Anchor the chain on the MIDDLE port group so its link (and the whole
+          // vRouter→transit→external line) is 100% horizontal; off-center PGs curve in.
           var spineY=(n?exits[midIdx].y:mid), vrY=spineY-vrH2/2;
-          // Stretch the box over every port group's exit (room for the icon + title
-          // above the first, the routing tag below the last) so each link enters it
-          // dead level — never at an angle.
-          if(n){ var vTop=Math.min(vrY,exits[0].y-58), vBot=Math.max(vrY+vrH2,exits[n-1].y+40); vrY=vTop; vrH2=vBot-vTop; }
           // Compact vRouter box: title/glyph on top, routing tag at the bottom. The GW IPs
           // are NOT stacked inside — each one is placed next to its own link where it enters
           // the box (a little vertical room between them so they don't collide).
@@ -468,6 +461,8 @@ window.VXChart = (function(){
           // Zone-firewall shield pill in the box's top-right corner when armed.
           if(vr.firewall){ svg+='<rect x="'+(vrX2+vrW2-32)+'" y="'+(vrY+7)+'" width="24" height="16" rx="8" fill="'+C.ok+'" opacity=".92"><title>zone firewall on</title></rect>';
             svg+='<text x="'+(vrX2+vrW2-20)+'" y="'+(vrY+19)+'" text-anchor="middle" font-size="9.5" font-weight="700" fill="#06121a">FW</text>'; }
+          // Entry points fan around the middle (which stays dead level with its PG).
+          var sp=17, gy0=spineY-midIdx*sp;
           // Routing-protocol tag + status light at the bottom.
           // Light: green = all peers up/working, red = a BGP peer is down.
           var rtags=(vr.routing||[]), rtxt=rtags.length?rtags.join(' · '):'no routing',
@@ -477,10 +472,12 @@ window.VXChart = (function(){
           svg+='<circle cx="'+(tgx+14)+'" cy="'+(tgy+10)+'" r="4.5" fill="'+hc+'"><title>'+(vr.health==='down'?'a BGP peer is down':(vr.health==='up'?'routing healthy':'idle'))+'</title></circle>';
           svg+=txt(tgx+26,tgy+14,rtxt,C.fg,'start',700,11);
           svg+=pgSvg;
-          // Each PG link runs dead level into the box; its GW IP sits right next to it.
+          // Fan each PG link into the box, then drop its GW IP right next to the line.
+          // The MIDDLE link is drawn 100% horizontal; the rest curve into their entry row.
           exits.forEach(function(e,i){
-            var pr=pgX2+pgW, gy=e.y, col=multi?e.c:C.primary;
-            svg+='<line x1="'+pr+'" y1="'+e.y+'" x2="'+vrX2+'" y2="'+e.y+'" stroke="'+e.c+'" stroke-width="2" opacity=".9"/>';
+            var pr=pgX2+pgW, gy=gy0+i*sp, col=multi?e.c:C.primary;
+            if(i===midIdx){ svg+='<line x1="'+pr+'" y1="'+e.y+'" x2="'+vrX2+'" y2="'+e.y+'" stroke="'+e.c+'" stroke-width="2" opacity=".9"/>'; }
+            else { svg+=conn(pr,e.y,vrX2,gy,e.c,true); }
             // bridge/device name as a faint cable tag at the PG (left) end, where the
             // links are still separated & horizontal — so it stays readable at any PG count.
             svg+=devTag(pr+10,e.y-6,e.bridge,vrX2-pr-20);
@@ -507,7 +504,7 @@ window.VXChart = (function(){
           svg+='<rect x="'+vrX2+'" y="'+vrY+'" width="'+vrW2+'" height="'+vrH2+'" rx="12" '
             +'fill="#fff" fill-opacity="0" pointer-events="all" class="lldptip" '
             +'data-tiphtml="'+vrTipHTML(vr)+'" style="cursor:help"/>';
-          cy0=Math.max(top+rowH, py, vrY+vrH2)+blkGap; H=cy0;
+          cy0=Math.max(top+rowH, py)+blkGap; H=cy0;
         });
       }
     host.innerHTML='<svg width="'+W+'" height="'+(H+pad)+'" viewBox="0 0 '+W+' '+(H+pad)+'" style="font:12px \'Fira Sans\',system-ui;min-width:'+W+'px">'+svg+'</svg>';
