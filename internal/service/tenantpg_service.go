@@ -539,6 +539,13 @@ func (s *Service) applyTenantIsolation() error {
 		}
 	}
 	rows.Close()
+	// VXLAN port groups get the same fence unless routed through the host.
+	for _, d := range s.vxlanIsolatedBridges() {
+		if !seen[d] {
+			seen[d] = true
+			devs = append(devs, d)
+		}
+	}
 	sort.Strings(devs)
 	for _, d := range devs {
 		if netdrv.IfaceExists(d) {
@@ -547,7 +554,13 @@ func (s *Service) applyTenantIsolation() error {
 			}
 		}
 	}
-	return netdrv.ApplyTenantGuard(devs)
+	err = netdrv.ApplyTenantGuard(devs)
+	// The VXLAN ingress guard rides the same rebuild points (boot, host routing
+	// apply) so it is never left stale.
+	if gerr := s.applyVXLANGuard(); gerr != nil {
+		log.Printf("vxlan guard: %v", gerr)
+	}
+	return err
 }
 
 // gatewayInCIDR checks that gw is a host address inside cidr.

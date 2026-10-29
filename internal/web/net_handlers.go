@@ -40,7 +40,9 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 		"Uplinks":        uplinks,
 		"Bonds":          bonds,
 		"BondInUse":      s.svc.BondsInUse(p),
+		"Teams":          s.svc.TeamDetails(p),
 		"VSwitches":      vswitches,
+		"VSwitchMTU":     s.svc.VSwitchMTUs(p),
 		"MgmtBridge":     s.svc.MgmtInterface(),
 		"ClusterPeers":   s.svc.ClusterPeerUnderlayIPs(p),
 	})
@@ -75,9 +77,14 @@ func (s *Server) createNetwork(w http.ResponseWriter, r *http.Request, p *servic
 	if r.FormValue("vxlan_autopeer") == "1" {
 		n.VXLANPeers = service.MergePeerCSV(n.VXLANPeers, s.svc.ClusterPeerUnderlayIPs(p))
 	}
-	if _, err := s.svc.CreateNetwork(p, n, clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
+	routed := r.FormValue("host_routing") == "routed"
+	switch _, err := s.svc.CreatePortGroup(p, n, routed, clientIP(r)); {
+	case err != nil:
+		setFlash(w, err.Error())
+	case n.Mode == "vxlan":
+		setFlashOK(w, "VXLAN network "+n.Name+" created.")
+	default:
+		setFlashOK(w, "Port group "+n.Name+" created.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }
@@ -92,8 +99,42 @@ func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *servic
 		return
 	}
 	if err := s.svc.DeleteNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Port group deleted.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// editBond changes a NIC team in place (members, mode, hash). Teams owned by the
+// host's netplan — the management team — are refused with where to change them.
+func (s *Server) editBond(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
 		return
+	}
+	name := r.PathValue("name")
+	mode, hash := r.FormValue("mode"), r.FormValue("hash_policy") // parses the form, so r.Form is set
+	if err := s.svc.EditBond(p, name, mode, hash, r.Form["members"], clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "NIC team "+name+" updated.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// setVSwitchMTU sets a vSwitch's MTU (jumbo frames).
+func (s *Server) setVSwitchMTU(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	name := r.PathValue("name")
+	mtu, _ := strconv.Atoi(r.FormValue("mtu"))
+	if err := s.svc.SetVSwitchMTU(p, name, mtu, clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "vSwitch "+name+" MTU set to "+strconv.Itoa(mtu)+".")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

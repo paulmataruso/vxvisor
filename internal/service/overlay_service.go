@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"vdxclone/internal/netdrv"
 	"vdxclone/internal/sharedstg"
 )
 
@@ -136,6 +138,7 @@ func (s *Service) AddStorageOverlay(p *Principal, name, underlayDev, localIP, ov
 		return ErrUnauthorized
 	}
 	name = strings.TrimSpace(name)
+	underlayDev, localIP, overlayCIDR = strings.TrimSpace(underlayDev), strings.TrimSpace(localIP), strings.TrimSpace(overlayCIDR)
 	if !ifaceNameRe.MatchString(name) {
 		return fmt.Errorf("invalid interface name %q (letters, digits, _.- ; max 15 chars)", name)
 	}
@@ -145,25 +148,52 @@ func (s *Service) AddStorageOverlay(p *Principal, name, underlayDev, localIP, ov
 	if underlayDev == "" || localIP == "" || overlayCIDR == "" || vni <= 0 {
 		return fmt.Errorf("underlay device, local IP, overlay CIDR and a VNI are required")
 	}
+	if err := s.overlayNameFree(name); err != nil {
+		return err
+	}
 	if dstPort <= 0 {
 		dstPort = 4789
 	}
 	if mtu <= 0 {
 		mtu = 1450
 	}
-	var peerList []string
-	for _, pp := range strings.Split(peers, ",") {
-		if pp = strings.TrimSpace(pp); pp != "" {
-			peerList = append(peerList, pp)
-		}
+	peerList, err := netdrv.ParsePeerCSV(peers)
+	if err != nil {
+		return err
 	}
 	spec := sharedstg.VXLANSpec{
 		Name: name, Dev: underlayDev, Local: localIP, OverlayCIDR: overlayCIDR,
 		VNI: vni, DstPort: dstPort, MTU: mtu, Peers: peerList,
 	}
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	if who := s.vniUser(vni, name); who != "" {
+		return fmt.Errorf("VNI %d is already used by %s — pick another VNI", vni, who)
+	}
+	if !hostHasIP(localIP) {
+		return fmt.Errorf("local IP %s is not an address of this host — use the underlay device's own IP", localIP)
+	}
+	if !netdrv.IfaceExists(underlayDev) {
+		return fmt.Errorf("underlay device %q was not found on this host", underlayDev)
+	}
 	// Install + enable the systemd unit, which also brings the overlay up now
 	// (enable --now runs ExecStart). This keeps one code path for boot + runtime.
-	unit := sharedstg.VXLANUnit(spec)
+	unit, err := sharedstg.VXLANUnit(spec)
+	if err != nil {
+		return err
+	}
+	// Restrict ingress to the peers BEFORE the device exists (it isn't recorded
+	// yet, so pass it in); the guard is rebuilt from the DB once it is.
+	listener := netdrv.VXLANListener{Port: dstPort, VNI: vni, Peers: peerList}
+	if err := s.applyVXLANGuard(listener); err != nil {
+		log.Printf("storage overlay: vxlan guard: %v", err)
+	}
+	defer func() { // from the DB again: keeps it on success, drops it on failure
+		if err := s.applyVXLANGuard(); err != nil {
+			log.Printf("storage overlay: vxlan guard: %v", err)
+		}
+	}()
 	unitPath := s.overlayUnitPath(name)
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write overlay unit: %w", err)
@@ -212,6 +242,30 @@ func (s *Service) DeleteStorageOverlay(p *Principal, id int64, ip string) error 
 	if _, err := s.db.Exec(`DELETE FROM storage_overlays WHERE id=?`, id); err != nil {
 		return err
 	}
+	if err := s.applyVXLANGuard(); err != nil {
+		log.Printf("storage overlay: vxlan guard: %v", err)
+	}
 	s.audit(p, p.OrgID, "storage.overlay.delete", "overlay", name, ip, nil)
+	return nil
+}
+
+// overlayNameFree refuses an overlay name that belongs to anything but this same
+// overlay: bringing an overlay up deletes any link of its name first (and so
+// does its boot unit), so a name like "bond0" would destroy that device.
+func (s *Service) overlayNameFree(name string) error {
+	if strings.HasPrefix(name, "vdx") {
+		return fmt.Errorf("names starting with \"vdx\" are reserved for VXVisor's own devices — pick another overlay name")
+	}
+	var n int
+	_ = s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM net_bonds WHERE name=?)+(SELECT COUNT(*) FROM net_vswitches WHERE name=? OR bridge=?)`,
+		name, name, name).Scan(&n)
+	if n > 0 {
+		return fmt.Errorf("%q is already a NIC team or vSwitch — pick another overlay name", name)
+	}
+	var mine int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM storage_overlays WHERE name=?`, name).Scan(&mine)
+	if netdrv.IfaceExists(name) && (mine == 0 || !netdrv.IsVXLAN(name)) {
+		return fmt.Errorf("an interface named %q already exists on this host — pick another overlay name", name)
+	}
 	return nil
 }

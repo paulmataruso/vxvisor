@@ -284,6 +284,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	// VMware-style data plane: bonds (LACP/etherchannel) + vSwitches (VLAN trunks).
 	mux.HandleFunc("POST /networks/bonds", s.auth(s.createBond))
 	mux.HandleFunc("POST /networks/bonds/{name}/delete", s.auth(s.deleteBond))
+	mux.HandleFunc("POST /networks/bonds/{name}/edit", s.auth(s.editBond))
+	mux.HandleFunc("POST /networks/vswitches/{name}/mtu", s.auth(s.setVSwitchMTU))
 	mux.HandleFunc("POST /networks/vswitches", s.auth(s.createVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/delete", s.auth(s.deleteVSwitch))
 	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))

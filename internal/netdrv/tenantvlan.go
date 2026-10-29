@@ -166,7 +166,8 @@ const TenantGuardTable = "vdxtenant"
 // between the tenant's own ports is L2 and unaffected. A tenant reaches other
 // networks only through its own router (netns) or its uplink — never the host.
 func IsolateTenantIface(dev string) error {
-	if !strings.HasPrefix(dev, "vdxt") || strings.ContainsAny(dev, "/ ") {
+	// vdxt* = tenant bridges / port-group interfaces; vdxubr* = VXLAN port groups.
+	if !(strings.HasPrefix(dev, "vdxt") || strings.HasPrefix(dev, "vdxubr")) || strings.ContainsAny(dev, "/ ") {
 		return fmt.Errorf("refusing to isolate non-tenant interface %q", dev)
 	}
 	for _, kv := range [][2]string{

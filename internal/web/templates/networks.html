@@ -7,7 +7,7 @@
   .susp{color:var(--muted);text-decoration:line-through}
 </style>
 <div class="card">
-  {{if .P.IsAdmin}}<p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
+  {{if .P.IsAdmin}}<p class="muted" style="margin:0">Build your network from the bottom up — <b>Physical adapter</b> (one network port, or several joined into a <b>NIC team</b>) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. A NIC team can balance traffic with no switch setup, use LACP or a static EtherChannel, or act as active/standby failover. The management port is protected and can't be given to another vSwitch.</p>
   {{else}}<p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (provisioned by your provider) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Every vSwitch belongs to this organization alone. Connect one to an uplink to carry it out to the physical network: an <em>access</em> uplink carries one port group (the native one), a <em>QinQ</em> or <em>dedicated</em> uplink carries them all, each on its own VLAN. To route instead, leave a port group's gateway blank and attach it to a router on the <a href="/vrouters">vRouters</a> page.</p>{{end}}
 </div>
 
@@ -80,22 +80,23 @@
 </div>
 
 {{if .P.IsAdmin}}
-<!-- ===================== Uplinks / Link Aggregation ===================== -->
+<!-- ===================== NIC teams (bonds) ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Uplinks — Link Aggregation (LACP / Etherchannel)</h2>
-    <button class="btn primary" data-modal="m-bond">+ Add uplink / LAG</button>
+    <h2>NIC teams</h2>
+    <button class="btn primary" data-modal="m-bond">+ Add NIC team</button>
   </div>
   {{if .Bonds}}
   <table>
-    <tr><th>Bond</th><th>Mode</th><th>Members</th><th></th></tr>
+    <tr><th>NIC team</th><th>Mode</th><th>Member NICs</th><th></th></tr>
     {{range $b := .Bonds}}
     <tr><td class="mono"><strong>{{.Name}}</strong>{{if $.MgmtBridge}}{{range $.VSwitches}}{{if and (eq .Bridge $.MgmtBridge) (eq .Uplink $b.Name)}} <span class="pill">management</span>{{end}}{{end}}{{end}}</td><td><span class="pill">{{.Mode}}</span></td>
       <td class="mono muted">{{range .Members}}{{.}} {{end}}</td>
-      <td style="text-align:right">{{with index $.BondInUse .Name}}<span class="muted" style="font-size:11px" title="{{.}}">in use</span>{{else}}<form method="post" action="/networks/bonds/{{.Name}}/delete" onsubmit="return confirm('Delete bond {{.Name}}? Frees its member NICs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
+      <td style="text-align:right;white-space:nowrap">{{template "team-edit-btn" (dict "Name" .Name "Teams" $.Teams "Label" "Edit")}}
+        {{with index $.BondInUse .Name}}<span class="muted" style="font-size:11px" title="{{.}}">in use</span>{{else}}<form method="post" action="/networks/bonds/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete NIC team {{.Name}}? Frees its member NICs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No link-aggregation groups yet. A single NIC can also be a vSwitch uplink directly.</div>{{end}}
+  {{else}}<div class="empty">No NIC teams yet. A vSwitch can also use a single physical adapter directly.</div>{{end}}
 </div>
 
 <!-- ===================== vSwitches ===================== -->
@@ -106,12 +107,16 @@
   </div>
   {{if .VSwitches}}
   <table>
-    <tr><th>vSwitch</th><th>Bridge</th><th>Uplink</th><th></th></tr>
+    <tr><th>vSwitch</th><th>Bridge</th><th>Physical adapter</th><th>MTU</th><th></th></tr>
     {{range .VSwitches}}
-    <tr><td><strong>{{.Name}}</strong>{{if eq .Bridge $.MgmtBridge}} <span class="pill">management</span>{{end}}</td><td class="mono muted">{{.Bridge}}</td><td class="mono">{{if .Uplink}}{{.Uplink}}{{else}}<span class="muted">none</span>{{end}}</td>
+    {{$vs := .}}{{$team := false}}{{range $.Bonds}}{{if eq .Name $vs.Uplink}}{{$team = true}}{{end}}{{end}}{{with $.Teams}}{{if and $vs.Uplink (index . $vs.Uplink).Mode}}{{$team = true}}{{end}}{{end}}
+    {{$mtu := 0}}{{with $.VSwitchMTU}}{{$mtu = index . $vs.Name}}{{end}}
+    <tr><td><strong>{{.Name}}</strong>{{if eq .Bridge $.MgmtBridge}} <span class="pill">management</span>{{end}}</td><td class="mono muted">{{.Bridge}}</td><td class="mono">{{if .Uplink}}{{.Uplink}}{{if $team}} <span class="pill">NIC team</span>{{end}}{{else}}<span class="muted">none</span>{{end}}</td>
+      <td class="mono">{{if $mtu}}{{$mtu}}{{else}}<span class="muted">default</span>{{end}}</td>
       <td style="text-align:right;white-space:nowrap">
-        {{$vs := .}}{{$team := false}}{{range $.Bonds}}{{if eq .Name $vs.Uplink}}{{$team = true}}{{end}}{{end}}
-        {{if and .Uplink (not $team)}}<button type="button" class="btn sm" data-vsbond="{{.Name}}" data-vsuplink="{{.Uplink}}" title="Team the uplink with more NICs (load balancing / failover)">Add teaming</button>{{end}}
+        {{if $team}}{{template "team-edit-btn" (dict "Name" .Uplink "Teams" $.Teams "Label" "Edit team")}}
+        {{else if .Uplink}}<button type="button" class="btn sm" data-vsbond="{{.Name}}" data-vsuplink="{{.Uplink}}" title="Team the physical adapter with more NICs (load balancing / failover)">Add teaming</button>{{end}}
+        {{if ne .Bridge $.MgmtBridge}}<button type="button" class="btn sm" data-vsmtu="{{.Name}}" data-mtu="{{if $mtu}}{{$mtu}}{{else}}1500{{end}}" title="Set the MTU (jumbo frames) on this vSwitch, its physical adapter and its VM ports">MTU</button>{{end}}
         {{if eq .Bridge $.MgmtBridge}}<span class="muted" style="font-size:11px" title="Carries the admin IP — protected">protected</span>{{else}}<form method="post" action="/networks/vswitches/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
     {{end}}
   </table>
@@ -144,7 +149,7 @@
     {{end}}
   </table>
   {{else}}<div class="empty">No port groups. The built-in user-mode NAT is always available; add a VLAN port group to place VMs on your LAN.</div>{{end}}
-  <p class="muted" style="margin:12px 0 0">A <strong>Port Group</strong> is a VLAN on a vSwitch that VMs connect to. (<strong>user</strong> mode needs no vSwitch.)</p>
+  <p class="muted" style="margin:12px 0 0">A <strong>Port Group</strong> is a VLAN on a vSwitch that VMs connect to. (<strong>user</strong> mode needs no vSwitch.) A <strong>VXLAN network</strong> only accepts tunnel traffic from its listed peers, and is fenced off from this host — its VMs can ping the gateway address but reach nothing else on the host — unless it was created as routed through the host.</p>
 </div>
 {{end}}
 
@@ -161,11 +166,11 @@
     <div style="display:flex;align-items:center;gap:14px">
       <span class="topo-legend"><i style="background:var(--primary)"></i>Port Group</span>
       <span class="topo-legend"><i style="background:var(--muted)"></i>vSwitch</span>
-      <span class="topo-legend"><i style="background:var(--accent)"></i>{{if .P.IsAdmin}}Uplink / LAG{{else}}Uplink{{end}}</span>
+      <span class="topo-legend"><i style="background:var(--accent)"></i>{{if .P.IsAdmin}}Physical adapter / NIC team{{else}}Uplink{{end}}</span>
       <span id="topots" class="muted" style="font-size:11px"></span>
     </div>
   </div>
-  {{if .P.IsAdmin}}<p class="muted" style="margin:6px 0 10px">VMware-style view — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, <strong>Physical Adapters</strong> and link-aggregation groups on the right. Updates automatically as you create VMs, port groups, vSwitches and uplinks.</p>
+  {{if .P.IsAdmin}}<p class="muted" style="margin:6px 0 10px">VMware-style view — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, <strong>physical adapters</strong> and NIC teams on the right. Updates automatically as you create VMs, port groups, vSwitches and NIC teams.</p>
   {{else}}<p class="muted" style="margin:6px 0 10px">This organization's network — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, its <strong>uplink</strong> on the right. A routed port group is drawn on its <strong>router</strong>, with the router's uplink as its way out. Updates automatically.</p>{{end}}
   <div id="topo" style="overflow:auto"><div class="muted">loading…</div></div>
 </div>
@@ -173,30 +178,16 @@
 <!-- ===================== create modals ===================== -->
 {{if .P.IsAdmin}}
 <div class="modal" id="m-bond"><div class="modal-card">
-  <div class="modal-head"><h3>Add uplink / link-aggregation group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Add NIC team</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/networks/bonds">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Bond name<input name="name" placeholder="bond0" required></label>
+    <label class="fld">Team name<input name="name" placeholder="bond0" required></label>
     <label class="fld">Teaming mode
-      <select name="mode" id="bondmode">
-        <optgroup label="No switch configuration (like ESXi defaults)">
-          <option value="balance-alb">Adaptive load balancing — both active, in + out (no LACP)</option>
-          <option value="balance-tlb">Transmit load balancing — both active, outbound (no LACP)</option>
-          <option value="active-backup">Active / standby failover</option>
-        </optgroup>
-        <optgroup label="Needs matching switch config">
-          <option value="lacp">LACP (802.3ad) — dynamic LAG</option>
-          <option value="etherchannel">Static etherchannel / IP-hash LAG</option>
-        </optgroup>
-      </select>
+      <select name="mode" id="bondmode">{{template "team-modes"}}</select>
     </label>
     <label class="fld" id="bondhashrow" style="display:none">Load-balancing hash
-      <select name="hash_policy">
-        <option value="layer3+4">IP + port (L3+L4) — VMware "Route based on IP hash"</option>
-        <option value="layer2+3">IP + MAC (L2+L3)</option>
-        <option value="layer2">Source MAC hash</option>
-      </select>
-      <span class="muted" style="font-size:11px">Only link-aggregation modes use a hashing policy; the automatic and failover modes balance on their own.</span>
+      <select name="hash_policy">{{template "team-hashes"}}</select>
+      <span class="muted" style="font-size:11px">Only LACP and static EtherChannel use a hash; the switch-independent and failover modes balance on their own.</span>
     </label>
     <label class="fld">Member NICs
       <div id="bondmembers" class="muted" style="display:flex;flex-wrap:wrap;gap:12px;padding:6px 0">loading…</div>
@@ -206,7 +197,7 @@
         <option value="" data-uplink="">— leave standalone (attach later) —</option>
         {{range .VSwitches}}<option value="{{.Name}}" data-uplink="{{.Uplink}}">{{.Name}}{{if .Uplink}} (currently {{.Uplink}}){{end}}</option>{{end}}
       </select>
-      <span class="muted" id="bondattachnote" style="font-size:11px;display:none">Migrates this vSwitch onto the new team. Its current uplink is shown below pre-selected and is always kept in the team.</span>
+      <span class="muted" id="bondattachnote" style="font-size:11px;display:none">Moves this vSwitch onto the new team. Its current physical adapter is shown above pre-selected and is always kept in the team.</span>
     </label>
     <script>
      (function(){ var m=document.getElementById('bondmode'), row=document.getElementById('bondhashrow');
@@ -221,7 +212,7 @@
        }); }
      })();
     </script>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create bond</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create NIC team</button></div>
   </form>
 </div></div>
 
@@ -230,38 +221,24 @@
   <form class="mform" method="post" action="/networks/vswitches">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">vSwitch name<input name="name" placeholder="vSwitch1" required></label>
-    <label class="fld">Uplink
-      <select name="uplink" id="uplinksel"><option value="">— none (internal only) —</option>{{range .Bonds}}{{if not (index $.BondInUse .Name)}}<option value="{{.Name}}">{{.Name}} (bond · {{.Mode}})</option>{{end}}{{end}}</select>
+    <label class="fld">Physical adapter
+      <select name="uplink" id="uplinksel"><option value="">— none (internal only) —</option>{{range .Bonds}}{{if not (index $.BondInUse .Name)}}<option value="{{.Name}}">{{.Name}} (NIC team · {{.Mode}})</option>{{end}}{{end}}</select>
     </label>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create vSwitch</button></div>
   </form>
 </div></div>
 
 <div class="modal" id="m-vsbond"><div class="modal-card">
-  <div class="modal-head"><h3>Add teaming to <span id="vsb-name"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Add NIC teaming to <span id="vsb-name"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" id="vsbondform" action="/networks/vswitches">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <p class="muted" style="margin:0">Teams the current uplink <b><span id="vsb-cur"></span></b> with the ports you pick below and moves this vSwitch onto the team, in one step. On the management vSwitch it's applied with an automatic rollback, so the admin connection can never be lost.</p>
-    <label class="fld">Bond name<input name="bond_name" placeholder="bond0" required></label>
+    <p class="muted" style="margin:0">Teams the current physical adapter <b><span id="vsb-cur"></span></b> with the ports you pick below and moves this vSwitch onto the team, in one step. On the management vSwitch it's applied with an automatic rollback, so the admin connection can never be lost.</p>
+    <label class="fld">Team name<input name="bond_name" placeholder="bond0" required></label>
     <label class="fld">Teaming mode
-      <select name="mode" id="vsbmode">
-        <optgroup label="No switch configuration">
-          <option value="balance-alb">Adaptive load balancing — both active (no LACP)</option>
-          <option value="balance-tlb">Transmit load balancing — both active (no LACP)</option>
-          <option value="active-backup">Active / standby failover</option>
-        </optgroup>
-        <optgroup label="Needs matching switch config">
-          <option value="lacp">LACP (802.3ad)</option>
-          <option value="etherchannel">Static etherchannel / IP-hash LAG</option>
-        </optgroup>
-      </select>
+      <select name="mode" id="vsbmode">{{template "team-modes"}}</select>
     </label>
     <label class="fld" id="vsbhashrow" style="display:none">Load-balancing hash
-      <select name="hash_policy">
-        <option value="layer3+4">IP + port (L3+L4)</option>
-        <option value="layer2+3">IP + MAC (L2+L3)</option>
-        <option value="layer2">Source MAC hash</option>
-      </select>
+      <select name="hash_policy">{{template "team-hashes"}}</select>
     </label>
     <label class="fld">Add these NIC(s) to the team
       <div id="vsbondmembers" class="muted" style="display:flex;flex-wrap:wrap;gap:12px;padding:6px 0">loading…</div>
@@ -282,6 +259,78 @@
        // Show the current uplink (pre-checked, locked) + the free NICs to add.
        if(window.fillBondMembers) window.fillBondMembers(document.getElementById('vsbondmembers'), cur||'');
        var mo=document.getElementById('m-vsbond'); mo.classList.add('open'); document.body.style.overflow='hidden';
+     });
+   });
+ })();
+</script>
+
+<div class="modal" id="m-teamedit"><div class="modal-card">
+  <div class="modal-head"><h3>Edit NIC team <span id="te-name" class="mono"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" id="teameditform" action="/networks/bonds">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Teaming mode
+      <select name="mode" id="temode">{{template "team-modes"}}</select>
+      <span class="muted" style="font-size:12px">Changing the mode takes the team down for a few seconds. Adding or removing NICs and changing the hash happen live.</span>
+    </label>
+    <label class="fld" id="tehashrow" style="display:none">Load-balancing hash
+      <select name="hash_policy" id="tehash">{{template "team-hashes"}}</select>
+    </label>
+    <label class="fld">Member NICs
+      <div id="temembers" class="muted" style="display:flex;flex-wrap:wrap;gap:12px;padding:6px 0">loading…</div>
+      <span class="muted" style="font-size:12px">Untick a NIC to take it out of the team; tick a free NIC to add it. A team keeps at least one NIC.</span>
+    </label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save NIC team</button></div>
+  </form>
+</div></div>
+
+<div class="modal" id="m-vsmtu"><div class="modal-card">
+  <div class="modal-head"><h3>MTU for <span id="mtu-name"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" id="vsmtuform" action="/networks/vswitches">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">MTU (bytes)<input type="number" name="mtu" id="mtu-val" min="1280" max="9216" required></label>
+    <p class="muted" style="margin:0;font-size:12px">1500 is standard Ethernet; 9000 is the usual jumbo-frame size. It is set on the vSwitch, its physical adapter (every NIC of a team) and the VMs' ports on it. The physical switch ports must allow the same size, and each VM must set the MTU on its own NIC to send jumbo frames.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Set MTU</button></div>
+  </form>
+</div></div>
+<script>
+ (function(){
+   function openModal(id){ var mo=document.getElementById(id); mo.classList.add('open'); document.body.style.overflow='hidden'; }
+   function hashSync(sel,row){ row.style.display=(sel.value==='lacp'||sel.value==='etherchannel')?'':'none'; }
+   var tm=document.getElementById('temode'), trow=document.getElementById('tehashrow');
+   if(tm&&trow){ tm.addEventListener('change', function(){ hashSync(tm,trow); }); }
+   // The team's members (ticked; untick to remove) + every free NIC (to add).
+   function fillTeamMembers(box, members){
+     var phys=window.__physNics||[], cur=(members||'').split(',').filter(Boolean);
+     box.innerHTML='';
+     function add(name, on, note){
+       var l=document.createElement('label'); l.style.cssText='display:inline-flex;gap:5px;align-items:center;font-size:12px';
+       var c=document.createElement('input'); c.type='checkbox'; c.name='members'; c.value=name; c.checked=on; c.style.width='auto';
+       var t=document.createElement('span'); t.className='muted'; t.textContent='('+note+')';
+       l.appendChild(c); l.appendChild(document.createTextNode(' '+name+' ')); l.appendChild(t); box.appendChild(l);
+     }
+     cur.forEach(function(n){ add(n, true, 'in this team'); });
+     phys.filter(function(it){ return !it.master && !it.in_use && cur.indexOf(it.name)<0; })
+         .forEach(function(it){ add(it.name, false, it.state); });
+     if(!box.children.length) box.textContent='no NICs available';
+   }
+   document.querySelectorAll('[data-teamedit]').forEach(function(btn){
+     btn.addEventListener('click', function(){
+       var name=btn.getAttribute('data-teamedit');
+       document.getElementById('teameditform').action='/networks/bonds/'+encodeURIComponent(name)+'/edit';
+       document.getElementById('te-name').textContent=name;
+       if(tm){ tm.value=btn.getAttribute('data-mode')||'balance-alb'; if(!tm.value) tm.value='balance-alb'; hashSync(tm,trow); }
+       var h=document.getElementById('tehash'); if(h&&btn.getAttribute('data-hash')) h.value=btn.getAttribute('data-hash');
+       fillTeamMembers(document.getElementById('temembers'), btn.getAttribute('data-members'));
+       openModal('m-teamedit');
+     });
+   });
+   document.querySelectorAll('[data-vsmtu]').forEach(function(btn){
+     btn.addEventListener('click', function(){
+       var name=btn.getAttribute('data-vsmtu');
+       document.getElementById('vsmtuform').action='/networks/vswitches/'+encodeURIComponent(name)+'/mtu';
+       document.getElementById('mtu-name').textContent=name;
+       document.getElementById('mtu-val').value=btn.getAttribute('data-mtu')||'1500';
+       openModal('m-vsmtu');
      });
    });
  })();
@@ -327,14 +376,24 @@
   <div class="modal-head"><h3>Add port group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/networks">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Port Group name<input type="text" name="name" placeholder="VLAN-20" required></label>
+    <label class="fld">Port Group name<input type="text" name="name" placeholder="VLAN-20" maxlength="64" required></label>
     <label class="fld">Type
-      <select name="mode"><option value="bridge">vSwitch (VLAN)</option><option value="user">user (NAT)</option><option value="overlay">overlay (cluster VXLAN)</option></select>
+      <select name="mode" id="pgmode"><option value="bridge">vSwitch (VLAN)</option><option value="user">user (NAT)</option><option value="overlay">overlay (cluster VXLAN)</option></select>
     </label>
-    <label class="fld">vSwitch
-      <select name="bridge" id="bridgesel"><option value="">— pick a vSwitch —</option>{{range .VSwitches}}<option value="{{.Bridge}}">{{.Name}} ({{.Bridge}})</option>{{end}}</select>
+    <label class="fld pg-vs">vSwitch
+      <select name="bridge" id="bridgesel" required><option value="">— pick a vSwitch —</option>{{range .VSwitches}}<option value="{{.Bridge}}">{{.Name}} ({{.Bridge}})</option>{{end}}</select>
     </label>
-    <label class="fld">VLAN ID<input type="number" name="vlan_id" value="0" min="0" max="4094" title="0 = untagged"></label>
+    <label class="fld pg-vs">VLAN ID<input type="number" name="vlan_id" value="0" min="0" max="4094" title="0 = untagged; 2–4094 = tagged. VLAN 1 is the vSwitch's untagged default and can't be used."></label>
+    <p class="muted full pg-vs" style="margin:0;font-size:12px">VLAN 0 = untagged (the vSwitch's native network). Tagged port groups use 2–4094; VLAN 1 is reserved as the untagged default.</p>
+    <script>
+     (function(){ var m=document.getElementById('pgmode'), br=document.getElementById('bridgesel');
+       if(!m) return;
+       function sync(){ var vs=m.value==='bridge';
+         document.querySelectorAll('#m-pg .pg-vs').forEach(function(el){ el.style.display=vs?'':'none'; });
+         if(br){ br.required=vs; if(!vs) br.value=''; }
+         if(!vs){ var v=document.querySelector('#m-pg [name=vlan_id]'); if(v) v.value='0'; } }
+       m.addEventListener('change', sync); sync(); })();
+    </script>
     <label class="fld">CIDR<input type="text" name="cidr" placeholder="10.20.0.0/24"></label>
     <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.20.0.1"></label>
     <label class="fld">Pool start<input type="text" name="pool_start" placeholder="10.20.0.10"></label>
@@ -350,9 +409,9 @@
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="mode" value="vxlan">
     <p class="muted full" style="margin:0;font-size:12px">A private network segment that spans multiple hosts, so VMs on different hosts share one network. Give every host the same network ID (VNI) and list the <em>other</em> hosts' IPs as peers.</p>
-    <label class="fld">Name<input type="text" name="name" placeholder="vxlan-tenant-100" required></label>
+    <label class="fld">Name<input type="text" name="name" placeholder="vxlan-tenant-100" maxlength="64" required></label>
     <label class="fld">VNI<input type="number" name="vni" min="1" max="16777215" placeholder="100" required></label>
-    <label class="fld">Underlay NIC<input type="text" name="underlay" placeholder="e.g. eth0 / bond0" required></label>
+    <label class="fld">Underlay NIC<input type="text" name="underlay" list="vxunderlays" placeholder="e.g. eth0 / bond0" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,14}" title="The host interface that carries the tunnel (usually the one holding this host's IP)" required><datalist id="vxunderlays"></datalist></label>
     <label class="fld">Underlay local IP<input type="text" name="vxlan_local" placeholder="(optional) this host's IP for the overlay"></label>
     <label class="fld full">Peer underlay IPs<input type="text" id="vxlan-peers" name="vxlan_peers" placeholder="comma-separated other-node IPs, e.g. 10.10.2.160"></label>
     {{if .ClusterPeers}}
@@ -360,13 +419,19 @@
     {{else}}
     <p class="muted full" style="margin:0;font-size:11px">No other cluster members detected — add peers manually above, or join nodes to the cluster and they can be auto-peered.</p>
     {{end}}
-    <label class="fld">UDP port<input type="number" name="vxlan_dstport" value="4789"></label>
-    <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" title="usually the network's MTU minus about 50"></label>
+    <label class="fld">UDP port<input type="number" name="vxlan_dstport" value="4789" min="1024" max="65535"></label>
+    <label class="fld">MTU<input type="number" name="vxlan_mtu" value="1450" min="1280" max="9000" title="usually the network's MTU minus about 50"></label>
     <label class="fld">Guest CIDR<input type="text" name="cidr" placeholder="(optional) 10.100.0.0/24"></label>
     <label class="fld">Gateway on bridge<input type="text" name="gateway" placeholder="(optional) 10.100.0.1"></label>
     <label class="fld">Pool start<input type="text" name="pool_start" placeholder="(optional) 10.100.0.10"></label>
     <label class="fld">Pool end<input type="text" name="pool_end" placeholder="(optional) 10.100.0.200"></label>
-    <p class="muted full" style="margin:0;font-size:11px">This network is created and kept across reboots automatically. VMs join it by selecting it when you launch them.</p>
+    <label class="fld full">Host access
+      <select name="host_routing">
+        <option value="isolated">Isolated from this host — VMs can ping the gateway address, nothing else on the host</option>
+        <option value="routed">Routed through this host — the host routes this subnet (and NATs it on the next Routing apply)</option>
+      </select>
+    </label>
+    <p class="muted full" style="margin:0;font-size:12px">Only the listed peers can send into this network: tunnel traffic from any other address is dropped. It is created and kept across reboots automatically; VMs join it by selecting it when you launch them.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create VXLAN network</button></div>
   </form>
 </div></div>
@@ -430,6 +495,13 @@
         o.textContent=it.name+' (NIC · '+it.state+(it.speed_mbps?', '+it.speed_mbps+'Mb/s':'')+')';
         ulsel.appendChild(o);
       }
+    });
+
+    // VXLAN underlay suggestions: interfaces that hold an address.
+    var vxdl = document.getElementById('vxunderlays');
+    if(vxdl) ifs.forEach(function(it){
+      if(it.type==='tap'||it.type==='loopback'||it.type==='vxlan'||!(it.addrs||[]).length) return;
+      var o=document.createElement('option'); o.value=it.name; o.label=it.name+' — '+it.addrs.join(', '); vxdl.appendChild(o);
     });
 
     // Group interfaces into labelled sections. The service assigns each iface a
@@ -519,7 +591,7 @@
         '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;'+
           'background:color-mix(in srgb,'+m.c+' 16%,var(--panel));border-bottom:1px solid var(--line)">'+
           '<span style="font-size:15px;line-height:1">'+m.ic+'</span>'+
-          '<span style="font-weight:700;font-size:13px;letter-spacing:.03em;text-transform:uppercase;color:var(--fg)">'+g+'</span>'+
+          '<span style="font-weight:700;font-size:13px;letter-spacing:.03em;text-transform:uppercase;color:var(--fg)">'+(g==='Bonds / LAGs'?'NIC teams (bonds)':g)+'</span>'+
           '<span style="margin-left:auto;font-weight:700;font-size:12px;color:#fff;background:'+m.c+
             ';border-radius:999px;padding:1px 9px">'+rows.length+'</span>'+
         '</div>'+
@@ -537,5 +609,23 @@
 </script>
 {{end}}
 {{template "foot" .}}{{end}}
+
+{{define "team-modes"}}{{/* NIC team modes, each with its vSphere equivalent and whether the
+     physical switch needs configuring. Values are what netdrv.BondMode accepts. */}}<optgroup label="No physical switch configuration">
+          <option value="balance-alb">Adaptive load balancing (balance-alb) — switch-independent, like vSphere "Route based on originating virtual port"</option>
+          <option value="balance-tlb">Transmit load balancing (balance-tlb) — switch-independent, balances outbound only</option>
+          <option value="active-backup">Active / standby (active-backup) — vSphere "Use explicit failover order"</option>
+        </optgroup>
+        <optgroup label="Physical switch must be configured">
+          <option value="lacp">LACP (802.3ad) — vSphere LACP / LAG; configure an LACP port-channel on the switch</option>
+          <option value="etherchannel">Static EtherChannel (balance-xor) — vSphere "Route based on IP hash"; configure a static port-channel (mode on)</option>
+        </optgroup>{{end}}
+
+{{define "team-hashes"}}{{/* Transmit hash for LACP / static EtherChannel (netdrv.BondHashPolicy). */}}<option value="layer3+4">IP addresses + ports (layer3+4) — spreads flows best</option>
+        <option value="layer2+3">IP + MAC addresses (layer2+3) — closest to vSphere "Route based on IP hash"</option>
+        <option value="layer2">MAC addresses (layer2) — each pair of hosts always uses one link</option>{{end}}
+
+{{define "team-edit-btn"}}{{/* Edit button for a NIC team, or why it can't be edited here
+     (netplan-owned). Takes dict Name / Teams (map[string]service.TeamDetail) / Label. */}}{{$n := .Name}}{{$l := .Label}}{{with .Teams}}{{with index . $n}}{{if .Locked}}<span class="muted" style="font-size:11px" title="{{.Locked}}">netplan-managed</span>{{else if .Mode}}<button type="button" class="btn sm" data-teamedit="{{$n}}" data-mode="{{.Mode}}" data-hash="{{.Hash}}" data-members="{{range $i, $m := .Members}}{{if $i}},{{end}}{{$m}}{{end}}" title="Add or remove NICs, or change the teaming mode">{{$l}}</button>{{end}}{{end}}{{end}}{{end}}
 
 {{define "tpg-role"}}{{if eq . "routed"}}<span class="pill running">routed</span>{{else if eq . "uplink"}}<span class="pill running">↗ uplink</span>{{else if eq . "standalone"}}<span class="pill">standalone</span>{{else}}<span class="pill">isolated L2</span>{{end}}{{end}}

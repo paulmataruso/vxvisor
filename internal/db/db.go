@@ -1083,6 +1083,12 @@ ALTER TABLE vrouter_legs ADD COLUMN vlan_id INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE vrouter_legs ADD COLUMN upstream_gw TEXT NOT NULL DEFAULT '';
 ALTER TABLE vrouter_legs ADD COLUMN snat INTEGER NOT NULL DEFAULT 0;
 `},
+	{54, "vswitch-mtu", `
+-- A vSwitch's MTU (jumbo frames), applied to its bridge, its physical adapter
+-- and the VM taps on it. 0 = never set: the kernel default (1500) is left alone.
+-- STRICTLY ADDITIVE: one constant-default column; older binaries ignore it.
+ALTER TABLE net_vswitches ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

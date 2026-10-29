@@ -2,9 +2,12 @@ package sharedstg
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
+
+	"vdxclone/internal/netdrv"
 )
 
 // VXLAN storage overlay. When the cluster's storage server is not on the same L2
@@ -27,6 +30,26 @@ type VXLANSpec struct {
 	DstPort     int      // UDP dest port (IANA VXLAN = 4789)
 	MTU         int      // overlay MTU (underlay MTU minus ~50; commonly 1450)
 	Peers       []string // peer underlay IPs for BUM flooding (unicast head-end)
+}
+
+// Validate checks every field of the spec. Each one is passed to ip(8) and
+// written into the overlay's boot unit, so this is the sink backstop: a value
+// with a newline would otherwise add its own ExecStart= line.
+func (sp VXLANSpec) Validate() error {
+	if !netdrv.ValidIfName(sp.Name) {
+		return fmt.Errorf("invalid overlay name %q (letters, digits, _.- ; max 15 chars)", sp.Name)
+	}
+	if sp.Local == "" {
+		return fmt.Errorf("the overlay needs this host's underlay IP as its local IP")
+	}
+	if err := (netdrv.VXLANParams{VNI: sp.VNI, DstPort: sp.DstPort, MTU: sp.MTU, Underlay: sp.Dev,
+		Local: sp.Local, Peers: sp.Peers}).Validate(); err != nil {
+		return err
+	}
+	if ip, ipnet, err := net.ParseCIDR(sp.OverlayCIDR); err != nil || (ip.To4() != nil && ip.Equal(ipnet.IP)) {
+		return fmt.Errorf("overlay address %q must be this host's address with a prefix, e.g. 10.10.4.11/24", sp.OverlayCIDR)
+	}
+	return nil
 }
 
 func ipBin() string {
@@ -63,7 +86,15 @@ func VXLANExists(name string) bool {
 // any existing link of the same name first). Persistence across reboot is the
 // systemd unit the service layer installs; this is the immediate bring-up.
 func VXLANUp(sp VXLANSpec) error {
+	if err := sp.Validate(); err != nil {
+		return err
+	}
 	ip := ipBin()
+	// The pre-clean deletes any link of this name — never let that be anything
+	// but a previous incarnation of this overlay (e.g. a bond or a bridge).
+	if VXLANExists(sp.Name) && !netdrv.IsVXLAN(sp.Name) {
+		return fmt.Errorf("an interface named %s already exists and is not a VXLAN overlay — pick another overlay name", sp.Name)
+	}
 	_, _ = run(5*time.Second, ip, "link", "del", sp.Name) // ignore if absent
 	if _, err := run(10*time.Second, ip, "link", "add", sp.Name, "type", "vxlan",
 		"id", fmt.Sprint(sp.VNI), "local", sp.Local, "dstport", fmt.Sprint(sp.DstPort), "dev", sp.Dev); err != nil {
@@ -103,11 +134,17 @@ func VXLANDown(name string) error {
 // VXLANUnit renders a systemd oneshot unit that recreates the overlay on boot
 // (and tears it down on stop), so the overlay survives a reboot. Multiple
 // ExecStart lines run in order; a leading '-' tolerates the pre-clean failing.
-func VXLANUnit(sp VXLANSpec) string {
+// The VXLAN ingress guard is loaded first so the overlay never comes up
+// accepting frames from anyone. Refuses an invalid spec (see Validate).
+func VXLANUnit(sp VXLANSpec) (string, error) {
+	if err := sp.Validate(); err != nil {
+		return "", err
+	}
 	ip, br := ipBin(), bridgeBin()
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Unit]\nDescription=VXVisor storage overlay %s\nAfter=network-online.target\nWants=network-online.target\n\n", sp.Name)
 	b.WriteString("[Service]\nType=oneshot\nRemainAfterExit=yes\n")
+	b.WriteString(netdrv.VXLANGuardExecPre())
 	fmt.Fprintf(&b, "ExecStart=-%s link del %s\n", ip, sp.Name)
 	fmt.Fprintf(&b, "ExecStart=%s link add %s type vxlan id %d local %s dstport %d dev %s\n", ip, sp.Name, sp.VNI, sp.Local, sp.DstPort, sp.Dev)
 	if sp.MTU > 0 {
@@ -124,5 +161,5 @@ func VXLANUnit(sp VXLANSpec) string {
 	}
 	fmt.Fprintf(&b, "ExecStop=-%s link del %s\n\n", ip, sp.Name)
 	b.WriteString("[Install]\nWantedBy=multi-user.target\n")
-	return b.String()
+	return b.String(), nil
 }
