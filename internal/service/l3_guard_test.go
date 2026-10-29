@@ -48,7 +48,7 @@ func cidrNet(s string) hostNet {
 // A host whose management is eno1 (192.168.0.163/24, default via 192.168.0.1),
 // with a spare routed port eno2 (10.50.0.1/30); the admin is at 192.168.5.20
 // (reached through the default gateway).
-func mgmtHost() hostL3 {
+func mgmtL3Host() hostL3 {
 	m, s := cidrNet("192.168.0.163/24"), cidrNet("10.50.0.1/30")
 	m.Iface, s.Iface = "eno1", "eno2"
 	return hostL3{Nets: []hostNet{m, s}, MgmtIface: "eno1", DefaultVia: net.ParseIP("192.168.0.1").To4(), DefaultDev: "eno1",
@@ -56,7 +56,7 @@ func mgmtHost() hostL3 {
 }
 
 func TestHostL3Guard(t *testing.T) {
-	h := mgmtHost()
+	h := mgmtL3Host()
 	for _, tc := range []struct {
 		dest, nh string
 		ok       bool
@@ -93,7 +93,7 @@ func TestHostL3Guard(t *testing.T) {
 		t.Error("interface address guard")
 	}
 	// An admin on the management LAN itself: deleting its on-link address is refused.
-	h2 := mgmtHost()
+	h2 := mgmtL3Host()
 	h2.Client, h2.ClientVia = net.ParseIP("192.168.0.50").To4(), nil
 	if h2.checkIfPrefixDelete(routing.IfPrefix{Iface: "eno1", CIDR: "192.168.0.163/24"}) == nil {
 		t.Error("removing the address the session arrives on must be refused")
@@ -145,7 +145,7 @@ func TestMutateRoutingRollsBack(t *testing.T) {
 		}
 		return nil
 	}
-	hostL3Snapshot = func(*Service, string) (hostL3, error) { return mgmtHost(), nil }
+	hostL3Snapshot = func(*Service, string) (hostL3, error) { return mgmtL3Host(), nil }
 
 	if err := s.AddFirewallRule(admin, "accept", "tcp", "443", "10.0.0.0/8", "1.2.3.4"); err != nil {
 		t.Fatal(err)
@@ -355,7 +355,15 @@ func TestDetachOwnedDownlink(t *testing.T) {
 	if err := s.DetachSegment(p, vr, downNet, ""); err == nil || !strings.Contains(err.Error(), "instance") {
 		t.Fatalf("detach with a VM on it: %v", err)
 	}
+	// In Trash it still points at the port group (a restore would need it).
 	s.db.Exec(`UPDATE sessions SET deleted_at=datetime('now') WHERE id='vm1'`)
+	if err := s.DetachSegment(p, vr, downNet, ""); err == nil || !strings.Contains(err.Error(), "Trash") {
+		t.Fatalf("detach with a VM in Trash on it: %v", err)
+	}
+	if len(fb.removed) != 0 {
+		t.Fatalf("a refused detach must not remove the leg: %v", fb.removed)
+	}
+	s.db.Exec(`DELETE FROM sessions WHERE id='vm1'`)
 	if err := s.DetachSegment(p, vr, downNet, ""); err != nil {
 		t.Fatalf("detach owned downlink: %v", err)
 	}

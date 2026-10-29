@@ -762,10 +762,13 @@ func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) erro
 		return err
 	}
 	if owned {
-		var n int
-		s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE network_id=? AND deleted_at IS NULL`, netID).Scan(&n)
-		if n > 0 {
-			return fmt.Errorf("%d instance(s) are still on port group %s — removing it deletes the port group, so move or delete them first", n, segName)
+		// The same instance / container rules as deleting the port group itself
+		// (an instance in Trash still points at it), checked before the leg goes.
+		if vms := s.queryNames(instancesOnNetwork+`s.network_id=? ORDER BY s.name`, netID); len(vms) > 0 {
+			return fmt.Errorf("%d instance(s) are still on port group %s (%s) — removing it deletes the port group, so move them (or purge them from Trash) first", len(vms), segName, nameList(vms))
+		}
+		if cts := s.queryNames(`SELECT name FROM containers WHERE network_id=? ORDER BY name`, netID); len(cts) > 0 {
+			return fmt.Errorf("container(s) %s are on port group %s — move them first", nameList(cts), segName)
 		}
 	}
 	if b, err := vrouterBackend(v.Runtime); err == nil {
