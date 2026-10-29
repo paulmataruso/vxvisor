@@ -1087,7 +1087,7 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 			continue
 		}
 		if l.Kind == vrouter.LegInternal && l.NetworkID != 0 {
-			_ = s.DeleteNetwork(p, l.NetworkID, ip)
+			_ = s.deleteNetwork(p, l.NetworkID, ip) // its own: the in-use check would see this leg
 		}
 		if l.Bridge != "" {
 			netdrv.DeleteLink(l.Bridge)

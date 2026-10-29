@@ -55,8 +55,8 @@ func (s *Service) SetStorageIface(p *Principal, name, ip string) error {
 		return ErrUnauthorized
 	}
 	// Refuse the management NIC — storage must be on its own interface.
-	if name != "" && name == s.mgmtIface() {
-		return fmt.Errorf("the management interface cannot also be the storage interface")
+	if err := s.guardMgmt(name); err != nil { // fails closed when mgmt is unknown
+		return err
 	}
 	if _, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES('storage_iface',?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, name); err != nil {

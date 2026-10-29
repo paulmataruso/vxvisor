@@ -112,7 +112,7 @@
       <td style="text-align:right;white-space:nowrap">
         {{$vs := .}}{{$team := false}}{{range $.Bonds}}{{if eq .Name $vs.Uplink}}{{$team = true}}{{end}}{{end}}
         {{if and .Uplink (not $team)}}<button type="button" class="btn sm" data-vsbond="{{.Name}}" data-vsuplink="{{.Uplink}}" title="Team the uplink with more NICs (load balancing / failover)">Add teaming</button>{{end}}
-        {{if eq .Bridge $.MgmtBridge}}<span class="muted" style="font-size:11px" title="Carries the admin IP — protected">protected</span>{{else}}<form method="post" action="/networks/vswitches/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
+        {{if eq .Bridge $.MgmtBridge}}<span class="muted" style="font-size:11px" title="Carries the admin IP — protected">protected</span>{{else}}{{with and $.VSwitchInUse (index $.VSwitchInUse .Name)}}<span class="muted" style="font-size:11px" title="{{.}}">in use</span>{{else}}<form method="post" action="/networks/vswitches/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}{{end}}</td></tr>
     {{end}}
   </table>
   {{else}}<div class="empty">No vSwitches yet. Create one to host VLAN port groups.</div>{{end}}
@@ -139,7 +139,7 @@
       <td class="muted">{{if .Bridge}}{{.Bridge}}{{end}}{{if .VLANID}} · vlan {{.VLANID}}{{end}}</td>
       <td class="mono" style="font-size:12px">{{.CIDR}}</td>
       <td class="muted">{{if .PoolStart}}{{.PoolStart}}–{{.PoolEnd}}{{end}}</td>
-      <td style="text-align:right">{{if $.P.IsAdmin}}<form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
+      <td style="text-align:right">{{if $.P.IsAdmin}}{{with and $.PortGroupInUse (index $.PortGroupInUse .ID)}}<span class="muted" style="font-size:11px" title="{{.}}">in use</span>{{else}}<form method="post" action="/networks/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}{{end}}</td>
     </tr>
     {{end}}
   </table>

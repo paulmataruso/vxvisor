@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
 	"vdxclone/internal/hostinfo"
@@ -127,25 +128,22 @@ func (s *Service) guardTrunk(nics ...string) error {
 // may be designated as a SHARED external trunk — tenant egress rides it as VLAN
 // subinterfaces while the parent (and thus management) is never touched.
 func (s *Service) isMgmtBridgeUplink(iface string) bool {
-	mgmt := s.mgmtIface()
-	if mgmt == "" {
+	mgmt := s.mgmtIfaces()
+	if len(mgmt) == 0 || iface == "" {
 		return false
 	}
-	ifs, err := hostinfo.Interfaces()
+	ifs, err := hostIfaces()
 	if err != nil {
 		return false
 	}
-	mgmtIsBridge := false
+	mgmtBridge := map[string]bool{} // a bare mgmt NIC has no uplink to share
 	for _, it := range ifs {
-		if it.Name == mgmt && it.Type == "bridge" {
-			mgmtIsBridge = true
+		if it.Type == "bridge" && slices.Contains(mgmt, it.Name) {
+			mgmtBridge[it.Name] = true
 		}
 	}
-	if !mgmtIsBridge {
-		return false // bare mgmt NIC has no uplink to share
-	}
 	for _, it := range ifs {
-		if it.Name == iface && it.Master == mgmt &&
+		if it.Name == iface && mgmtBridge[it.Master] &&
 			it.Type != "tap" && it.Type != "vxlan" && it.Type != "bridge" {
 			return true
 		}

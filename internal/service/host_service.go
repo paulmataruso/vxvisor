@@ -1,10 +1,12 @@
 package service
 
 import (
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -163,29 +165,61 @@ func ifaceGroup(i hostinfo.Iface, vsw, vr map[string]bool) string {
 	}
 }
 
-// EnsurePhysicalLinksUp administratively brings every physical NIC up, even ones
-// carrying no configured network. A NIC left admin-down keeps its PHY powered off
-// and never reports carrier, so the UI can't tell a plugged port from an empty
-// one. Bringing them all up at boot makes "is a cable in this port?" visible in
-// the GUI (the interface then shows carrier/link once a live cable is present).
-// Idempotent and safe: bond/bridge members are already up, and an empty port just
-// sits up with NO-CARRIER. One-shot at boot — it does NOT fight an admin who later
-// downs a port by hand (there's no re-up loop).
+// EnsurePhysicalLinksUp administratively brings up, at boot, the physical NICs
+// vdxd itself manages (managedNICs) that are down, so the UI shows their carrier.
+// Every other NIC is left exactly as the admin / netplan left it: bringing up an
+// unconfigured port can autoconfigure IPv6 from router advertisements on whatever
+// network it's cabled to — putting a wildcard-bound admin UI on that network.
+// Idempotent; one-shot at boot — it does NOT fight an admin who later downs a
+// port by hand (there's no re-up loop).
 func (s *Service) EnsurePhysicalLinksUp() {
-	ifaces, err := hostinfo.Interfaces()
+	ifaces, err := hostIfaces()
 	if err != nil {
 		return
 	}
+	managed := s.managedNICs()
 	for _, it := range ifaces {
-		if it.Type != "physical" || it.State == "up" {
+		if it.Type != "physical" || it.State == "up" || !managed[it.Name] {
 			continue
 		}
-		if err := netdrv.LinkUp(it.Name); err != nil {
-			// Best effort: a NIC that refuses to come up is logged by the caller's
-			// context, not fatal to boot.
-			continue
+		if err := linkUp(it.Name); err != nil {
+			log.Printf("bring up %s: %v", it.Name, err)
 		}
 	}
+}
+
+// linkUp is swapped in tests.
+var linkUp = netdrv.LinkUp
+
+// managedNICs is the set of devices vdxd configures itself: NIC-team members,
+// vSwitch uplinks, dedicated tenant trunks (and their slaves) and dedicated
+// uplinks, vRouter transit links — minus anything netplan defines (netplan
+// brings those up and owns them).
+func (s *Service) managedNICs() map[string]bool {
+	out := map[string]bool{}
+	if bonds, err := s.net.Bonds(); err == nil {
+		for _, b := range bonds {
+			for _, m := range b.Members {
+				out[m] = true
+			}
+		}
+	}
+	for _, q := range []string{
+		`SELECT uplink FROM net_vswitches WHERE uplink<>''`,
+		`SELECT phys_iface FROM vrouter_legs WHERE phys_iface<>''`,
+		`SELECT dedicated_iface FROM tenant_uplinks WHERE dedicated_iface<>''`,
+	} {
+		for _, n := range s.queryNames(q) {
+			out[n] = true
+		}
+	}
+	for n := range s.extTrunkIfaces() {
+		out[n] = true
+	}
+	for n := range netplanDefinedIfaces() {
+		delete(out, n)
+	}
+	return out
 }
 
 // TransitIface is a candidate interface for a directly-addressed routed link
@@ -231,7 +265,10 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 	if err != nil {
 		return nil, err
 	}
-	mgmt := s.mgmtIface()
+	mgmt := s.mgmtIfaces()
+	if len(mgmt) == 0 {
+		return nil, errMgmtUnknown // can't tell which NIC is management: offer none
+	}
 	storage := s.StorageIface()
 	trunks := s.extTrunkIfaces()
 	nbrs := lldp.Neighbors()
@@ -240,7 +277,7 @@ func (s *Service) TransitCandidates(p *Principal) ([]TransitIface, error) {
 		if it.Type != "physical" && it.Type != "bond" {
 			continue
 		}
-		if it.Name == mgmt || it.Master != "" {
+		if slices.Contains(mgmt, it.Name) || it.Master != "" {
 			continue // mgmt NIC or already enslaved to a vSwitch/bond — not free
 		}
 		if storage != "" && it.Name == storage {

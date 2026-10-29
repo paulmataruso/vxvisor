@@ -1,6 +1,8 @@
 package service
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -67,11 +69,10 @@ func (s *Service) CreateNetwork(p *Principal, n netdrv.Network, ip string) (int6
 		}
 	}
 	// If this port group is on a vSwitch with a VLAN, carry that VLAN tagged on
-	// the vSwitch's uplink trunk so the port group reaches the physical network.
+	// the vSwitch's uplink trunk so the port group reaches the physical network,
+	// with the bridge filtering VLANs so the port group is actually isolated.
 	if n.Bridge != "" && n.VLANID > 0 {
-		if vs, err := s.net.VSwitchByBridge(n.Bridge); err == nil && vs.Uplink != "" {
-			_ = netdrv.AddTrunkVlan(vs.Uplink, n.VLANID)
-		}
+		s.ensureVSwitchVlansFor(n.Bridge)
 	}
 	s.audit(p, p.OrgID, "network.create", "network", fmt.Sprint(id), ip, map[string]any{"name": n.Name, "mode": n.Mode, "vlan": n.VLANID, "vni": n.VNI})
 	return id, nil
@@ -118,7 +119,28 @@ func splitCSV(s string) []string {
 	return out
 }
 
+// DeleteNetwork deletes a port group nothing is bound to. One a tenant vSwitch
+// owns, or with instances, a vRouter leg or containers on it, is refused with
+// the reason (portGroupInUse).
 func (s *Service) DeleteNetwork(p *Principal, id int64, ip string) error {
+	if !p.atLeast("admin") {
+		return ErrUnauthorized
+	}
+	n, err := s.net.GetNetwork(p.OrgID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("port group %d not found", id)
+	} else if err != nil {
+		return err
+	}
+	if err := s.portGroupInUse(n); err != nil {
+		return err
+	}
+	return s.deleteNetwork(p, id, ip)
+}
+
+// deleteNetwork removes a port group without the in-use checks — for an owner
+// that has already released it (DeleteVRouter removing its own internal ones).
+func (s *Service) deleteNetwork(p *Principal, id int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}

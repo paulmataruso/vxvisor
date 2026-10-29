@@ -41,6 +41,8 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 		"Bonds":          bonds,
 		"BondInUse":      s.svc.BondsInUse(p),
 		"VSwitches":      vswitches,
+		"VSwitchInUse":   s.svc.VSwitchesInUse(p),
+		"PortGroupInUse": s.svc.PortGroupsInUse(p),
 		"MgmtBridge":     s.svc.MgmtInterface(),
 		"ClusterPeers":   s.svc.ClusterPeerUnderlayIPs(p),
 	})
@@ -92,8 +94,9 @@ func (s *Server) deleteNetwork(w http.ResponseWriter, r *http.Request, p *servic
 		return
 	}
 	if err := s.svc.DeleteNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
+		setFlash(w, err.Error()) // e.g. "2 instance(s) use port group …" — shown on the page
+	} else {
+		setFlashOK(w, "Port group deleted.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

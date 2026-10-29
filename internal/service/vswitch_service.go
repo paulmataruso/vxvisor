@@ -2,7 +2,6 @@ package service
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strings"
@@ -10,119 +9,6 @@ import (
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/netdrv"
 )
-
-// mgmtIface returns the host interface carrying the admin listener's IP, so we
-// can refuse to bond/trunk it (doing so would cut the management path).
-func (s *Service) mgmtIface() string {
-	host, _, err := net.SplitHostPort(s.cfg.Server.Addr)
-	if err != nil || host == "" || host == "0.0.0.0" {
-		return ""
-	}
-	ifaces, err := hostinfo.Interfaces()
-	if err != nil {
-		return ""
-	}
-	for _, it := range ifaces {
-		for _, a := range it.Addrs {
-			if ip, _, _ := net.ParseCIDR(a); ip != nil && ip.String() == host {
-				return it.Name
-			}
-		}
-	}
-	return ""
-}
-
-// defaultPortGroupName is the ESXi-style default VM network on the default vSwitch.
-const defaultPortGroupName = "VM Network"
-
-// EnsureDefaultPortGroup makes sure that when the management interface is itself
-// a vSwitch (a bridge — e.g. the default vSwitch0 created at install time or by
-// the mgmt-NIC conversion), there is a real "VM Network" port group bound to it
-// that users can attach VMs to, exactly like ESXi ships a default VM Network on
-// vSwitch0. Attaching VM taps to the mgmt bridge never disturbs the mgmt IP (it
-// just adds bridge ports). Idempotent and safe to call on boot; it will not
-// recreate a port group the admin deleted as long as any port group remains on
-// that bridge.
-func (s *Service) EnsureDefaultPortGroup() error {
-	br := s.mgmtIface()
-	if br == "" {
-		return nil
-	}
-	// Only when the mgmt interface is actually a bridge (a default vSwitch), not
-	// a bare NIC — a bare mgmt NIC has no vSwitch to hang a port group on.
-	ifaces, err := hostinfo.Interfaces()
-	if err != nil {
-		return err
-	}
-	isBridge := false
-	for _, it := range ifaces {
-		if it.Name == br && it.Type == "bridge" {
-			isBridge = true
-			break
-		}
-	}
-	if !isBridge {
-		return nil
-	}
-	// Register the mgmt bridge as a managed vSwitch so it appears in the vSwitches
-	// list (not just the diagram). Its uplink is the physical NIC enslaved to it.
-	var vsExists int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM net_vswitches WHERE bridge=?`, br).Scan(&vsExists)
-	if vsExists == 0 {
-		uplink := ""
-		for _, it := range ifaces {
-			if it.Master == br && it.Type != "tap" && it.Type != "vxlan" && it.Type != "bridge" {
-				uplink = it.Name
-				break
-			}
-		}
-		if _, err := s.net.AddVSwitch(br, br, uplink); err != nil {
-			return err
-		}
-		log.Printf("registered default vSwitch %q (uplink %q)", br, uplink)
-	}
-	var orgID int64
-	_ = s.db.QueryRow(`SELECT id FROM orgs WHERE slug='default'`).Scan(&orgID)
-	if orgID == 0 {
-		return nil
-	}
-	// Already have a port group on this bridge? Leave it alone (respects an admin
-	// who renamed or removed the default).
-	var existing int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM networks WHERE org_id=? AND bridge=?`, orgID, br).Scan(&existing)
-	if existing > 0 {
-		return nil
-	}
-	if _, err := s.net.CreateNetwork(netdrv.Network{
-		OrgID:  orgID,
-		Name:   defaultPortGroupName,
-		Mode:   "bridge",
-		Bridge: br,
-		VLANID: 0, // untagged — VMs share the mgmt L2 segment (ESXi default)
-	}); err != nil {
-		return err
-	}
-	log.Printf("created default port group %q on vSwitch %s", defaultPortGroupName, br)
-	return nil
-}
-
-// MgmtInterface returns the name of the interface (NIC or vSwitch bridge) that
-// carries the admin IP — used by the UI to mark the management vSwitch as
-// protected (not deletable).
-func (s *Service) MgmtInterface() string { return s.mgmtIface() }
-
-func (s *Service) guardMgmt(nics ...string) error {
-	mgmt := s.mgmtIface()
-	if mgmt == "" {
-		return nil
-	}
-	for _, n := range nics {
-		if n == mgmt {
-			return fmt.Errorf("refusing to use the management interface %q (it carries the admin IP — using it here would cut host access)", mgmt)
-		}
-	}
-	return nil
-}
 
 // ---- bonds ---------------------------------------------------------------
 
@@ -226,8 +112,11 @@ func (s *Service) guardNICFree(nics ...string) error {
 // address, or has any device stacked on it (a bridge or bond it's enslaved to,
 // VLAN subinterfaces). what ("bond" / "interface") is only for the message.
 func (s *Service) guardIfaceInUse(name, what string) error {
-	if mgmt := s.mgmtIface(); mgmt != "" && (name == mgmt || s.isMgmtBridgeUplink(name)) {
+	if s.isMgmtIface(name) || s.isMgmtBridgeUplink(name) {
 		return fmt.Errorf("%s %q carries host management (the admin IP) — changing it would cut host access", what, name)
+	}
+	if s.mgmtIface() == "" {
+		return errMgmtUnknown // can't tell whether it carries management: fail closed
 	}
 	var vs string
 	if s.db.QueryRow(`SELECT name FROM net_vswitches WHERE uplink=?`, name).Scan(&vs) == nil {
@@ -448,19 +337,11 @@ func (s *Service) UpgradeVSwitchToBond(p *Principal, vswitch, bondName, mode, ha
 		return err
 	}
 
-	if vs.Bridge == s.mgmtIface() {
-		// Management vSwitch: regenerate netplan with a bonded uplink, preserving the
-		// bridge's static IPv4 + MAC, applied with auto-rollback.
-		brMac, v4, gw, dns := bridgeIPv4Config(vs.Bridge)
-		content := buildMgmtBondNetplan(vs.Bridge, brMac, bondName, kmode, hp, members, v4, dns, gw)
-		want := ""
-		if len(v4) > 0 {
-			want = strings.SplitN(v4[0], "/", 2)[0]
-		}
-		verify := func() bool {
-			return want == "" || strings.Contains(execOut("ip", "-o", "addr", "show", "dev", vs.Bridge), want)
-		}
-		if err := applyNetplanWithRollback(content, verify); err != nil {
+	if s.isMgmtIface(vs.Bridge) {
+		// Management vSwitch: netplan owns it. Its definition is edited in place
+		// (every address / DHCP / route / DNS setting kept), verified, and applied
+		// with auto-rollback (teamMgmtUplinkNetplan).
+		if err := s.teamMgmtUplinkNetplan(vs.Bridge, vs.Uplink, bondName, kmode, hp, members); err != nil {
 			return err
 		}
 	} else {
@@ -484,48 +365,38 @@ func (s *Service) UpgradeVSwitchToBond(p *Principal, vswitch, bondName, mode, ha
 	if err := s.net.UpdateVSwitchUplink(vswitch, bondName); err != nil {
 		return err
 	}
+	// The new uplink port starts on VID 1 only: re-add the port groups' VLANs
+	// (and filtering, which a netplan apply may have reset).
+	s.ensureVSwitchVlansFor(vs.Bridge)
 	s.audit(p, p.OrgID, "vswitch.bond", "vswitch", vswitch, ip,
 		map[string]any{"bond": bondName, "mode": mode, "hash": hashPolicy, "members": members})
 	return nil
 }
 
+// DeleteVSwitch removes a vSwitch nothing uses. The management vSwitch, a
+// netplan-defined one, and any with instances, containers, port groups, a
+// tenant trunk / uplink or a vRouter link on it are refused with the reason
+// (vswitchInUse) — the same class of guard as DeleteBond.
 func (s *Service) DeleteVSwitch(p *Principal, name, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
-	// Never tear down the vSwitch that carries the management IP — deleting its
-	// bridge would cut host access. Resolve this vSwitch's bridge and refuse if
-	// it's the mgmt bridge (match by either the stored bridge or the name).
-	mgmt := s.mgmtIface()
-	if mgmt != "" {
-		brdg := name
-		if v, err := s.net.VSwitchByBridge(name); err == nil {
-			brdg = v.Bridge
-		} else if vs, err := s.net.VSwitches(); err == nil {
-			for _, x := range vs {
-				if x.Name == name {
-					brdg = x.Bridge
-					break
-				}
-			}
-		}
-		if brdg == mgmt || name == mgmt {
-			return fmt.Errorf("refusing to delete the management vSwitch %q (it carries the admin IP — deleting it would cut host access)", mgmt)
-		}
-	}
-	if v, err := s.net.VSwitchByBridge(name); err == nil {
-		_ = netdrv.DeleteVSwitch(v.Bridge)
-	} else if v2, err2 := s.net.VSwitches(); err2 == nil {
-		for _, vs := range v2 {
-			if vs.Name == name {
-				_ = netdrv.DeleteVSwitch(vs.Bridge)
-			}
-		}
-	}
-	if err := s.net.RemoveVSwitch(name); err != nil {
+	v, err := s.vswitchByNameOrBridge(name)
+	if err != nil {
 		return err
 	}
-	s.audit(p, p.OrgID, "vswitch.delete", "vswitch", name, ip, nil)
+	if err := s.vswitchInUse(v); err != nil {
+		return err
+	}
+	if ifaceExists(v.Bridge) {
+		if err := netdrv.DeleteVSwitch(v.Bridge); err != nil {
+			return fmt.Errorf("delete vSwitch %s: %w", v.Name, err)
+		}
+	}
+	if err := s.net.RemoveVSwitch(v.Name); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "vswitch.delete", "vswitch", v.Name, ip, map[string]any{"bridge": v.Bridge, "uplink": v.Uplink})
 	return nil
 }
 
