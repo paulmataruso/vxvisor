@@ -17,8 +17,10 @@ import (
 // OperatingSystemSection, a VirtualHardwareSection with CPU/memory/disk/NIC
 // items) and adds a vxvisor:Instance element carrying the VXVisor-specific
 // settings (org, firmware, buses, NIC model, ...), so a VXVisor → VXVisor
-// restore is exact. OVFs from other platforms are parsed for the standard
-// fields only.
+// restore is exact. The org is honoured only when the OVF names this same
+// engine (vxvisor:engine): org ids are per install, so a backup restored onto
+// another host must not land in whichever tenant there shares the number.
+// OVFs from other platforms are parsed for the standard fields only.
 
 const ovfNS = "urn:vxvisor:ovf:1"
 
@@ -65,10 +67,10 @@ func (s *Server) ovf(vm VM) string {
 		xmlEsc(vm.Name))
 	fmt.Fprintf(&b, `<CreationDate>%s</CreationDate><BiosType>%d</BiosType><ClusterCompatibilityVersion>4.7</ClusterCompatibilityVersion>`,
 		dateOrNow(vm.Created).UTC().Format("2006/01/02 15:04:05"), biosTypeNum(vm))
-	fmt.Fprintf(&b, `<vxvisor:Instance vxvisor:id="%s" vxvisor:org_id="%d" vxvisor:firmware="%s" vxvisor:secure_boot="%t"`+
+	fmt.Fprintf(&b, `<vxvisor:Instance vxvisor:engine="%s" vxvisor:id="%s" vxvisor:org_id="%d" vxvisor:firmware="%s" vxvisor:secure_boot="%t"`+
 		` vxvisor:machine="%s" vxvisor:os_type="%s" vxvisor:disk_bus="%s" vxvisor:nic_model="%s" vxvisor:vga="%s"`+
 		` vxvisor:guest_agent="%t" vxvisor:tpm="%t" vxvisor:network_id="%d" vxvisor:mac="%s"/>`,
-		vm.ID, vm.OrgID, xmlEsc(vm.Firmware), vm.SecureBoot, xmlEsc(vm.MachineType), xmlEsc(vm.OSType),
+		xmlEsc(s.cfg.InstanceID), vm.ID, vm.OrgID, xmlEsc(vm.Firmware), vm.SecureBoot, xmlEsc(vm.MachineType), xmlEsc(vm.OSType),
 		xmlEsc(vm.DiskBus), xmlEsc(vm.NICModel), xmlEsc(vm.VGA), vm.GuestAgent, vm.TPM, vm.NetID, xmlEsc(vm.MAC))
 	fmt.Fprintf(&b, `<Section ovf:id="%s" ovf:required="false" xsi:type="ovf:OperatingSystemSection_Type"><Info>Guest Operating System</Info><Description>%s</Description></Section>`,
 		vm.ID, osName(vm))
@@ -126,6 +128,7 @@ type ovfInfo struct {
 	GuestAgent bool
 	TPM        bool
 	SourceVMID string
+	Engine     string // the engine instance id that wrote the OVF
 }
 
 // parseOVF reads the fields a restore needs; unknown content is ignored.
@@ -157,6 +160,8 @@ func parseOVF(data string) (ovfInfo, error) {
 					for _, a := range t.Attr {
 						v := a.Value
 						switch a.Name.Local {
+						case "engine":
+							info.Engine = v
 						case "id":
 							info.SourceVMID = v
 						case "org_id":

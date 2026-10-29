@@ -274,6 +274,21 @@ func TestRestoreFromOVF(t *testing.T) {
 	x = strings.Replace(x, "<name>web01</name>", "<name>web01-x</name>", 1)
 	e.want(e.call("POST", "/ovirt-engine/api/vms", "xml", x), http.StatusCreated)
 
+	// An OVF another install wrote keeps its hardware but not its org.
+	foreign := strings.Replace(ovf, `vxvisor:engine="`+e.s.cfg.InstanceID+`"`, `vxvisor:engine="other-install"`, 1)
+	if foreign == ovf {
+		t.Fatal("OVF lacks vxvisor:engine")
+	}
+	body, _ = json.Marshal(map[string]any{
+		"name":           "web01-elsewhere",
+		"initialization": map[string]any{"configuration": map[string]any{"type": "ovf", "data": foreign}},
+	})
+	r = e.call("POST", "/ovirt-engine/api/vms", "json", string(body))
+	e.want(r, http.StatusCreated)
+	if spec := e.be.specs[e.jsonOf(r)["id"].(string)]; spec.OrgID != 0 || spec.Firmware != "uefi" || spec.CPUs != 2 {
+		t.Errorf("foreign OVF spec %+v", spec)
+	}
+
 	// An unknown cluster is refused.
 	e.want(e.call("POST", "/ovirt-engine/api/vms", "json", `{"name":"x","cluster":{"id":"nope"}}`), http.StatusBadRequest)
 }

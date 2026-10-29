@@ -68,7 +68,9 @@ func startOvirt(ctx context.Context, cfg *config.Config, svc *service.Service, n
 	io := imageio.NewServer()
 	eng := ovirtapi.New(ovirtapi.Config{
 		PublicHost: public, APIPort: ap, ImageioPort: ip, WorkRoot: work, CAPEM: ca.PEM,
-		InstanceID:  uuid.NewSHA1(uuid.NameSpaceOID, []byte("vxvisor-ovirt-engine:"+nodeName)).String(),
+		// Per install (the CA is random and kept), not per host name: restores
+		// trust an OVF's org only when it carries this id.
+		InstanceID:  uuid.NewSHA1(uuid.NameSpaceOID, append([]byte("vxvisor-ovirt-engine:"), ca.PEM...)).String(),
 		NodeName:    nodeName,
 		ProductName: cfg.Ovirt.ProductName,
 	}, be, io)

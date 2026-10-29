@@ -677,7 +677,9 @@ func (s *Server) addVM(x *req) {
 			spec.OSType = "windows"
 		}
 		if o.Native {
-			spec.OrgID = o.OrgID
+			if o.Engine != "" && o.Engine == s.cfg.InstanceID {
+				spec.OrgID = o.OrgID // org ids only mean something on the install that wrote them
+			}
 			spec.Firmware, spec.SecureBoot, spec.MachineType = o.Firmware, o.SecureBoot, o.Machine
 			spec.OSType, spec.DiskBus, spec.NICModel, spec.VGA = o.OSType, o.DiskBus, o.NICModel, o.VGA
 			spec.GuestAgent, spec.TPM = o.GuestAgent, o.TPM
