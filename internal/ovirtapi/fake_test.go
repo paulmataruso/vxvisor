@@ -28,13 +28,14 @@ type memBackend struct {
 	cps    map[string][]Checkpoint
 	audits []string
 
-	diskDir    string                                   // "" = staged disks have no files
-	backupDisk func(vm *VM) (vmbackup.Disk, error)      // nil = backups unsupported
-	nextID     func() string                            // deterministic ids for golden output
-	onStart    func(vm *VM) error                       // optional StartVM hook
-	userData   map[string]string                        // vm id -> custom_script
-	specs      map[string]VMSpec                        // vm id -> spec it was created with
+	diskDir    string                                    // "" = staged disks have no files
+	backupDisk func(vm *VM) (vmbackup.Disk, error)       // nil = backups unsupported
+	nextID     func() string                             // deterministic ids for golden output
+	onStart    func(vm *VM) error                        // optional StartVM hook
+	userData   map[string]string                         // vm id -> custom_script
+	specs      map[string]VMSpec                         // vm id -> spec it was created with
 	attachHook func(vm *VM, d *Disk, iface string) error // optional AttachDisk hook
+	removeHook func(vmID, id string) error               // optional RemoveCheckpoint hook (drops the bitmap)
 }
 
 type fakeCaller struct{ user, ip string }
@@ -88,7 +89,7 @@ func (b *memBackend) Bind(c Caller, ip string) (Caller, error) {
 	return &fakeCaller{user: fc.user, ip: ip}, nil
 }
 
-func (b *memBackend) Host(Caller) (Host, error)                 { return b.host, nil }
+func (b *memBackend) Host(Caller) (Host, error)                  { return b.host, nil }
 func (b *memBackend) StoragePools(Caller) ([]StoragePool, error) { return b.pools, nil }
 func (b *memBackend) Networks(Caller) ([]Network, error)         { return b.nets, nil }
 
@@ -157,6 +158,11 @@ func (b *memBackend) AddCheckpoint(_ Caller, cp Checkpoint) error {
 }
 
 func (b *memBackend) RemoveCheckpoint(_ Caller, vmID, id string) error {
+	if b.removeHook != nil {
+		if err := b.removeHook(vmID, id); err != nil {
+			return err
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	cur := b.cps[vmID]

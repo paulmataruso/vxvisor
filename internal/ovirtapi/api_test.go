@@ -30,7 +30,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	t.Helper()
 	be := newMemBackend()
 	s := New(Config{PublicHost: "198.51.100.7", APIPort: 443, ImageioPort: 54322, WorkRoot: t.TempDir(),
-		CAPEM: []byte("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"),
+		CAPEM:      []byte("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n"),
 		InstanceID: "5e1f0c2a-0000-4000-8000-000000000001", NodeName: "node1"}, be, imageio.NewServer())
 	s.now = func() time.Time { return created0.Add(2 * time.Hour) }
 	ts := httptest.NewServer(s.Handler())
@@ -249,8 +249,8 @@ func TestRestoreFromOVF(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"name":    "web01-restored",
-		"cluster": map[string]any{"id": e.s.clusterID()},
+		"name":           "web01-restored",
+		"cluster":        map[string]any{"id": e.s.clusterID()},
 		"initialization": map[string]any{"configuration": map[string]any{"type": "ovf", "data": ovf}},
 	})
 	r := e.call("POST", "/ovirt-engine/api/vms", "json", string(body))

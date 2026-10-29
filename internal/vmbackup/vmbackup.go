@@ -129,6 +129,22 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
+// A unix socket path must fit sockaddr_un.sun_path (108 bytes with the NUL).
+// Sockets are <work root>/<vm id>/<8 hex>.nbd.sock, so with a UUID VM id the
+// work root may be at most MaxWorkRootLen bytes.
+const (
+	maxSockPath    = 107
+	MaxWorkRootLen = maxSockPath - 1 - 36 - 1 - len("01234567.nbd.sock")
+)
+
+func sockPath(dir, id string) (string, error) {
+	p := filepath.Join(dir, id[:8]+".nbd.sock")
+	if len(p) > maxSockPath {
+		return "", fmt.Errorf("vmbackup: socket path %s is longer than %d bytes; use a shorter work directory", p, maxSockPath)
+	}
+	return p, nil
+}
+
 func (d Disk) ensureWorkDir() (string, error) {
 	if d.WorkRoot == "" || d.VMID == "" || strings.ContainsAny(d.VMID, "/\x00") || d.VMID == "." || d.VMID == ".." {
 		return "", errors.New("vmbackup: bad work dir")
@@ -204,6 +220,9 @@ func startRunning(d Disk, req Request) (*Export, error) {
 		Size: uint64(dn.VirtualSize), Name: objPrefix + id,
 		fleeceNode: nodePrefix + id, fleecePath: filepath.Join(dir, id+".fleece.qcow2"),
 		sock: filepath.Join(dir, "nbd.sock")}
+	if len(e.sock) > maxSockPath {
+		return nil, fmt.Errorf("vmbackup: socket path %s is longer than %d bytes; use a shorter work directory", e.sock, maxSockPath)
+	}
 
 	// The scratch image: empty, same virtual size, written only by the
 	// copy-before-write job. Pre-created and chowned so a dropped-privilege
@@ -365,8 +384,11 @@ func startStopped(d Disk, req Request) (*Export, error) {
 		}
 	}
 	id := newID()
-	e := &Export{disk: d, req: req, id: id, Name: objPrefix + id, Size: uint64(info.VirtualSize),
-		sock: filepath.Join(dir, id+".nbd.sock")}
+	sock, err := sockPath(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	e := &Export{disk: d, req: req, id: id, Name: objPrefix + id, Size: uint64(info.VirtualSize), sock: sock}
 	// A stopped disk is static, so the new checkpoint can be created before
 	// the export: the bitmap starts empty = "nothing changed since now".
 	if req.To != "" {
@@ -404,7 +426,11 @@ func OpenWritable(path, format, workDir string) (*Export, error) {
 		return nil, err
 	}
 	id := newID()
-	e := &Export{id: id, Name: objPrefix + id, Size: uint64(size), sock: filepath.Join(workDir, id+".nbd.sock")}
+	sock, err := sockPath(workDir, id)
+	if err != nil {
+		return nil, err
+	}
+	e := &Export{id: id, Name: objPrefix + id, Size: uint64(size), sock: sock}
 	args := []string{"--persistent", "--shared=8", "--format=" + format, "--socket=" + e.sock,
 		"--export-name=" + e.Name, "--cache=writeback", "--discard=unmap", "--detect-zeroes=unmap", path}
 	if err := e.spawnNBD(args); err != nil {

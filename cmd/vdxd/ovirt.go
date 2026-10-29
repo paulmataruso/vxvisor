@@ -19,6 +19,7 @@ import (
 	"vdxclone/internal/ovirtapi"
 	"vdxclone/internal/secrets"
 	"vdxclone/internal/service"
+	"vdxclone/internal/vmbackup"
 )
 
 // startOvirt brings up the optional oVirt-compatible backup API ([ovirt]):
@@ -50,6 +51,10 @@ func startOvirt(ctx context.Context, cfg *config.Config, svc *service.Service, n
 	work := cfg.Ovirt.WorkDir
 	if work == "" {
 		work = filepath.Join(dir, "backup-work")
+	}
+	if len(work) > vmbackup.MaxWorkRootLen {
+		// NBD unix sockets live under it and must fit sun_path.
+		return nil, fmt.Errorf("[ovirt] work_dir %q is longer than %d bytes", work, vmbackup.MaxWorkRootLen)
 	}
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		return nil, fmt.Errorf("backup work dir: %w", err)
