@@ -1083,6 +1083,35 @@ ALTER TABLE vrouter_legs ADD COLUMN vlan_id INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE vrouter_legs ADD COLUMN upstream_gw TEXT NOT NULL DEFAULT '';
 ALTER TABLE vrouter_legs ADD COLUMN snat INTEGER NOT NULL DEFAULT 0;
 `},
+	{49, "tenant-vswitch-dhcp", `
+-- The untagged port group's host DHCP settings, saved like a VLAN port group's
+-- (tenant_portgroups.dhcp/dhcp_range/dhcp_dns). Before this they were rebuilt at
+-- boot from defaults (.100-.200, 1.1.1.1/8.8.8.8), so a vSwitch created with its
+-- own range or DNS — or with DHCP off — came back different after a restart.
+-- Existing rows get dhcp=1 and empty range/DNS, which the service reads as
+-- exactly those old defaults: nothing changes for them. STRICTLY ADDITIVE.
+ALTER TABLE tenant_networks ADD COLUMN dhcp INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE tenant_networks ADD COLUMN dhcp_range TEXT NOT NULL DEFAULT '';
+ALTER TABLE tenant_networks ADD COLUMN dhcp_dns TEXT NOT NULL DEFAULT '';
+`},
+	{50, "tenant-vswitch-unique", `
+-- An uplink rides one vSwitch, and an org has at most one default vSwitch — so
+-- far enforced only by the service layer (racy). Standalone partial unique
+-- indexes make both hard (an inline UNIQUE ... WHERE is a syntax error on
+-- modernc). Any duplicates a race left behind are resolved first, or the index
+-- would fail and quarantine the DB: the uplink stays with the vSwitch it is
+-- actually wired into (its egress_bridge), else the oldest; the oldest default
+-- stays the default.
+UPDATE tenant_networks SET uplink_id=NULL
+ WHERE uplink_id IS NOT NULL AND id <> COALESCE(
+   (SELECT t2.id FROM tenant_networks t2 JOIN tenant_uplinks u ON u.id=t2.uplink_id
+     WHERE t2.uplink_id=tenant_networks.uplink_id AND u.egress_bridge='vdxt'||t2.network_id ORDER BY t2.id LIMIT 1),
+   (SELECT MIN(t3.id) FROM tenant_networks t3 WHERE t3.uplink_id=tenant_networks.uplink_id));
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tnet_uplink ON tenant_networks(uplink_id) WHERE uplink_id IS NOT NULL;
+UPDATE tenant_networks SET is_default=0
+ WHERE is_default=1 AND id <> (SELECT MIN(t2.id) FROM tenant_networks t2 WHERE t2.org_id=tenant_networks.org_id AND t2.is_default=1);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_tnet_org_default ON tenant_networks(org_id) WHERE is_default=1;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

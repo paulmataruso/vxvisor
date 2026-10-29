@@ -1,6 +1,9 @@
 package service
 
-import "fmt"
+import (
+	"fmt"
+	"log"
+)
 
 // Transactional VXLAN segment-identity allocator for tenant networking v2.
 //
@@ -83,4 +86,45 @@ func (s *Service) AllocVNI(orgID, netID int64) (int, error) {
 // a concurrent AllocVNI cannot reuse the id while a device still lingers.
 func (s *Service) FreeVNI(netID int64) {
 	_, _ = s.db.Exec(`DELETE FROM net_segments WHERE net_id=?`, netID)
+}
+
+// vniReserved reports which network a VNI is reserved for as a tenant segment
+// identity (0 = free). Hand-entered VXLAN port groups check it so they can't
+// take an identity the allocator already gave a tenant segment.
+func (s *Service) vniReserved(vni int) int64 {
+	var netID int64
+	_ = s.db.QueryRow(`SELECT net_id FROM net_segments WHERE seg_type='vxlan' AND seg_id=?`, vni).Scan(&netID)
+	return netID
+}
+
+// reconcileSegmentIdentities makes net_segments match the tenant segments that
+// exist (boot): an identity whose network is gone is released, and a tenant
+// vSwitch or port group without one (created before identities, or whose
+// allocation failed) gets one.
+func (s *Service) reconcileSegmentIdentities() {
+	if _, err := s.db.Exec(`DELETE FROM net_segments WHERE net_id NOT IN (SELECT id FROM networks)`); err != nil {
+		log.Printf("segment identities: release orphans: %v", err)
+	}
+	type seg struct{ org, net int64 }
+	var missing []seg
+	rows, err := s.db.Query(`SELECT org_id,network_id FROM tenant_networks
+		WHERE network_id NOT IN (SELECT net_id FROM net_segments)
+		UNION SELECT org_id,network_id FROM tenant_portgroups
+		WHERE network_id NOT IN (SELECT net_id FROM net_segments)`)
+	if err != nil {
+		log.Printf("segment identities: %v", err)
+		return
+	}
+	for rows.Next() {
+		var x seg
+		if rows.Scan(&x.org, &x.net) == nil {
+			missing = append(missing, x)
+		}
+	}
+	rows.Close()
+	for _, x := range missing {
+		if _, err := s.AllocVNI(x.org, x.net); err != nil {
+			log.Printf("segment identities: network %d: %v", x.net, err)
+		}
+	}
 }

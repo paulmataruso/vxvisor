@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/vrouter"
 )
 
 // Editing what the Tenant Egress console created: a trunk's MTU / QinQ setting,
@@ -283,9 +285,13 @@ func (s *Service) SetUplinkConnection(p *Principal, uplinkID, tnetID int64, ip s
 }
 
 // disconnectUplink takes an uplink off its vSwitch (refused while a VM is live on
-// it). The uplink keeps its tag; port groups it carried get their host gateway /
-// DHCP back.
+// it, or a router's external interface is on a port group it carries). The
+// uplink keeps its tag; port groups it carried get their host gateway / DHCP
+// back.
 func (s *Service) disconnectUplink(tnetID, uplinkID int64) error {
+	if err := s.checkUplinkLegs(tnetID, "", 0); err != nil {
+		return err
+	}
 	if err := s.unrealizeUplink(uplinkID, true, false); err != nil {
 		return err
 	}
@@ -294,6 +300,77 @@ func (s *Service) disconnectUplink(tnetID, uplinkID int64) error {
 		log.Printf("tenant-net: resync vSwitch %d after disconnect: %v", tnetID, err)
 	}
 	return nil
+}
+
+// uplinkLeg is a router external interface (vrouter uplink leg) on a vSwitch.
+type uplinkLeg struct {
+	vrID   int64
+	idx    int
+	netns  string
+	router string
+	vlan   int // the port group it is on (0 = the untagged one)
+}
+
+// uplinkLegsOn lists the router external interfaces on a tenant bridge.
+func (s *Service) uplinkLegsOn(bridge string) []uplinkLeg {
+	rows, err := s.db.Query(`SELECT l.vrouter_id,l.idx,v.netns_name,v.name,l.vlan_id FROM vrouter_legs l
+		JOIN vrouters v ON v.id=l.vrouter_id WHERE l.kind=? AND l.bridge=? ORDER BY v.name`, vrouter.LegUplink, bridge)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []uplinkLeg
+	for rows.Next() {
+		var l uplinkLeg
+		if rows.Scan(&l.vrID, &l.idx, &l.netns, &l.router, &l.vlan) == nil {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// checkUplinkLegs refuses a change that would leave a router's external
+// interface on a port group the vSwitch's uplink no longer carries (mode "" =
+// no uplink at all: disconnect / delete). That interface would sit on a
+// tenant-local segment with its default route and SNAT pointing at an upstream
+// that isn't there.
+func (s *Service) checkUplinkLegs(tnetID int64, mode string, native int) error {
+	var netID int64
+	if err := s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=?`, tnetID).Scan(&netID); err != nil {
+		return nil
+	}
+	for _, l := range s.uplinkLegsOn(tenantBridgeName(netID)) {
+		if !carriedOut(mode, native, l.vlan) {
+			what := "the untagged port group"
+			if l.vlan != 0 {
+				what = fmt.Sprintf("the VLAN %d port group", l.vlan)
+			}
+			return fmt.Errorf("router %s has its external interface on %s, which would no longer leave on the external network — detach the router's external interface first",
+				l.router, what)
+		}
+	}
+	return nil
+}
+
+// detachUplinkLegs removes every router external interface on a vSwitch (the
+// global egress teardown only — everywhere else a leg blocks the change).
+func (s *Service) detachUplinkLegs(tnetID int64) {
+	var netID int64
+	if err := s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=?`, tnetID).Scan(&netID); err != nil {
+		return
+	}
+	for _, l := range s.uplinkLegsOn(tenantBridgeName(netID)) {
+		if l.netns != "" {
+			netdrv.NetnsDelLink(l.netns, "eth"+strconv.Itoa(l.idx))
+		}
+		if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND idx=? AND kind=?`, l.vrID, l.idx, vrouter.LegUplink); err != nil {
+			log.Printf("egress teardown: router %s external interface: %v", l.router, err)
+			continue
+		}
+		if err := s.applyAndPush(l.vrID); err != nil {
+			log.Printf("egress teardown: router %s after removing its external interface: %v", l.router, err)
+		}
+	}
 }
 
 // TenantNetLite is a tenant vSwitch as the egress console lists it.

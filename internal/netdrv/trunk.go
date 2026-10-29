@@ -1,6 +1,7 @@
 package netdrv
 
 import (
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -47,9 +48,81 @@ func SubNameChecked(trunk string, vid int) (string, error) {
 	return n, nil
 }
 
-// EnsureVlanSub idempotently creates the VLAN subinterface <trunk>.<vid> with the
-// given protocol ("802.1q" or "802.1ad") and brings it up. Returns the device name.
-func EnsureVlanSub(trunk string, vid int, proto string) (string, error) {
+// MaxTrunkNameLen is the longest trunk interface name whose every subinterface
+// <trunk>.<vid> (VLAN up to 4094) still fits the kernel's 15-character limit.
+const MaxTrunkNameLen = 15 - len(".4094")
+
+// CheckTrunkName refuses a trunk whose subinterface names couldn't be created.
+func CheckTrunkName(iface string) error {
+	if len(iface) > MaxTrunkNameLen {
+		return fmt.Errorf("interface name %q is too long for a trunk: its VLAN subinterfaces (%s.<vlan>) would exceed the kernel's 15-character limit — use an interface named with %d characters or fewer (e.g. a bond)", iface, iface, MaxTrunkNameLen)
+	}
+	return nil
+}
+
+// linkDetail is the part of `ip -j -d link show dev X` the trunk code reads.
+type linkDetail struct {
+	IfName   string `json:"ifname"`
+	Link     string `json:"link"` // a VLAN device's parent
+	Master   string `json:"master"`
+	LinkInfo struct {
+		InfoKind string `json:"info_kind"`
+		InfoData struct {
+			Protocol string `json:"protocol"`
+			ID       int    `json:"id"`
+		} `json:"info_data"`
+	} `json:"linkinfo"`
+}
+
+func linkDetails(args ...string) ([]linkDetail, error) {
+	out, err := exec.Command("ip", append([]string{"-j", "-d", "link", "show"}, args...)...).Output()
+	if err != nil {
+		return nil, err
+	}
+	var ls []linkDetail
+	if strings.TrimSpace(string(out)) == "" {
+		return nil, nil
+	}
+	if err := json.Unmarshal(out, &ls); err != nil {
+		return nil, fmt.Errorf("parse ip link: %w", err)
+	}
+	return ls, nil
+}
+
+// linkMaster returns the bridge/bond an interface is enslaved to ("" if none).
+func linkMaster(iface string) string {
+	ls, err := linkDetails("dev", iface)
+	if err != nil || len(ls) == 0 {
+		return ""
+	}
+	return ls[0].Master
+}
+
+// VlanSubsOf lists the VLAN devices whose parent is iface, by VLAN id.
+func VlanSubsOf(iface string) (map[int]string, error) {
+	ls, err := linkDetails()
+	if err != nil {
+		return nil, err
+	}
+	out := map[int]string{}
+	for _, l := range ls {
+		if l.LinkInfo.InfoKind == "vlan" && l.Link == iface {
+			out[l.LinkInfo.InfoData.ID] = l.IfName
+		}
+	}
+	return out, nil
+}
+
+// ClaimVlanSub gets the VLAN subinterface <trunk>.<vid> ("802.1q" or "802.1ad")
+// enslaved to bridge as a tenant uplink port. A new subinterface is created and
+// enslaved DOWN: the caller brings it up only once its bridge VLANs are set and
+// the host is off whatever it carries (so nothing leaks onto the provider's wire
+// in between). An existing device of that name is reused only if it is exactly
+// such a subinterface, holds no address and isn't enslaved elsewhere — anything
+// else belongs to the host (e.g. a storage VLAN on a shared management bond),
+// and enslaving it into a tenant bridge would hand that VLAN's traffic to the
+// tenant. Returns the device name.
+func ClaimVlanSub(trunk string, vid int, proto, bridge string) (string, error) {
 	if proto != "802.1q" && proto != "802.1ad" {
 		return "", fmt.Errorf("unsupported VLAN proto %q", proto)
 	}
@@ -62,11 +135,85 @@ func EnsureVlanSub(trunk string, vid int, proto string) (string, error) {
 			"type", "vlan", "proto", proto, "id", strconv.Itoa(vid)); err != nil {
 			return "", err
 		}
+	} else {
+		ls, err := linkDetails("dev", name)
+		if err != nil || len(ls) != 1 {
+			return "", fmt.Errorf("can't inspect existing interface %s: %v", name, err)
+		}
+		l := ls[0]
+		if l.LinkInfo.InfoKind != "vlan" || l.Link != trunk || l.LinkInfo.InfoData.ID != vid ||
+			!strings.EqualFold(l.LinkInfo.InfoData.Protocol, proto) {
+			return "", fmt.Errorf("%s already exists on this host and isn't a %s VLAN %d subinterface of %s — it belongs to something else; pick another VLAN", name, proto, vid, trunk)
+		}
+		if l.Master != "" && l.Master != bridge {
+			return "", fmt.Errorf("%s already exists on this host and is part of %s — it belongs to something else; pick another VLAN", name, l.Master)
+		}
+		if l.Master == "" && hasHostAddr(name) {
+			return "", fmt.Errorf("%s already exists on this host and carries an address — it belongs to the host; pick another VLAN", name)
+		}
 	}
-	if err := run("ip", "link", "set", name, "up"); err != nil {
-		return "", err
+	return name, EnslavePortDown(name, bridge)
+}
+
+// ReleaseVlanSub deletes a tenant uplink's subinterface <trunk>.<vid> — but only
+// if it is one ClaimVlanSub could have handed out (that trunk's VLAN vid, in a
+// tenant bridge or in none, with no host address). A device of that name that
+// belongs to the host (a claim refused it) is left alone: it was never the
+// uplink's, so for the uplink it is already gone. Errors only if a device that
+// is the uplink's can't be removed.
+func ReleaseVlanSub(trunk string, vid int) error {
+	name := SubName(trunk, vid)
+	if !ifaceExists(name) {
+		return nil
 	}
-	return name, nil
+	ls, err := linkDetails("dev", name)
+	if err != nil || len(ls) != 1 {
+		return fmt.Errorf("can't inspect %s: %v", name, err)
+	}
+	l := ls[0]
+	if l.LinkInfo.InfoKind != "vlan" || l.Link != trunk || l.LinkInfo.InfoData.ID != vid {
+		return nil
+	}
+	switch {
+	case strings.HasPrefix(l.Master, "vdxt"):
+	case l.Master == "" && !hasHostAddr(name):
+	default:
+		return nil
+	}
+	return DelVlanSub(name)
+}
+
+// EnslavePortDown enslaves iface to bridge, setting it down first unless it is
+// already a port of that bridge (an idempotent re-run leaves a live port alone).
+// The caller brings the port up once its VLAN memberships are right.
+func EnslavePortDown(iface, bridge string) error {
+	if linkMaster(iface) == bridge {
+		return nil
+	}
+	if err := run("ip", "link", "set", iface, "down"); err != nil {
+		return err
+	}
+	return run("ip", "link", "set", iface, "master", bridge)
+}
+
+// hasHostAddr reports whether an interface carries an address someone gave it:
+// any IPv4 address, or an IPv6 one beyond the automatic link-local. On error it
+// says yes (the caller then refuses to take the device over).
+func hasHostAddr(iface string) bool {
+	out, err := exec.Command("ip", "-o", "addr", "show", "dev", iface).Output()
+	if err != nil {
+		return true
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		f := strings.Fields(ln)
+		if len(f) < 4 {
+			continue
+		}
+		if f[2] == "inet" || (f[2] == "inet6" && !strings.HasPrefix(strings.ToLower(f[3]), "fe80:")) {
+			return true
+		}
+	}
+	return false
 }
 
 // DelVlanSub removes a VLAN subinterface. Unlike the best-effort DeleteLink it

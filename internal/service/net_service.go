@@ -49,6 +49,9 @@ func (s *Service) CreateNetwork(p *Principal, n netdrv.Network, ip string) (int6
 			return 0, fmt.Errorf("VLAN %d on bridge %s is already in use by another organization", n.VLANID, n.Bridge)
 		}
 	}
+	if err := s.checkTenantClaims(n); err != nil {
+		return 0, err
+	}
 	id, err := s.net.CreateNetwork(n)
 	if err != nil {
 		return 0, err

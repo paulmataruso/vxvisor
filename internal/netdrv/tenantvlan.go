@@ -160,17 +160,27 @@ func DelBridgeVlanIface(bridge string, vid int) {
 // table outright.
 const TenantGuardTable = "vdxtenant"
 
+// TenantL2GuardTable is the host nftables BRIDGE-family table that keeps a
+// tenant's own VMs from impersonating the network's infrastructure on its
+// segments (see RenderTenantL2Guard). vdxd owns it outright too.
+const TenantL2GuardTable = "vdxtenantl2"
+
 // IsolateTenantIface stops the host from ever routing traffic that arrives on a
 // tenant bridge / port-group interface (IPv4 forwarding is decided per ingress
-// interface) and removes the host's IPv6 presence there. Bridged traffic
-// between the tenant's own ports is L2 and unaffected. A tenant reaches other
-// networks only through its own router (netns) or its uplink — never the host.
+// interface), removes the host's IPv6 presence there, and keeps the host from
+// answering ARP there for any address but that interface's own (arp_ignore=1)
+// or announcing its other addresses into the segment (arp_announce=2). Bridged
+// traffic between the tenant's own ports is L2 and unaffected. A tenant reaches
+// other networks only through its own router (netns) or its uplink — never the
+// host.
 func IsolateTenantIface(dev string) error {
-	if !strings.HasPrefix(dev, "vdxt") || strings.ContainsAny(dev, "/ ") {
+	if !strings.HasPrefix(dev, "vdxt") || !validIfName(dev) {
 		return fmt.Errorf("refusing to isolate non-tenant interface %q", dev)
 	}
 	for _, kv := range [][2]string{
 		{filepath.Join("/proc/sys/net/ipv4/conf", dev, "forwarding"), "0"},
+		{filepath.Join("/proc/sys/net/ipv4/conf", dev, "arp_ignore"), "1"},
+		{filepath.Join("/proc/sys/net/ipv4/conf", dev, "arp_announce"), "2"},
 		{filepath.Join("/proc/sys/net/ipv6/conf", dev, "disable_ipv6"), "1"},
 	} {
 		if err := os.WriteFile(kv[0], []byte(kv[1]), 0o644); err != nil {
@@ -189,12 +199,15 @@ func IsolateTenantIface(dev string) error {
 //	         the durable layer: per-interface forwarding=0 is reset whenever the
 //	         global ip_forward is rewritten (e.g. by host routing apply).
 //
-// bridgeNF is whether br_netfilter hands BRIDGED IPv4 to the inet hooks; if so
-// a bridged frame shows iifname == oifname == the bridge, so the forward rule
-// only drops traffic crossing between a tenant interface and a non-tenant one
-// (tenant-to-tenant routing is then stopped by per-interface forwarding=0).
-// Without br_netfilter the forward hook only ever sees routed packets.
-func RenderTenantGuard(devs []string, bridgeNF bool) string {
+// The forward rules only let a packet through when it enters and leaves on the
+// SAME tenant interface. That is what bridged traffic looks like when
+// br_netfilter hands it to the inet hooks (in and out are both the bridge), and
+// it is never true of a packet routed between two interfaces — so the guard is
+// right whether or not br_netfilter is loaded, and stays right if something
+// loads it later. (An earlier version picked its rules by the br_netfilter state
+// at render time, and would have dropped a tenant's own bridged traffic had the
+// module been loaded afterwards.)
+func RenderTenantGuard(devs []string) string {
 	var b strings.Builder
 	// Declare-then-delete makes the load atomic and idempotent (no "table not
 	// found" on first apply).
@@ -202,11 +215,12 @@ func RenderTenantGuard(devs []string, bridgeNF bool) string {
 	b.WriteString("delete table inet " + TenantGuardTable + "\n")
 	b.WriteString("table inet " + TenantGuardTable + " {\n")
 	if len(devs) > 0 {
-		q := make([]string, len(devs))
+		self := make([]string, len(devs))
 		for i, d := range devs {
-			q[i] = `"` + d + `"`
+			self[i] = `"` + d + `" . "` + d + `"`
 		}
-		b.WriteString("  set tbr {\n    type ifname\n    elements = { " + strings.Join(q, ", ") + " }\n  }\n")
+		b.WriteString("  set tbr {\n    type ifname\n    elements = { " + quoteList(devs) + " }\n  }\n")
+		b.WriteString("  set tself {\n    type ifname . ifname\n    elements = { " + strings.Join(self, ", ") + " }\n  }\n")
 	}
 	// A drop in any base chain is final, so other tables' accepts can't undo it.
 	b.WriteString("  chain input {\n    type filter hook input priority filter - 10; policy accept;\n")
@@ -221,26 +235,72 @@ func RenderTenantGuard(devs []string, bridgeNF bool) string {
 	b.WriteString("  }\n")
 	b.WriteString("  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n")
 	if len(devs) > 0 {
-		if bridgeNF {
-			b.WriteString("    iifname @tbr oifname != @tbr drop\n")
-			b.WriteString("    oifname @tbr iifname != @tbr drop\n")
-		} else {
-			b.WriteString("    iifname @tbr drop\n")
-			b.WriteString("    oifname @tbr drop\n")
-		}
+		b.WriteString("    iifname @tbr iifname . oifname != @tself drop\n")
+		b.WriteString("    oifname @tbr iifname . oifname != @tself drop\n")
 	}
 	b.WriteString("  }\n}\n")
 	return b.String()
 }
 
-// BridgeNetfilterOn reports whether br_netfilter passes bridged IPv4 through the
-// inet hooks (module loaded and bridge-nf-call-iptables=1).
-func BridgeNetfilterOn() bool {
-	v, err := os.ReadFile("/proc/sys/net/bridge/bridge-nf-call-iptables")
-	return err == nil && strings.TrimSpace(string(v)) == "1"
+// RenderTenantL2Guard builds the segment guard for the tenant bridges: a frame
+// entering a tenant bridge on a port that isn't trusted (the vSwitch's uplink
+// port, a tenant router's leg) is dropped when it is
+//
+//   - a DHCP server reply (IPv4 67→68, DHCPv6 547→546) — no rogue DHCP server;
+//   - an IPv6 router advertisement — no rogue IPv6 router;
+//   - an STP BPDU (IEEE 01:80:c2:00:00:00 or Cisco PVST+) — no VM claiming
+//     root bridge, or reaching the provider's spanning tree through the uplink.
+//
+// So a tenant VM can't hijack its own segment's addressing or topology (the
+// NSX segment-security defaults). It is a native bridge-family table, so it
+// needs no br_netfilter. Frames the host sends itself (its gateway's DHCP)
+// don't enter through a port and are never affected.
+func RenderTenantL2Guard(bridges, trusted []string) string {
+	var b strings.Builder
+	b.WriteString("table bridge " + TenantL2GuardTable + " {}\n")
+	b.WriteString("delete table bridge " + TenantL2GuardTable + "\n")
+	b.WriteString("table bridge " + TenantL2GuardTable + " {\n")
+	if len(bridges) > 0 {
+		b.WriteString("  set tbr {\n    type ifname\n    elements = { " + quoteList(bridges) + " }\n  }\n")
+		if len(trusted) > 0 {
+			b.WriteString("  set trusted {\n    type ifname\n    elements = { " + quoteList(trusted) + " }\n  }\n")
+		}
+	}
+	b.WriteString("  chain prerouting {\n    type filter hook prerouting priority filter - 10; policy accept;\n")
+	if len(bridges) > 0 {
+		b.WriteString("    meta ibrname != @tbr accept\n")
+		if len(trusted) > 0 {
+			b.WriteString("    iifname @trusted accept\n")
+		}
+		b.WriteString("    ether daddr { 01:80:c2:00:00:00, 01:00:0c:cc:cc:cd } drop\n")
+		b.WriteString("    meta l4proto udp udp sport 67 udp dport 68 drop\n")
+		b.WriteString("    meta l4proto udp udp sport 547 udp dport 546 drop\n")
+		b.WriteString("    meta l4proto ipv6-icmp icmpv6 type nd-router-advert drop\n")
+	}
+	b.WriteString("  }\n}\n")
+	return b.String()
 }
 
-// ApplyTenantGuard loads the rendered guard (replacing any previous version).
-func ApplyTenantGuard(devs []string) error {
-	return ApplyNFT(RenderTenantGuard(devs, BridgeNetfilterOn()))
+func quoteList(names []string) string {
+	q := make([]string, len(names))
+	for i, n := range names {
+		q[i] = `"` + n + `"`
+	}
+	return strings.Join(q, ", ")
+}
+
+// ApplyTenantGuard loads the host guard (devs: every tenant bridge and
+// port-group interface) and the segment guard (bridges: the tenant bridges;
+// trusted: their uplink ports and router legs) in one nft transaction,
+// replacing any previous version of both. A name that isn't a plain interface
+// name is refused rather than rendered.
+func ApplyTenantGuard(devs, bridges, trusted []string) error {
+	for _, l := range [][]string{devs, bridges, trusted} {
+		for _, n := range l {
+			if !validIfName(n) {
+				return fmt.Errorf("tenant guard: %q is not an interface name", n)
+			}
+		}
+	}
+	return ApplyNFT(RenderTenantGuard(devs) + RenderTenantL2Guard(bridges, trusted))
 }

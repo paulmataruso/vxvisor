@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
 	"vdxclone/internal/vrouter"
 )
@@ -37,11 +38,15 @@ import (
 // suspended while it is carried (the host must never answer DHCP or hold an
 // address on the provider's wire), and it can't be routed by a tenant router
 // (that would put a second gateway on the upstream L2) — the router joins it
-// with an uplink leg instead.
+// with an uplink leg (its external interface) instead. Every change that alters
+// what the uplink carries (connect / disconnect / native / mode / deleting the
+// native port group) re-checks both: no router-gatewayed port group may become
+// carried, and no router external interface may be left on one that isn't.
 //
 // The host never routes for a tenant: every tenant bridge / port-group interface
 // gets per-interface forwarding off + the vdxtenant nft guard (DHCP in, nothing
-// else), re-applied after anything that could reset it.
+// else), and every tenant bridge the vdxtenantl2 segment guard (no rogue DHCP /
+// RA / BPDU from a VM), re-applied after anything that could reset them.
 
 // vswitchMu serializes host-side vSwitch syncs and the isolation guard reload.
 var vswitchMu sync.Mutex
@@ -61,9 +66,11 @@ type TenantPortGroup struct {
 	DNS         string
 	VRouterID   int64
 	VRouterName string
-	Native      bool // carried untagged on the vSwitch's uplink
-	Carried     bool // leaves on the vSwitch's uplink (set by ListTenantNetworks)
-	VMs         int  // live instances attached
+	Native      bool   // carried untagged on the vSwitch's uplink
+	Carried     bool   // leaves on the vSwitch's uplink (set by ListTenantNetworks)
+	VMs         int    // live instances attached
+	ExtRouter   string // router whose external interface is on it (set by ListTenantNetworks)
+	AddrLocked  bool   // subnet / gateway can't change now (set by ListTenantNetworks)
 }
 
 // Kind is the port group's role for display: routed / uplink / standalone / l2.
@@ -78,6 +85,9 @@ func (pg TenantPortGroup) Kind() string {
 	}
 	return "l2"
 }
+
+// DHCPRangeText is the port group's DHCP range as a form shows it ("start-end").
+func (pg TenantPortGroup) DHCPRangeText() string { return strings.Replace(pg.DHCPRange, ",", "-", 1) }
 
 // carriedOut reports whether a vSwitch's port group (vlan; 0 = the untagged
 // default) leaves on its uplink, given the uplink mode ("" = none) and the
@@ -100,7 +110,8 @@ func (s *Service) vswitchEgress(tnetID int64) (mode string, native int) {
 }
 
 // checkCarry refuses an uplink/native change that would carry a router-gatewayed
-// port group out the uplink.
+// port group out the uplink, or leave a router's external interface on a port
+// group the uplink no longer carries.
 func (s *Service) checkCarry(tnetID int64, mode string, native int) error {
 	var vr int64
 	_ = s.db.QueryRow(`SELECT vrouter_id FROM tenant_networks WHERE id=?`, tnetID).Scan(&vr)
@@ -117,7 +128,7 @@ func (s *Service) checkCarry(tnetID int64, mode string, native int) error {
 				pg.Name, pg.VLAN, pg.VRouterName)
 		}
 	}
-	return nil
+	return s.checkUplinkLegs(tnetID, mode, native)
 }
 
 const tpgCols = `pg.id,pg.org_id,pg.tnet_id,pg.name,pg.vlan_id,pg.network_id,COALESCE(n.cidr,''),COALESCE(n.gateway,''),
@@ -176,52 +187,32 @@ func (s *Service) CreateTenantPortGroup(p *Principal, tnetID int64, name string,
 		Scan(&vsName, &netID); err != nil {
 		return 0, fmt.Errorf("vSwitch not found in this org")
 	}
-	name = strings.TrimSpace(name)
-	if name == "" || strings.ContainsAny(name, "/\n\r") {
-		return 0, fmt.Errorf("a port group name is required (no '/')")
+	name, err := validTenantName(name, "port group")
+	if err != nil {
+		return 0, err
 	}
 	if vlan < 2 || vlan > 4094 {
 		return 0, fmt.Errorf("VLAN must be 2-4094 (VLAN 1 is the vSwitch's untagged default port group)")
 	}
 	bridge := tenantBridgeName(netID)
-	if len(netdrv.BridgeVlanIfaceName(bridge, vlan)) > 15 {
-		return 0, fmt.Errorf("VLAN interface name for %s.%d is too long", bridge, vlan)
+	if n := netdrv.BridgeVlanIfaceName(bridge, vlan); len(n) > 15 {
+		return 0, fmt.Errorf("this vSwitch can't take VLAN %d: its gateway interface %s would exceed the kernel's 15-character interface-name limit — use a lower VLAN ID", vlan, n)
 	}
-	cidr, gateway = strings.TrimSpace(cidr), strings.TrimSpace(gateway)
-	if cidr != "" {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return 0, fmt.Errorf("invalid CIDR %q", cidr)
-		}
+	l3, err := parseTenantL3(cidr, gateway, dhcp, dhcpRange, dns)
+	if err != nil {
+		return 0, err
 	}
-	if gateway != "" {
-		if cidr == "" {
-			return 0, fmt.Errorf("a gateway needs the port group's CIDR")
-		}
-		if err := gatewayInCIDR(gateway, cidr); err != nil {
-			return 0, err
-		}
-	}
-	if dhcp {
-		if gateway == "" {
-			return 0, fmt.Errorf("DHCP needs a gateway (the host serves DHCP from the gateway address)")
-		}
-		if err := validDHCPRange(dhcpRange); err != nil {
-			return 0, err
-		}
-		if strings.TrimSpace(dns) == "" {
-			dns = "1.1.1.1,8.8.8.8"
-		}
-	} else {
-		dhcpRange, dns = "", ""
+	if err := checkHostOverlap(l3.CIDR, p.IsAdmin); err != nil {
+		return 0, err
 	}
 	pgNet, err := s.net.CreateNetwork(netdrv.Network{
-		OrgID: p.OrgID, Name: vsName + "/" + name, Mode: "bridge", Bridge: bridge, VLANID: vlan, CIDR: cidr, Gateway: gateway,
+		OrgID: p.OrgID, Name: vsName + "/" + name, Mode: "bridge", Bridge: bridge, VLANID: vlan, CIDR: l3.CIDR, Gateway: l3.Gateway,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("create backing port group: %w", err)
 	}
 	res, err := s.db.Exec(`INSERT INTO tenant_portgroups(org_id,tnet_id,name,vlan_id,network_id,dhcp,dhcp_range,dhcp_dns)
-		VALUES(?,?,?,?,?,?,?,?)`, p.OrgID, tnetID, name, vlan, pgNet, b2iDHCP(dhcp), dhcpRange, dns)
+		VALUES(?,?,?,?,?,?,?,?)`, p.OrgID, tnetID, name, vlan, pgNet, b2iDHCP(l3.DHCP), l3.Range, l3.DNS)
 	if err != nil {
 		_ = s.net.DeleteNetwork(p.OrgID, pgNet)
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -230,23 +221,30 @@ func (s *Service) CreateTenantPortGroup(p *Principal, tnetID int64, name string,
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
+	// The port group's own segment identity, like its vSwitch's (best effort).
+	if _, err := s.AllocVNI(p.OrgID, pgNet); err != nil {
+		log.Printf("tenant-pg: VNI identity not allocated for net %d: %v", pgNet, err)
+	}
 	if err := s.resyncVSwitch(tnetID); err != nil {
 		_, _ = s.db.Exec(`DELETE FROM tenant_portgroups WHERE id=?`, id)
 		_ = s.net.DeleteNetwork(p.OrgID, pgNet)
 		netdrv.StopTenantDHCP(netdrv.BridgeVlanIfaceName(bridge, vlan))
 		netdrv.DelBridgeVlanIface(bridge, vlan)
+		s.FreeVNI(pgNet)
 		if rerr := s.resyncVSwitch(tnetID); rerr != nil {
 			log.Printf("tenant-pg: resync %s after failed create: %v", bridge, rerr)
 		}
 		return 0, fmt.Errorf("realize port group: %w", err)
 	}
 	s.audit(p, p.OrgID, "tenantpg.create", "tenant_portgroup", fmt.Sprint(id), ip,
-		map[string]any{"vswitch": vsName, "name": name, "vlan": vlan, "cidr": cidr, "gateway": gateway})
+		map[string]any{"vswitch": vsName, "name": name, "vlan": vlan, "cidr": l3.CIDR, "gateway": l3.Gateway})
 	return id, nil
 }
 
 // DeleteTenantPortGroup removes a port group (org admin). Refuses while an
-// instance or a router is attached to it.
+// instance, a router or a router's external interface is attached to it, and
+// when it is the uplink's native port group and the untagged port group that
+// takes over as native can't be carried (it is router-gatewayed).
 func (s *Service) DeleteTenantPortGroup(p *Principal, id int64, ip string) error {
 	if !p.atLeast("admin") || p.OrgID == 0 {
 		return ErrUnauthorized
@@ -269,8 +267,23 @@ func (s *Service) DeleteTenantPortGroup(p *Principal, id int64, ip string) error
 	if err := s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=?`, pg.TnetID).Scan(&netID); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`UPDATE tenant_networks SET native_vlan=0 WHERE id=? AND native_vlan=?`, pg.TnetID, pg.VLAN); err != nil {
-		return err
+	bridge := tenantBridgeName(netID)
+	for _, l := range s.uplinkLegsOn(bridge) {
+		if l.vlan == pg.VLAN {
+			return fmt.Errorf("router %s's external interface is on this port group — detach it from the router first", l.router)
+		}
+	}
+	if pg.Native {
+		// The untagged port group becomes native in its place: the same check as
+		// picking it as native by hand.
+		if mode, _ := s.vswitchEgress(pg.TnetID); mode != "" {
+			if err := s.checkCarry(pg.TnetID, mode, 0); err != nil {
+				return fmt.Errorf("this is the uplink's native port group, and the untagged port group would take its place: %w", err)
+			}
+		}
+		if _, err := s.db.Exec(`UPDATE tenant_networks SET native_vlan=0 WHERE id=? AND native_vlan=?`, pg.TnetID, pg.VLAN); err != nil {
+			return err
+		}
 	}
 	if _, err := s.db.Exec(`DELETE FROM tenant_portgroups WHERE id=?`, id); err != nil {
 		return err
@@ -278,15 +291,118 @@ func (s *Service) DeleteTenantPortGroup(p *Principal, id int64, ip string) error
 	if err := s.net.DeleteNetwork(p.OrgID, pg.NetworkID); err != nil {
 		return err
 	}
-	bridge := tenantBridgeName(netID)
-	netdrv.StopTenantDHCP(netdrv.BridgeVlanIfaceName(bridge, pg.VLAN))
+	iface := netdrv.BridgeVlanIfaceName(bridge, pg.VLAN)
+	netdrv.StopTenantDHCP(iface)
 	netdrv.DelBridgeVlanIface(bridge, pg.VLAN)
+	if !netdrv.IfaceExists(iface) {
+		s.FreeVNI(pg.NetworkID) // device gone: release the segment identity
+	}
 	if err := s.resyncVSwitch(pg.TnetID); err != nil {
 		log.Printf("tenant-pg: resync %s after delete: %v", bridge, err)
 	}
 	s.audit(p, p.OrgID, "tenantpg.delete", "tenant_portgroup", fmt.Sprint(id), ip,
 		map[string]any{"name": pg.Name, "vlan": pg.VLAN})
 	return nil
+}
+
+// UpdateTenantPortGroup edits a VLAN port group (org admin): its name and DHCP
+// settings any time; its subnet and gateway only while no instance, router or
+// router external interface is attached. A routed port group's addressing and
+// DHCP belong to its router. The VLAN can't change (delete and re-add).
+func (s *Service) UpdateTenantPortGroup(p *Principal, id int64, e PortGroupEdit, ip string) error {
+	if !p.atLeast("admin") || p.OrgID == 0 {
+		return ErrUnauthorized
+	}
+	tnets, err := s.ListTenantNetworks(p)
+	if err != nil {
+		return err
+	}
+	var pg *TenantPortGroup
+	var vs *TenantNetwork
+	for i := range tnets {
+		for j := range tnets[i].PortGroups {
+			if tnets[i].PortGroups[j].ID == id {
+				vs, pg = &tnets[i], &tnets[i].PortGroups[j]
+			}
+		}
+	}
+	if pg == nil {
+		return fmt.Errorf("port group not found in this org")
+	}
+	name, err := validTenantName(e.Name, "port group")
+	if err != nil {
+		return err
+	}
+	if name != pg.Name {
+		var dup int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM tenant_portgroups WHERE tnet_id=? AND name=? AND id!=?`, pg.TnetID, name, id).Scan(&dup)
+		if dup > 0 {
+			return fmt.Errorf("vSwitch %s already has a port group named %q", vs.Name, name)
+		}
+	}
+	old := pgL3(*pg)
+	next := old
+	if e.L3 {
+		if pg.VRouterID != 0 {
+			return fmt.Errorf("this port group is routed by %s — change its gateway and DHCP on the router", pg.VRouterName)
+		}
+		if next, err = parseTenantL3(e.CIDR, e.Gateway, e.DHCP, e.DHCPRange, e.DNS); err != nil {
+			return err
+		}
+		if sameAddr(old, next) {
+			next.CIDR, next.Gateway = old.CIDR, old.Gateway
+		} else {
+			if err := lockedAddr(pg.VMs, pg.VRouterID != 0, pg.ExtRouter); err != nil {
+				return err
+			}
+			if next.CIDR != old.CIDR {
+				if err := checkHostOverlap(next.CIDR, p.IsAdmin); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	write := func(n string, l tenantL3) error {
+		if _, err := s.db.Exec(`UPDATE tenant_portgroups SET name=?,dhcp=?,dhcp_range=?,dhcp_dns=? WHERE id=?`,
+			n, b2iDHCP(l.DHCP), l.Range, l.DNS, id); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE") {
+				return fmt.Errorf("vSwitch %s already has a port group named %q", vs.Name, n)
+			}
+			return err
+		}
+		_, err := s.db.Exec(`UPDATE networks SET name=?,cidr=?,gateway=? WHERE id=?`, vs.Name+"/"+n, l.CIDR, l.Gateway, pg.NetworkID)
+		return err
+	}
+	if err := write(name, next); err != nil {
+		return err
+	}
+	if next != old {
+		// Take the old host gateway + DHCP down; the resync puts up whatever the
+		// port group should have now.
+		bridge := tenantBridgeName(vs.NetworkID)
+		down := func() {
+			netdrv.StopTenantDHCP(netdrv.BridgeVlanIfaceName(bridge, pg.VLAN))
+			netdrv.DelBridgeVlanIface(bridge, pg.VLAN)
+		}
+		down()
+		if err := s.resyncVSwitch(pg.TnetID); err != nil {
+			_ = write(pg.Name, old)
+			down()
+			if rerr := s.resyncVSwitch(pg.TnetID); rerr != nil {
+				log.Printf("tenant-pg: restoring port group %d after a failed edit: %v", id, rerr)
+			}
+			return fmt.Errorf("apply: %w (the old settings were put back)", err)
+		}
+	}
+	s.audit(p, p.OrgID, "tenantpg.update", "tenant_portgroup", fmt.Sprint(id), ip,
+		map[string]any{"name": name, "renamed_from": pg.Name, "vlan": pg.VLAN, "cidr": next.CIDR, "gateway": next.Gateway,
+			"dhcp": next.DHCP, "range": next.Range, "dns": next.DNS})
+	return nil
+}
+
+// pgL3 is a VLAN port group's saved addressing.
+func pgL3(pg TenantPortGroup) tenantL3 {
+	return storedL3(pg.CIDR, pg.Gateway, pg.DHCP, pg.DHCPRange, pg.DNS)
 }
 
 // SetVSwitchNative picks which port group the vSwitch's uplink carries untagged
@@ -360,21 +476,28 @@ func uplinkPortVlans(mode string, native int, pgVlans []int) (pvid int, tagged [
 	return pvid, tagged
 }
 
-// syncVSwitch reconciles one vSwitch's bridge: VLAN filtering, the host gateway
-// + DHCP of each standalone port group that is not carried out the uplink
-// (default PG on the bridge itself, VLAN PGs on <bridge>.<vid>; stale ones
-// removed), and the uplink port's VLAN memberships. Idempotent.
+// syncVSwitch reconciles one vSwitch's bridge, in an order that never puts the
+// host on the provider's wire:
+//  1. the host leaves every port group it must not be on (routed, carried out
+//     the uplink, or without a gateway): gateway address + DHCP down;
+//  2. the uplink port gets its VLAN memberships and only then comes up (it is
+//     enslaved down — see realizeUplink);
+//  3. the host gateway + DHCP of each standalone port group that isn't carried
+//     (the untagged one on the bridge itself, VLAN ones on <bridge>.<vid>).
+//
+// Idempotent. A failure on one port group doesn't stop the others; the first
+// error is returned.
 func (s *Service) syncVSwitch(tnetID int64) error {
 	vswitchMu.Lock()
 	defer vswitchMu.Unlock()
 	var netID, vrouterID int64
-	var native int
+	var native, dhcp int
 	var uplinkID sql.NullInt64
-	var cidr, gateway, mode string
+	var cidr, gateway, mode, rng, dns string
 	if err := s.db.QueryRow(`SELECT t.network_id,t.native_vlan,t.uplink_id,t.vrouter_id,COALESCE(n.cidr,''),COALESCE(n.gateway,''),
-		COALESCE(u.mode,'') FROM tenant_networks t JOIN networks n ON n.id=t.network_id
+		COALESCE(u.mode,''),t.dhcp,t.dhcp_range,t.dhcp_dns FROM tenant_networks t JOIN networks n ON n.id=t.network_id
 		LEFT JOIN tenant_uplinks u ON u.id=t.uplink_id WHERE t.id=?`, tnetID).
-		Scan(&netID, &native, &uplinkID, &vrouterID, &cidr, &gateway, &mode); err != nil {
+		Scan(&netID, &native, &uplinkID, &vrouterID, &cidr, &gateway, &mode, &dhcp, &rng, &dns); err != nil {
 		return err
 	}
 	bridge := tenantBridgeName(netID)
@@ -388,50 +511,21 @@ func (s *Service) syncVSwitch(tnetID int64) error {
 	if err := netdrv.SetBridgeVlanFiltering(bridge, len(pgs) > 0); err != nil {
 		return err
 	}
-	// The untagged default port group's host gateway lives on the bridge itself.
-	if vrouterID == 0 && gateway != "" {
-		gwCIDR, _ := gatewayCIDRMask(gateway, cidr)
-		if carriedOut(mode, native, 0) {
-			if gwCIDR != "" && netdrv.IfaceIPv4(bridge) != "" {
-				netdrv.DelAddr(bridge, gwCIDR)
-			}
-			netdrv.StopTenantDHCP(bridge)
-		} else if netdrv.IfaceIPv4(bridge) == "" {
-			// Back from suspension: same derivation as ReensureTenantNetworks.
-			rng := defaultDHCPRange(cidr)
-			if err := s.provisionIsolated(bridge, cidr, gateway, rng != "", rng, "1.1.1.1,8.8.8.8"); err != nil {
-				return fmt.Errorf("restore default port group gateway: %w", err)
-			}
+
+	// 1. Off everything the host must not be on.
+	defHost := vrouterID == 0 && gateway != "" && !carriedOut(mode, native, 0)
+	if !defHost {
+		netdrv.StopTenantDHCP(bridge)
+		if vrouterID == 0 { // with a router, the gateway on the row is the router's own
+			hostGatewayDown(bridge, gateway, cidr)
 		}
 	}
 	var vlans []int
 	hostGW := map[int]bool{}
 	for _, pg := range pgs {
 		vlans = append(vlans, pg.VLAN)
-		if pg.Gateway == "" || pg.VRouterID != 0 || carriedOut(mode, native, pg.VLAN) {
-			continue // routed / L2-out / upstream-owned: no host presence at all
-		}
-		hostGW[pg.VLAN] = true
-		iface, err := netdrv.EnsureBridgeVlanIface(bridge, pg.VLAN)
-		if err != nil {
-			return fmt.Errorf("port group %s: %w", pg.Name, err)
-		}
-		gwCIDR, mask := gatewayCIDRMask(pg.Gateway, pg.CIDR)
-		fresh := false
-		if gwCIDR != "" && netdrv.IfaceIPv4(iface) == "" {
-			if err := netdrv.AddAddr(iface, gwCIDR); err != nil {
-				return fmt.Errorf("port group %s gateway: %w", pg.Name, err)
-			}
-			fresh = true
-		}
-		if pg.DHCP {
-			if fresh || !netdrv.TenantDHCPRunning(iface) {
-				if err := netdrv.StartTenantDHCP(iface, pg.Gateway, vrouter.NormalizeDHCPRange(pg.DHCPRange), mask, pg.DNS); err != nil {
-					return fmt.Errorf("port group %s DHCP: %w", pg.Name, err)
-				}
-			}
-		} else {
-			netdrv.StopTenantDHCP(iface)
+		if pg.Gateway != "" && pg.VRouterID == 0 && !carriedOut(mode, native, pg.VLAN) {
+			hostGW[pg.VLAN] = true
 		}
 	}
 	for _, vid := range bridgeVlanIfaceVIDs(bridge) {
@@ -440,15 +534,88 @@ func (s *Service) syncVSwitch(tnetID int64) error {
 			netdrv.DelBridgeVlanIface(bridge, vid)
 		}
 	}
-	if uplinkID.Valid && len(pgs) > 0 {
-		if port, mode := s.uplinkPort(uplinkID.Int64); port != "" && netdrv.IfaceExists(port) {
-			pvid, tagged := uplinkPortVlans(mode, native, vlans)
-			if err := netdrv.SetPortVlans(port, pvid, tagged); err != nil {
-				return fmt.Errorf("uplink port %s: %w", port, err)
+
+	// 2. The uplink port: VLANs, then up.
+	var firstErr error
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if uplinkID.Valid {
+		if port, umode := s.uplinkPort(uplinkID.Int64); port != "" && netdrv.IfaceExists(port) {
+			if len(pgs) > 0 {
+				pvid, tagged := uplinkPortVlans(umode, native, vlans)
+				if err := netdrv.SetPortVlans(port, pvid, tagged); err != nil {
+					return fmt.Errorf("uplink port %s: %w", port, err) // leave it down
+				}
 			}
+			keep(netdrv.LinkUp(port))
+		}
+	}
+
+	// 3. Host gateways where the host belongs.
+	if defHost {
+		keep(hostGatewayUp(bridge, storedL3(cidr, gateway, dhcp == 1, rng, dns)))
+	}
+	for _, pg := range pgs {
+		if !hostGW[pg.VLAN] {
+			continue
+		}
+		iface, err := netdrv.EnsureBridgeVlanIface(bridge, pg.VLAN)
+		if err != nil {
+			keep(fmt.Errorf("port group %s: %w", pg.Name, err))
+			continue
+		}
+		if err := hostGatewayUp(iface, pgL3(pg)); err != nil {
+			keep(fmt.Errorf("port group %s: %w", pg.Name, err))
+		}
+	}
+	return firstErr
+}
+
+// hostGatewayUp puts a standalone port group's host gateway on iface (the
+// vSwitch bridge for its untagged port group, <bridge>.<vid> for a VLAN one) and
+// serves its DHCP. Idempotent; a different address left from before an edit is
+// replaced. An l3 without a gateway only stops DHCP.
+func hostGatewayUp(iface string, l3 tenantL3) error {
+	gwCIDR, mask := gatewayCIDRMask(l3.Gateway, l3.CIDR)
+	if gwCIDR == "" {
+		netdrv.StopTenantDHCP(iface)
+		return nil
+	}
+	if !strings.HasPrefix(iface, "vdxt") {
+		return fmt.Errorf("refusing to put a tenant gateway on %q", iface)
+	}
+	fresh := false
+	if cur := netdrv.IfaceIPv4(iface); cur != l3.Gateway {
+		if cur != "" {
+			_ = netdrv.FlushAddrs(iface)
+		}
+		if err := netdrv.AddAddr(iface, gwCIDR); err != nil {
+			return fmt.Errorf("gateway %s: %w", gwCIDR, err)
+		}
+		fresh = true
+	}
+	if !l3.DHCP || l3.Range == "" {
+		netdrv.StopTenantDHCP(iface)
+		return nil
+	}
+	if fresh || !netdrv.TenantDHCPRunning(iface) {
+		if err := netdrv.StartTenantDHCP(iface, l3.Gateway, l3.Range, mask, l3.DNS); err != nil {
+			return fmt.Errorf("DHCP: %w", err)
 		}
 	}
 	return nil
+}
+
+// hostGatewayDown takes the host's DHCP and its gateway address (if it holds
+// gateway) off iface.
+func hostGatewayDown(iface, gateway, cidr string) {
+	netdrv.StopTenantDHCP(iface)
+	if gwCIDR, _ := gatewayCIDRMask(gateway, cidr); gwCIDR != "" && netdrv.IfaceIPv4(iface) != "" {
+		netdrv.DelAddr(iface, gwCIDR)
+	}
 }
 
 // syncAllVSwitches resyncs every tenant vSwitch (boot, after uplinks).
@@ -511,9 +678,11 @@ func bridgeVlanIfaceVIDs(bridge string) []int {
 	return out
 }
 
-// applyTenantIsolation turns host forwarding off on every tenant bridge and
-// port-group interface and reloads the vdxtenant guard over all of them. Safe
-// to call any time; it is the single place the guard is (re)built.
+// applyTenantIsolation turns host forwarding off (and ARP replies for other
+// addresses) on every tenant bridge and port-group interface and reloads the
+// vdxtenant host guard over all of them, plus the vdxtenantl2 segment guard over
+// every tenant bridge (its uplink port and router legs trusted). Safe to call
+// any time; it is the single place both guards are (re)built.
 func (s *Service) applyTenantIsolation() error {
 	vswitchMu.Lock()
 	defer vswitchMu.Unlock()
@@ -523,7 +692,7 @@ func (s *Service) applyTenantIsolation() error {
 		return err
 	}
 	seen := map[string]bool{}
-	var devs []string
+	var devs, bridges []string
 	for rows.Next() {
 		var netID int64
 		var vid int
@@ -531,15 +700,19 @@ func (s *Service) applyTenantIsolation() error {
 			continue
 		}
 		br := tenantBridgeName(netID)
-		for _, d := range []string{br, netdrv.BridgeVlanIfaceName(br, vid)} {
-			if (d == br || vid > 0) && !seen[d] {
-				seen[d] = true
-				devs = append(devs, d)
-			}
+		if !seen[br] {
+			seen[br] = true
+			devs = append(devs, br)
+			bridges = append(bridges, br)
+		}
+		if d := netdrv.BridgeVlanIfaceName(br, vid); vid > 0 && !seen[d] {
+			seen[d] = true
+			devs = append(devs, d)
 		}
 	}
 	rows.Close()
 	sort.Strings(devs)
+	sort.Strings(bridges)
 	for _, d := range devs {
 		if netdrv.IfaceExists(d) {
 			if err := netdrv.IsolateTenantIface(d); err != nil {
@@ -547,7 +720,66 @@ func (s *Service) applyTenantIsolation() error {
 			}
 		}
 	}
-	return netdrv.ApplyTenantGuard(devs)
+	return netdrv.ApplyTenantGuard(devs, bridges, s.tenantTrustedPorts())
+}
+
+// tenantTrustedPorts lists the tenant-bridge ports that may legitimately send
+// what the segment guard drops from VMs: each vSwitch's uplink port (the
+// provider network's own DHCP / routers are on the other side) and every router
+// leg on a tenant bridge (a routed port group's DHCP is the router's).
+func (s *Service) tenantTrustedPorts() []string {
+	var uplinks []int64
+	rows, err := s.db.Query(`SELECT uplink_id FROM tenant_networks WHERE uplink_id IS NOT NULL`)
+	if err == nil {
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				uplinks = append(uplinks, id)
+			}
+		}
+		rows.Close()
+	}
+	set := map[string]bool{}
+	for _, id := range uplinks {
+		if port, _ := s.uplinkPort(id); port != "" {
+			set[port] = true
+		}
+	}
+	rows, err = s.db.Query(`SELECT v.id,v.runtime,v.container_name,l.idx FROM vrouter_legs l JOIN vrouters v ON v.id=l.vrouter_id
+		WHERE l.bridge LIKE 'vdxt%'`)
+	if err == nil {
+		for rows.Next() {
+			var id int64
+			var rt, ctr string
+			var idx int
+			if rows.Scan(&id, &rt, &ctr, &idx) == nil {
+				if port := routerLegPort(id, rt, ctr, idx); port != "" {
+					set[port] = true
+				}
+			}
+		}
+		rows.Close()
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// routerLegPort is the host-side veth of a router leg — the names the backends
+// give them (netns: vrouter backend_netns.go ApplyLegs; lxc: lxc.LegVethName).
+func routerLegPort(vrID int64, runtime, container string, idx int) string {
+	switch runtime {
+	case vrouter.RuntimeNetns:
+		return "vrh" + strconv.FormatInt(vrID, 10) + "e" + strconv.Itoa(idx)
+	case vrouter.RuntimeLXC:
+		if container != "" {
+			return lxc.LegVethName(container, idx)
+		}
+	}
+	return ""
 }
 
 // gatewayInCIDR checks that gw is a host address inside cidr.

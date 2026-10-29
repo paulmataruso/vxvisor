@@ -35,14 +35,6 @@ type EgressWizard struct {
 // EgressResult is what the wizard set up, for the confirmation message.
 type EgressResult struct{ Org, Trunk, Pool, Uplink, VSwitch string }
 
-// asOrg is p acting in orgID — the wizard (instance admin) undoing a vSwitch it
-// created in a tenant org.
-func asOrg(p *Principal, orgID int64) *Principal {
-	c := *p
-	c.OrgID = orgID
-	return &c
-}
-
 // ProvisionTenantEgress runs the wizard: trunk → VLAN pool → uplink → vSwitch,
 // each step through the same guarded paths as the single-item forms. If a step
 // fails, the steps before it are undone, so a tenant is never left half set up.
@@ -150,11 +142,13 @@ func (s *Service) ProvisionTenantEgress(p *Principal, w EgressWizard, ip string)
 		s.audit(p, w.OrgID, "uplink.connect", "tenant_network", fmt.Sprint(w.VSwitchID), ip, map[string]any{"uplink": uplinkID})
 	case name != "":
 		isDefault := w.MakeDefault && s.defaultTenantNetworkFor(w.OrgID) == 0
-		tnID, err := s.createTenantNetwork(w.OrgID, name, strings.TrimSpace(w.VSwitchCIDR), "", false, "", "", isDefault)
+		tnID, err := s.createTenantNetwork(w.OrgID, name, strings.TrimSpace(w.VSwitchCIDR), "", false, "", "", isDefault, true)
 		if err != nil {
 			return fail("create vSwitch", err)
 		}
-		undo = append(undo, func() { _ = s.DeleteTenantNetwork(asOrg(p, w.OrgID), tnID, ip) })
+		// Undo even a vSwitch this run made the default (a tenant can't delete
+		// its default, but this one only just appeared).
+		undo = append(undo, func() { _, _ = s.deleteTenantNetwork(w.OrgID, tnID, true) })
 		var netID int64
 		_ = s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=?`, tnID).Scan(&netID)
 		if err := s.connectUplink(tnID, netID, uplinkID); err != nil {
