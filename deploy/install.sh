@@ -88,7 +88,7 @@ apt_opt(){
 }
 
 # Core hypervisor + guest plumbing (hard requirement — fail if these won't install):
-#   qemu-system-x86  hypervisor            qemu-utils   qemu-img
+#   qemu-system-x86  hypervisor            qemu-utils   qemu-img + qemu-nbd (backup API exports)
 #   ovmf             UEFI/SecureBoot firmware (Win11/Server 2025, q35)
 #   swtpm(+tools)    software TPM 2.0 (UEFI SecureBoot guests)
 #   genisoimage      cloud-init NoCloud seed + ISO handling
