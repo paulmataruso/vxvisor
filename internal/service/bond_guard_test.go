@@ -109,6 +109,11 @@ func TestClaimGuards(t *testing.T) {
 	if err := s.CreateVSwitch(egressAdmin, "Prod1", "", ""); err == nil || !strings.Contains(err.Error(), "collides") {
 		t.Fatalf("a name mapping onto an existing bridge must be refused, got %v", err)
 	}
+	// A name equal to another vSwitch's bridge would make name-keyed lookups
+	// (delete by name or bridge) hit the wrong vSwitch.
+	if err := s.CreateVSwitch(egressAdmin, "vdsProd1", "", ""); err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("a name equal to an existing bridge must be refused, got %v", err)
+	}
 	if err := s.CreateVSwitch(egressAdmin, "a/b", "", ""); err == nil {
 		t.Fatalf("a vSwitch name with a slash must be refused")
 	}

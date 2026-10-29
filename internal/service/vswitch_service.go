@@ -237,7 +237,7 @@ func (s *Service) CreateVSwitch(p *Principal, name, uplink, ip string) error {
 	// limit); never let a second vSwitch land its uplink on an existing bridge.
 	bridge := bridgeNameFor(name)
 	var dup string
-	if s.db.QueryRow(`SELECT name FROM net_vswitches WHERE name=? OR bridge=?`, name, bridge).Scan(&dup) == nil || netdrv.IfaceExists(bridge) {
+	if s.db.QueryRow(`SELECT name FROM net_vswitches WHERE name IN (?,?) OR bridge IN (?,?)`, name, bridge, name, bridge).Scan(&dup) == nil || netdrv.IfaceExists(bridge) {
 		if dup == "" {
 			dup = bridge
 		}

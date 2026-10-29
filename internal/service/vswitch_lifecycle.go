@@ -223,12 +223,23 @@ func (s *Service) ReensureVSwitches() {
 		log.Printf("re-ensure vSwitches: %v", err)
 		return
 	}
+	mtus := s.net.VSwitchMTUs()
 	for _, v := range vss {
 		if err := s.reensureVSwitch(v, owned); err != nil {
 			log.Printf("re-ensure vSwitch %s: %v", v.Name, err)
 		}
+		// A set MTU (jumbo frames) lives only in the kernel too. Never on a
+		// netplan-defined bridge (SetVSwitchMTU refuses those): netplan owns its MTU.
+		if mtu := mtus[v.Name]; mtu > 0 && owned[v.Bridge] == "" && ifaceExists(v.Bridge) {
+			if err := setVSwitchMTU(v.Bridge, v.Uplink, mtu); err != nil {
+				log.Printf("re-apply MTU %d on vSwitch %s: %v", mtu, v.Name, err)
+			}
+		}
 	}
 }
+
+// setVSwitchMTU is swapped in tests.
+var setVSwitchMTU = netdrv.SetVSwitchMTU
 
 // reensureBond re-creates one recorded team if the kernel lost it, after
 // checking its member NICs are still free (EnsureBond flushes their addresses).
