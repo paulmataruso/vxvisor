@@ -2,7 +2,7 @@
 
 <div class="card">
   <div class="card-head"><h2>Import / Export</h2></div>
-  <p class="muted" style="margin:0">Move VMs in and out of VXVisor. <strong>Import</strong> pulls VMs from vCenter/ESXi read-only (single VM, or a batch with the <em>Plan Migration</em> wizard). <strong>Export</strong> copies a stopped VXVisor VM out as a disk image, an OVA, or pushes it straight into a vCenter/ESXi.</p>
+  <p class="muted" style="margin:0">Move VMs in and out of VXVisor. <strong>Import</strong> pulls VMs from vCenter/ESXi read-only (single VM, or a batch with the <em>Plan Migration</em> wizard){{if .VDDKReady}} &mdash; or, with your explicit consent, as a <em>warm migration</em> of a running VM using Changed Block Tracking{{end}}. <strong>Export</strong> copies a stopped VXVisor VM out as a disk image, an OVA, or pushes it straight into a vCenter/ESXi.</p>
 </div>
 
 <!-- ===================== PLAN MIGRATION (batch) ===================== -->
@@ -23,6 +23,14 @@
     <button class="btn primary" data-modal="m-vmware">+ Connect &amp; import one VM</button>
   </div>
   <p class="muted" style="margin:0">Import a single VM's disks <strong>directly from vCenter/ESXi, read-only</strong> — the source is never powered, snapshotted, or modified. The VM must be <strong>powered off</strong>. Creates a ready-to-run instance (matching CPU/memory/firmware) plus a reusable base image.</p>
+  {{if .VDDKReady}}<p class="muted" style="margin:6px 0 0;font-size:12px"><strong>Warm migration:</strong> tick <em>Use CBT</em> in the dialog to import a <strong>running</strong> VM. Its disks copy while it runs, changes sync on a schedule, and the downtime is one short final sync at cut-over. This is <em>not</em> read-only: it turns on Changed Block Tracking and takes short-lived snapshots of that one VM, which VXVisor removes afterwards.</p>{{end}}
+</div>
+
+<!-- ===================== WARM MIGRATIONS (CBT) ===================== -->
+<div class="card" id="cbtcard" style="display:none">
+  <div class="card-head"><h2>Warm migrations <span class="pill" title="VMware Changed Block Tracking">CBT</span></h2></div>
+  <p class="muted" style="margin:0 0 8px;font-size:12px">The source keeps running while changes sync. <strong>Cut over&hellip;</strong> when you're ready: one more sync, the source powers off, the last changes copy, and the instance is created. <strong>Cancel</strong> removes VXVisor's snapshots, restores CBT, and deletes the staged copy. Snapshots VXVisor did not create are never touched.</p>
+  <div id="cbtprog"></div>
 </div>
 
 <!-- ===================== IMPORT A VM DISK (file/URL) ===================== -->
@@ -132,11 +140,29 @@
     <div class="modal-actions"><button type="button" class="btn" id="vmwconnect">Connect &amp; list VMs</button></div>
     <div id="vmwlist" style="display:none">
       <hr style="border:none;border-top:1px solid var(--line);margin:6px 0">
-      <p class="muted" style="margin:0 0 6px">Pick a <strong>powered-off</strong> VM to import:</p>
+      <p class="muted" style="margin:0 0 6px" id="vmwpick">Pick a <strong>powered-off</strong> VM to import:</p>
       <div id="vmwtable" style="max-height:260px;overflow:auto"></div>
+      {{if .VDDKReady}}
+      <div style="border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:8px 0">
+        <label class="fld" style="flex-direction:row;align-items:center;gap:8px;margin:0"><input type="checkbox" name="cbt" value="1" id="vmwcbt"> <strong>Use CBT (warm migration)</strong> &mdash; import a running VM with a short cut-over</label>
+        <div id="vmwcbt-info" style="display:none">
+          <p style="margin:8px 0 4px;font-size:12px"><strong>Ticking this box is your consent for VXVisor to change this one source VM:</strong></p>
+          <ul class="muted" style="margin:0 0 6px 18px;padding:0;font-size:12px;line-height:1.5">
+            <li>Changed Block Tracking (CBT) is <strong>turned on</strong> for the VM. If it was off, VXVisor turns it back off after cut-over or cancel.</li>
+            <li>VXVisor takes short-lived snapshots named <span class="mono">vxvisor-cbt-&hellip;</span> (no memory, no quiesce) and removes each one after its sync, including after a failure, a cancel, or a VXVisor restart. Snapshots VXVisor did not create are never touched.</li>
+            <li>At cut-over the VM must power off: VXVisor can shut the guest down through VMware Tools, or you power it off yourself.</li>
+            <li>The account needs more than a read-only role on this VM: <em>Snapshot management &rarr; Create/Remove snapshot</em>, <em>Change configuration &rarr; Toggle disk change tracking</em>, <em>Provisioning &rarr; Allow disk access / Allow read-only disk access</em>, and <em>Interaction &rarr; Power off</em> (for the guest shutdown). Its password is kept encrypted on this host until the migration ends, then wiped.</li>
+          </ul>
+          <label class="fld">Sync interval (minutes, 5&ndash;1440)<input type="number" name="cbt_interval" value="30" min="5" max="1440"></label>
+        </div>
+      </div>
+      {{else}}
+      <p class="muted" style="margin:8px 0;font-size:12px"><strong>Warm migration (CBT)</strong> of a running VM needs VMware VDDK, which reads the changed blocks. Install VDDK below to enable it.</p>
+      {{end}}
       <label class="fld">OS type (for launch defaults)
         <select name="os_type"><option value="linux">Linux</option><option value="windows">Windows</option></select>
       </label>
+      <div id="vmwtransport">
       <label class="fld">Transfer method
         <select name="transport">
           {{if .VDDKReady}}<option value="vddk">VDDK over NBD — fastest for sparse disks; VM OFF, no snapshots</option>{{end}}
@@ -145,6 +171,7 @@
         </select>
       </label>
       <p class="muted" style="margin:-2px 0 8px;font-size:11px">VDDK is the fastest. Datastore-direct is fast. NFC is the slowest but works with any VM.{{if not .VDDKReady}} (Install VDDK above to unlock the fastest method.){{end}}</p>
+      </div>
       <label class="fld">Target storage (where the imported disk lands)
         <select name="target_pool_id">
           <option value="0">— default disk directory (qcow2) —</option>
@@ -234,6 +261,35 @@
   </div>
 </div></div>
 
+<!-- Warm migration: cut over -->
+<div class="modal" id="m-cbtcut"><div class="modal-card">
+  <div class="modal-head"><h3>Cut over &mdash; <span class="cbt-vm"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="cbtcutform" method="post" action="/migrate">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p style="margin:0 0 6px">This finishes the warm migration:</p>
+    <ol class="muted" style="margin:0 0 8px 18px;padding:0;font-size:13px;line-height:1.5">
+      <li>one more sync while the VM still runs (keeps the downtime short),</li>
+      <li>the source VM <strong>powers off</strong> &mdash; the downtime starts here,</li>
+      <li>a final sync copies the last changes,</li>
+      <li>the instance is created here, VXVisor's snapshots are removed, and CBT is put back the way it was.</li>
+    </ol>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="shutdown_guest" value="1" checked> Shut the guest down through VMware Tools</label>
+    <p class="muted" style="margin:0 0 6px;font-size:12px">Untick to power the VM off yourself; VXVisor waits up to an hour. If VMware Tools isn't running, you'll be asked to power it off. The source VM stays off afterwards &mdash; it is not powered back on. If anything fails, the migration goes back to syncing and you can retry.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Not yet</button><button class="btn primary">Cut over</button></div>
+  </form>
+</div></div>
+
+<!-- Warm migration: cancel -->
+<div class="modal" id="m-cbtcancel"><div class="modal-card">
+  <div class="modal-head"><h3>Cancel warm migration &mdash; <span class="cbt-vm"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" id="cbtcancelform" method="post" action="/migrate">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <p style="margin:0 0 6px">VXVisor stops syncing, removes every snapshot it created on the source VM, puts CBT back the way it found it, and deletes the staged copy. Nothing is imported. The source VM is left in its current power state.</p>
+    <p class="muted" style="margin:0 0 6px;font-size:12px">If vCenter can't be reached, the clean-up retries until it succeeds.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Keep syncing</button><button class="btn danger">Cancel migration</button></div>
+  </form>
+</div></div>
+
 <!-- Export log viewer -->
 <div class="modal" id="m-explog"><div class="modal-card lg">
   <div class="modal-head"><h3>Export log &mdash; <span id="explog-vm"></span></h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
@@ -269,26 +325,48 @@ function vsphereConnect(form, onVMs, onErr){
 (function(){
   var form=document.getElementById('vmwform'); if(!form) return;
   var btn=document.getElementById('vmwconnect'), list=document.getElementById('vmwlist'),
-      tbl=document.getElementById('vmwtable'), go=document.getElementById('vmwgo');
+      tbl=document.getElementById('vmwtable'), go=document.getElementById('vmwgo'),
+      cbt=document.getElementById('vmwcbt'), info=document.getElementById('vmwcbt-info'),
+      pick=document.getElementById('vmwpick'), tr=document.getElementById('vmwtransport');
+  var vms=null;
+  // Unticked: the read-only cold import, powered-off VMs only (unchanged).
+  // Ticked (warm/CBT): a running VM can be picked too.
+  function warm(){ return !!(cbt&&cbt.checked); }
+  function powerOK(v){ return v.PowerState==='poweredOff' || (warm() && v.PowerState==='poweredOn'); }
+  function render(){
+    if(!vms) return;
+    if(!vms.length){ tbl.innerHTML='<p class="muted">No VMs visible to this account.</p>'; return; }
+    var was=(form.querySelector('input[name=moid]:checked')||{}).value;
+    var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th><th>Disks</th></tr>';
+    vms.forEach(function(v){
+      var ok=v.Importable && powerOK(v);
+      var disks=(v.Disks||[]).length, cap=(v.Disks||[]).reduce(function(a,x){return a+(x.CapacityGB||0);},0);
+      h+='<tr><td>'+(ok?'<input type="radio" name="moid" value="'+esc(v.MOID)+'"'+(v.MOID===was?' checked':'')+'>':'<span title="'+esc(v.ImportNote||'')+'">—</span>')+'</td>'+
+         '<td><strong>'+esc(v.Name)+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+esc(v.ImportNote)+'</span>':'')+'</td>'+
+         '<td><span class="pill '+(powerOK(v)?'':'error')+'">'+esc(v.PowerState)+'</span></td>'+
+         '<td class="muted" style="font-size:12px">'+esc(v.GuestFullName||'')+'</td>'+
+         '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td>'+
+         '<td class="muted">'+disks+' · '+cap+'G</td></tr>';
+    });
+    tbl.innerHTML=h+'</table>';
+    go.disabled=!form.querySelector('input[name=moid]:checked');
+  }
+  function mode(){
+    var w=warm();
+    if(info) info.style.display=w?'':'none';
+    if(tr) tr.style.display=w?'none':'';
+    if(pick) pick.innerHTML=w?'Pick a VM to warm-migrate (<strong>running</strong> or powered off):':'Pick a <strong>powered-off</strong> VM to import:';
+    go.textContent=w?'Start warm migration':'Import selected VM';
+    render();
+  }
+  if(cbt) cbt.addEventListener('change',mode);
+  tbl.addEventListener('change',function(){ go.disabled=!form.querySelector('input[name=moid]:checked'); });
   btn.addEventListener('click',function(){
     btn.disabled=true; btn.textContent='Connecting…';
-    vsphereConnect(form,function(vms){
+    vsphereConnect(form,function(l){
       btn.disabled=false; btn.textContent='Connect & list VMs'; list.style.display='';
-      if(!vms.length){ tbl.innerHTML='<p class="muted">No VMs visible to this account.</p>'; return; }
-      var h='<table><tr><th></th><th>Name</th><th>Power</th><th>Guest</th><th>CPU/RAM</th><th>Disks</th></tr>';
-      vms.forEach(function(v){
-        var ok=v.Importable && v.PowerState==='poweredOff';
-        var disks=(v.Disks||[]).length, cap=(v.Disks||[]).reduce(function(a,x){return a+(x.CapacityGB||0);},0);
-        h+='<tr><td>'+(ok?'<input type="radio" name="moid" value="'+esc(v.MOID)+'">':'<span title="'+esc(v.ImportNote||'')+'">—</span>')+'</td>'+
-           '<td><strong>'+esc(v.Name)+'</strong>'+(v.ImportNote?'<br><span class="muted" style="font-size:11px">'+esc(v.ImportNote)+'</span>':'')+'</td>'+
-           '<td><span class="pill '+(v.PowerState==='poweredOff'?'':'error')+'">'+esc(v.PowerState)+'</span></td>'+
-           '<td class="muted" style="font-size:12px">'+esc(v.GuestFullName||'')+'</td>'+
-           '<td class="muted">'+v.NumCPU+'c / '+Math.round((v.MemMB||0)/1024)+'G</td>'+
-           '<td class="muted">'+disks+' · '+cap+'G</td></tr>';
-      });
-      tbl.innerHTML=h+'</table>';
-      tbl.addEventListener('change',function(){ go.disabled=!form.querySelector('input[name=moid]:checked'); });
-    },function(err){ btn.disabled=false; btn.textContent='Connect & list VMs'; list.style.display=''; tbl.innerHTML='<p style="color:var(--bad,#e55)">'+esc(err)+'</p>'; });
+      vms=l; mode();
+    },function(err){ btn.disabled=false; btn.textContent='Connect & list VMs'; list.style.display=''; vms=null; tbl.innerHTML='<p style="color:var(--bad,#e55)">'+esc(err)+'</p>'; });
   });
 })();
 
@@ -390,12 +468,53 @@ function vsphereConnect(form, onVMs, onErr){
   sel.addEventListener('change',sync); sync();
 })();
 
+// ---------- Warm (CBT) migrations table ----------
+var MIG_CSRF="{{.CSRF}}";
+function ago(ms){ if(!ms) return '—'; var s=Math.round((Date.now()-ms)/1000); if(s<60) return 'just now'; if(s<3600) return Math.round(s/60)+' min ago'; if(s<86400) return Math.round(s/3600)+' h ago'; return Math.round(s/86400)+' d ago'; }
+function inT(ms){ if(!ms) return ''; var s=Math.round((ms-Date.now())/1000); if(s<=60) return 'due now'; if(s<3600) return 'in '+Math.round(s/60)+' min'; return 'in '+(s/3600).toFixed(1)+' h'; }
+function cbtBadge(s){ var c=(s==='syncing'||s==='done')?'running':((s==='error')?'error':''); return '<span class="pill '+c+'">'+esc(s)+'</span>'; }
+var cbtLast='';
+function drawCBT(l){
+  var card=document.getElementById('cbtcard'), box=document.getElementById('cbtprog'); if(!card||!box) return;
+  card.style.display=l.length?'':'none';
+  var h='<table style="margin:0"><tr><th>VM</th><th>State</th><th>Step</th><th>Last sync</th><th>Changed per pass</th><th>Progress</th><th></th></tr>';
+  l.forEach(function(c){
+    var hist=(c.history||[]).map(function(p){ return '<span title="pass '+p.pass+' ('+esc(p.kind)+'), '+p.secs+' s, '+esc(new Date(p.at).toLocaleString())+'">#'+p.pass+' '+(p.kind==='base'?'base ':'')+gb(p.bytes)+'</span>'; }).join('<br>');
+    var last=c.last_sync?(esc(ago(c.last_sync))+(c.next_sync?'<br><span class="muted" style="font-size:11px">next '+esc(inT(c.next_sync))+' · every '+c.interval_min+' min</span>':'')):'—';
+    var prog='—';
+    if(c.job){ prog=esc(c.job)+': '+(c.total_bytes?(gb(c.done_bytes)+' / '+gb(c.total_bytes)):gb(c.done_bytes))+(c.rate?(' · '+rate(c.rate)):''); }
+    var step=c.err?('<span style="color:var(--bad,#e55)">'+esc(c.err)+'</span>'+(c.step?'<br>'+esc(c.step):'')):esc(c.step);
+    if(c.result) step+=(step?'<br>':'')+'Imported as <span class="mono">'+esc(c.result)+'</span>';
+    if(c.pending_snapshots) step+=(step?'<br>':'')+'<span class="muted" style="font-size:11px">'+c.pending_snapshots+' VXVisor snapshot'+(c.pending_snapshots>1?'s':'')+' pending removal</span>';
+    var id=encodeURIComponent(c.id), act='';
+    if(c.can_sync) act+='<form method="post" action="/import/vmware/cbt/'+id+'/sync" style="display:inline"><input type="hidden" name="csrf" value="'+esc(MIG_CSRF)+'"><button class="btn sm">Sync now</button></form> ';
+    if(c.can_cutover) act+='<button type="button" class="btn sm primary cbtact" data-modal="m-cbtcut" data-form="cbtcutform" data-act="cutover" data-id="'+id+'" data-vm="'+esc(c.vm)+'">Cut over&hellip;</button> ';
+    if(c.can_cancel) act+='<button type="button" class="btn sm danger cbtact" data-modal="m-cbtcancel" data-form="cbtcancelform" data-act="cancel" data-id="'+id+'" data-vm="'+esc(c.vm)+'">Cancel</button> ';
+    act+='<a href="#" class="implog" data-modal="m-implog" data-id="'+id+'" data-vm="'+esc(c.vm)+'">log</a>';
+    h+='<tr><td><strong>'+esc(c.vm)+'</strong><br><span class="muted" style="font-size:11px">'+esc(c.host)+' · '+esc(c.moid)+' · CBT was '+esc(c.cbt_orig)+'</span></td>'+
+       '<td>'+cbtBadge(c.state)+'</td><td class="muted" style="font-size:12px;max-width:320px">'+step+'</td>'+
+       '<td class="muted" style="font-size:12px">'+last+'</td><td class="muted" style="font-size:12px">'+(hist||'—')+'</td>'+
+       '<td class="muted" style="font-size:12px">'+prog+'</td><td style="text-align:right;white-space:nowrap">'+act+'</td></tr>';
+  });
+  h+='</table>';
+  if(h!==cbtLast){ cbtLast=h; box.innerHTML=h; }
+}
+document.addEventListener('click',function(e){
+  var b=e.target.closest('.cbtact'); if(!b) return;
+  var f=document.getElementById(b.getAttribute('data-form')), m=document.getElementById(b.getAttribute('data-modal'));
+  if(f) f.action='/import/vmware/cbt/'+b.getAttribute('data-id')+'/'+b.getAttribute('data-act');
+  if(m) m.querySelectorAll('.cbt-vm').forEach(function(x){ x.textContent=b.getAttribute('data-vm')||''; });
+});
+
 // ---------- Import progress poller + log viewer ----------
 (function(){
   var box=document.getElementById('vmwprog'); if(!box) return;
   function poll(){
     fetch('/api/vmware-import',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
-      var l=(d&&d.imports)||[]; if(!l.length){box.innerHTML='<p class="muted" style="margin:0">No imports yet.</p>';return;}
+      var warm=(d&&d.cbt)||[], isWarm={}; warm.forEach(function(c){isWarm[c.id]=1;});
+      drawCBT(warm);
+      var l=((d&&d.imports)||[]).filter(function(j){return !isWarm[j.id];});
+      if(!l.length){box.innerHTML='<p class="muted" style="margin:0">'+(warm.length?'No other imports.':'No imports yet.')+'</p>';return;}
       var h='<table style="margin:0"><tr><th>VM</th><th>Status</th><th>Step</th><th>Transferred</th><th>Rate</th><th>%</th><th>Log</th></tr>';
       l.forEach(function(j){
         var xfer,pctcell;

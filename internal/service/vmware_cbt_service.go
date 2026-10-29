@@ -399,6 +399,10 @@ func (s *Service) VMwareImportCBT(p *Principal, c vmware.Creds, moid, osType str
 	if !rt.ready(p) {
 		return "", fmt.Errorf("warm migration (CBT) reads the source through VDDK — install VDDK on this page first")
 	}
+	if c.Pass == "" {
+		// The sealed password is how a resumed or cleanup job reconnects.
+		return "", fmt.Errorf("a vCenter password is required for a warm migration")
+	}
 	if _, _, err := s.ResolveDiskTarget(p, targetPoolID); err != nil {
 		return "", err
 	}

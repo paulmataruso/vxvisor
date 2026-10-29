@@ -32,7 +32,8 @@ const (
 // is not safe for concurrent use). fresh=true is the base copy into a new
 // sparse file: all-zero chunks are skipped, they are already holes. A delta
 // (fresh=false) must overwrite stale data, so zero chunks are punched (or
-// written as zeroes where punching isn't supported). onBytes reports progress.
+// written as zeroes where punching isn't supported). onBytes reports progress
+// and is called from the copy goroutines concurrently.
 // Areas outside dst's size are refused, never written.
 func cbtCopyExtents(ctx context.Context, readers []io.ReaderAt, dst *os.File, areas []vmware.ChangedArea, fresh bool, onBytes func(int64)) error {
 	if len(readers) == 0 {

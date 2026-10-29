@@ -203,9 +203,22 @@ func (s *Server) vmwareConnect(w http.ResponseWriter, r *http.Request, p *servic
 }
 
 // vmwareImport starts an async import and redirects back with progress polling.
+// With the "Use CBT (warm migration)" box ticked (cbt=1) it starts a warm import
+// instead — the tick is the operator's consent to enable CBT on that VM and take
+// short-lived snapshots of it; unticked, the import stays read-only as before.
 func (s *Server) vmwareImport(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	if !s.checkCSRF(p, r) {
 		s.badCSRF(w)
+		return
+	}
+	if r.FormValue("cbt") != "" {
+		if _, err := s.svc.VMwareImportCBT(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"),
+			atoi(r.FormValue("target_pool_id")), atoiInt(r.FormValue("cbt_interval")), clientIP(r)); err != nil {
+			setFlash(w, err.Error())
+		} else {
+			setFlashOK(w, "Warm migration started — the source keeps running while its disks copy, then changes sync on a schedule. Cut over from the Warm migrations table when you're ready.")
+		}
+		http.Redirect(w, r, "/migrate", http.StatusSeeOther)
 		return
 	}
 	if _, err := s.svc.VMwareImport(p, vmwareCredsFromForm(r), r.FormValue("moid"), r.FormValue("os_type"), r.FormValue("transport"), int64(atoi(r.FormValue("target_pool_id"))), clientIP(r)); err != nil {
@@ -216,9 +229,52 @@ func (s *Server) vmwareImport(w http.ResponseWriter, r *http.Request, p *service
 	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
 }
 
-// apiVmwareImport returns live/recent import progress for the poller.
+// apiVmwareImport returns live/recent import progress for the poller: the cold
+// imports, plus the CBT warm imports (persistent, with their sync state).
 func (s *Server) apiVmwareImport(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	writeJSON(w, map[string]any{"imports": s.svc.VMwareImportStates(p)})
+	writeJSON(w, map[string]any{"imports": s.svc.VMwareImportStates(p), "cbt": s.svc.CBTImportStates(p)})
+}
+
+// vmwareCBTSync runs a warm import's delta pass now ("Sync now").
+func (s *Server) vmwareCBTSync(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.CBTSyncNow(p, r.PathValue("id"), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Sync pass started.")
+	}
+	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
+}
+
+// vmwareCBTCutover starts a warm import's cut-over (from the confirm modal).
+func (s *Server) vmwareCBTCutover(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.CBTCutover(p, r.PathValue("id"), r.FormValue("shutdown_guest") != "", clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Cut-over started — one more sync, then the source powers off, the last changes copy, and the instance is created. Watch the Warm migrations table.")
+	}
+	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
+}
+
+// vmwareCBTCancel cancels a warm import (removes our snapshots, restores CBT).
+func (s *Server) vmwareCBTCancel(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.CBTCancel(p, r.PathValue("id"), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Warm migration cancelled — removing our snapshots, restoring CBT, deleting the staged copy.")
+	}
+	http.Redirect(w, r, "/migrate", http.StatusSeeOther)
 }
 
 // apiVmwareImportLog serves the full durable log for one import as plain text so

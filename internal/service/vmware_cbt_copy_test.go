@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"vdxclone/internal/nbd"
@@ -122,16 +123,16 @@ func TestCBTCopyExtentsOverNBD(t *testing.T) {
 	}
 	defer f.Close()
 	f.Truncate(size)
-	var moved int64
-	if err := cbtCopyExtents(context.Background(), nbdReaders(t, nbdDiskServer(t, src), 3), f, areas, true, func(n int64) { moved += n }); err != nil {
+	var moved atomic.Int64 // onBytes runs on the copy goroutines
+	if err := cbtCopyExtents(context.Background(), nbdReaders(t, nbdDiskServer(t, src), 3), f, areas, true, func(n int64) { moved.Add(n) }); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(staging)
 	if !bytes.Equal(got, src) {
 		t.Fatal("base copy: staging differs from the source")
 	}
-	if moved != 5000+4<<20+17+1<<20+8192 {
-		t.Fatalf("progress reported %d bytes", moved)
+	if moved.Load() != 5000+4<<20+17+1<<20+8192 {
+		t.Fatalf("progress reported %d bytes", moved.Load())
 	}
 
 	// Delta: the guest rewrote one region, zeroed another, and wrote a third.
