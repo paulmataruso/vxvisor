@@ -199,6 +199,18 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 		}
 	}
 
+	// The NIC's port group, resolved before anything is provisioned. With none
+	// chosen, an org that has a default tenant network lands on its isolated
+	// bridge; the Default org (no tenant network) keeps the historical global
+	// fallback. A tenant org must end up on one of its own bridged port groups.
+	netID := o.NetworkID
+	if netID <= 0 {
+		netID = m.defaultTenantNetwork(o.OrgID)
+	}
+	if err := m.CheckPortGroup(o.OrgID, netID); err != nil {
+		return nil, err
+	}
+
 	// Two provisioning modes:
 	//   • Image chosen → copy-on-write overlay over the base cloud image (instant OS).
 	//   • No image     → a blank disk to install onto from a boot ISO (needs BootISOID).
@@ -264,6 +276,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	lvPath := ""   // set when the disk backend is a raw LVM thin volume
 	rbdImage := "" // set when the disk backend is a Ceph RBD image
 	fail := func(e error) (*Session, error) {
+		m.releaseLeases(id)
 		for _, f := range created {
 			_ = os.Remove(f)
 		}
@@ -427,20 +440,12 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 		}
 	}
 
-	// Bridge/overlay networking: allocate a stable guest IP from the cluster
-	// subnet so the VM comes up routable (for RDP and for migration identity).
-	// When Cluster.DHCP is set the VM bridge is on a real LAN, so the guest leases
-	// its address from that network instead of the platform's static IPAM.
-	var staticIP, gw string
-	dhcp := false
-	if m.cfg.Network.Mode == "bridge" || m.cfg.Network.Mode == "overlay" {
-		if m.cfg.Cluster.DHCP {
-			dhcp = true
-		} else if netID, cidr, gateway, err := m.ensureDefaultNetwork(o.OrgID); err == nil {
-			if leased, err := netdrv.New(m.db).AllocLease(netID, id, mac, cidr, gateway); err == nil {
-				staticIP, gw = leased, gateway
-			}
-		}
+	// Guest addressing for the cloud-init seed: a static lease from the VM's OWN
+	// port group pool, DHCP from its segment, or (no port group on the cluster
+	// bridge) the cluster-subnet IPAM — see guestAddressing.
+	staticIP, gw, dhcp, err := m.guestAddressing(o.OrgID, netID, id, mac)
+	if err != nil {
+		return fail(err)
 	}
 
 	// cloud-init NoCloud seed (first-boot user/password/SSH key).
@@ -484,18 +489,6 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	if o.BootISOID > 0 {
 		bootISO = o.BootISOID
 	}
-	var netID any
-	if o.NetworkID > 0 {
-		netID = o.NetworkID
-	} else if o.OrgID > 0 {
-		// Default-isolate: if the org has a default tenant network, land the VM on
-		// its isolated bridge instead of the shared default. Orgs WITHOUT one (the
-		// pre-existing default org) keep the historical shared-bridge behavior.
-		var defNet int64
-		if m.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE org_id=? AND is_default=1 LIMIT 1`, o.OrgID).Scan(&defNet) == nil && defNet > 0 {
-			netID = defNet
-		}
-	}
 	var poolID any
 	if o.StoragePoolID > 0 {
 		poolID = o.StoragePoolID
@@ -506,13 +499,13 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	}
 	hw := normalizeHardware(o)
 	ga, tpmI, sbI := b2i(hw.GuestAgent), b2i(hw.TPM), b2i(hw.SecureBoot)
-	_, err := m.db.Exec(`INSERT INTO sessions
+	_, err = m.db.Exec(`INSERT INTO sessions
 		(id,name,org_id,owner_id,image_name,disk_path,kind,firmware,ovmf_vars_path,boot_iso_id,mac,
 		 cpus,memory_mb,disk_gb,state,cloud_init,ci_username,ci_password,ci_ssh_key,seed_path,passthrough,network_id,storage_pool_id,display,disk_backend,
 		 machine_type,disk_bus,nic_model,vga,guest_agent,tpm,secureboot,os_type,perf_pin,perf_hugepages)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'stopped',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, o.Name, o.OrgID, o.OwnerID, o.ImageName, disk, o.Kind, o.Firmware, varsPath, bootISO, mac,
-		o.CPUs, o.MemoryMB, o.DiskGB, ci, o.CIUsername, o.CIPassword, o.CISSHKey, seedPath, o.Passthrough, netID, poolID, display, diskBackend,
+		o.CPUs, o.MemoryMB, o.DiskGB, ci, o.CIUsername, o.CIPassword, o.CISSHKey, seedPath, o.Passthrough, nullIf0(netID), poolID, display, diskBackend,
 		hw.MachineType, hw.DiskBus, hw.NICModel, hw.VGA, ga, tpmI, sbI, hw.OSType, b2i(o.PinCPUs), b2i(o.HugePages))
 	if err != nil {
 		return fail(err)
@@ -862,6 +855,13 @@ func (m *Manager) Start(id string) (*Session, error) {
 	if s.State == "running" && processAliveSince(s.PID, m.startTime(id)) {
 		return s, nil
 	}
+	// Where the NIC goes (see planNIC). Decided before anything is allocated so a
+	// tenant VM with no port group of its own is refused cleanly, never started
+	// on the shared network.
+	plan, err := m.planNIC(s)
+	if err != nil {
+		return nil, err
+	}
 
 	vncPort, wsPort, err := m.allocPorts()
 	if err != nil {
@@ -873,7 +873,7 @@ func (m *Manager) Start(id string) (*Session, error) {
 	_ = os.Remove(serialSock)
 
 	// Per-launch VNC password, written to a 0600 secret file (off the cmdline).
-	pw := randHex(16)
+	pw := randVNCPassword()
 	pwFile := filepath.Join(m.cfg.Paths.DiskDir, id+".vncpw")
 	if err := qemu.WriteSecretFile(pwFile, pw); err != nil {
 		return nil, err
@@ -900,7 +900,7 @@ func (m *Manager) Start(id string) (*Session, error) {
 		VNCPort:   vncPort,
 		WSPort:    wsPort,
 		QMPSocket: qmpSock,
-		UserNet:   m.cfg.Network.Mode == "user",
+		UserNet:   plan.UserNet,
 		EnableKVM: qemu.KVMAvailable(),
 		VNCPwFile: pwFile,
 		Firmware:  s.Firmware,
@@ -913,6 +913,12 @@ func (m *Manager) Start(id string) (*Session, error) {
 		VGA:         s.VGA,
 		Windows:     s.OSType == "windows",
 		GuestAgent:  s.GuestAgent,
+	}
+	// Who QEMU runs as (the run-as user, or root tagged with the guard group) —
+	// and, for a SLIRP VM, the host loopback guard must be in place first.
+	if err := m.launchAs(&spec, s.DiskPath, s.OVMFVarsPath, s.SeedPath, pwFile); err != nil {
+		m.setError(id)
+		return nil, err
 	}
 	// qemu-guest-agent channel socket (loopback/unix). Removed stale first so the
 	// server socket binds cleanly.
@@ -965,26 +971,31 @@ func (m *Manager) Start(id string) (*Session, error) {
 	spec.MAC = s.MAC
 	spec.HostFwds = m.portForwards(id)
 
-	// Attach this VM's NIC to the fabric. A VM bound to a port group (network_id)
-	// lands on that port group's vSwitch as an access port with the port group's
-	// VLAN as PVID — exactly like a VMware port group. A VM with no port group
-	// falls back to the global cluster bridge when bridge/overlay mode is on.
-	// The tap is owned by the run-as user so a dropped-privilege QEMU can open it.
-	bridge, vlan, attach := m.resolveTapTarget(s)
-	if !attach && (m.cfg.Network.Mode == "bridge" || m.cfg.Network.Mode == "overlay") {
-		bridge, vlan, attach = m.cfg.Cluster.Bridge, 0, true
-	}
-	if attach {
+	// Attach this VM's NIC to the fabric (see planNIC). A VM bound to a port group
+	// (network_id) lands on that port group's vSwitch as an access port with the
+	// port group's VLAN as PVID — exactly like a VMware port group — whatever the
+	// global mode. A VM with no port group falls back to the global cluster bridge
+	// (bridge/overlay mode) or SLIRP (user mode); a tenant-org VM never does.
+	// The tap is owned by the run-as user so a dropped-privilege QEMU can open it,
+	// and sized to its bridge, whose MTU the guest also learns via host_mtu (a
+	// VXLAN-backed port group runs at 1450; at 1500 full frames would be dropped).
+	if plan.Bridge != "" {
 		tap := netdrv.TapName(id)
 		ownerUID := 0
-		if m.cfg.VM.RunAs != "" {
-			if uid, _, _, ok := lookupUser(m.cfg.VM.RunAs); ok {
-				ownerUID = int(uid)
+		if spec.RunAsUID != 0 {
+			ownerUID = int(spec.RunAsUID)
+		}
+		if err := netdrv.SetupTapAccess(tap, plan.Bridge, plan.VLAN, ownerUID); err != nil {
+			m.setError(id)
+			return nil, fmt.Errorf("setup tap %s on %s: %w", tap, plan.Bridge, err)
+		}
+		if plan.MTU > 0 && netdrv.LinkMTU(tap) != plan.MTU {
+			if err := netdrv.SetLinkMTU(tap, plan.MTU); err != nil {
+				log.Printf("session %s: tap %s MTU %d (bridge %s): %v", id, tap, plan.MTU, plan.Bridge, err)
 			}
 		}
-		if err := netdrv.SetupTapAccess(tap, bridge, vlan, ownerUID); err != nil {
-			m.setError(id)
-			return nil, fmt.Errorf("setup tap %s on %s: %w", tap, bridge, err)
+		if plan.MTU > 0 && plan.MTU < 1500 {
+			spec.HostMTU = plan.MTU
 		}
 		spec.TapName = tap
 	}
@@ -994,22 +1005,6 @@ func (m *Manager) Start(id string) (*Session, error) {
 			if a = strings.TrimSpace(a); a != "" {
 				spec.Passthrough = append(spec.Passthrough, a)
 			}
-		}
-	}
-
-	// Privilege separation: if a run-as user is configured, hand the VM's files
-	// to it and launch QEMU under that uid/gid instead of as root.
-	if m.cfg.VM.RunAs != "" {
-		if uid, gid, groups, ok := lookupUser(m.cfg.VM.RunAs); ok {
-			// The dropped-privilege QEMU must own its disk/NVRAM/seed/password
-			// files, and be able to create the QMP socket in the disk dir.
-			for _, f := range []string{s.DiskPath, s.OVMFVarsPath, s.SeedPath, pwFile} {
-				if f != "" {
-					_ = qemu.Chown(f, uid, gid)
-				}
-			}
-			_ = qemu.Chown(m.cfg.Paths.DiskDir, uid, gid)
-			spec.RunAsUID, spec.RunAsGID, spec.RunAsGroups = uid, gid, groups
 		}
 	}
 	spec.DiskLockingOff = onCIFS(s.DiskPath) // CIFS: disable image locking (migration)
@@ -1206,7 +1201,17 @@ func (m *Manager) GuestAgentInfo(id string) qemu.GuestInfo {
 // was applied live; live=false means it will take effect on the next start (e.g.
 // switching to/from user-mode NAT, which is a QEMU netdev type that can't hot-swap,
 // or when the target vSwitch isn't present). The guest keeps its IP/MAC either way.
+// A move to a bridge with a SMALLER MTU than the guest's NIC (e.g. onto a VXLAN
+// port group) is also deferred: the guest learns its MTU only at start.
+// A tenant org's VM may not be unbound (0) or put on a bridgeless port group.
 func (m *Manager) SetNetwork(id string, networkID int64) (live bool, err error) {
+	cur, err := m.Get(id)
+	if err != nil {
+		return false, err
+	}
+	if err := m.CheckPortGroup(cur.OrgID, networkID); err != nil {
+		return false, err
+	}
 	if _, err := m.db.Exec(`UPDATE sessions SET network_id=? WHERE id=?`, nullIf0(networkID), id); err != nil {
 		return false, err
 	}
@@ -1215,22 +1220,27 @@ func (m *Manager) SetNetwork(id string, networkID int64) (live bool, err error) 
 		return false, err
 	}
 	if !m.Running(s) {
-		return false, nil // stopped: picked up by resolveTapTarget on next start
+		return false, nil // stopped: picked up by planNIC on next start
 	}
-	// Resolve the new target exactly as Start would (port group bridge/vlan, with
-	// the global cluster bridge as the bridge/overlay-mode fallback).
-	bridge, vlan, attach := m.resolveTapTarget(s)
-	if !attach && (m.cfg.Network.Mode == "bridge" || m.cfg.Network.Mode == "overlay") {
-		bridge, vlan, attach = m.cfg.Cluster.Bridge, 0, true
+	// Resolve the new target exactly as Start would (see planNIC).
+	plan, err := m.planNIC(s)
+	if err != nil {
+		return false, nil // persisted; Start reports why it can't attach
 	}
 	tap := netdrv.TapName(id)
 	// Live move is only possible when the VM currently has a bridged tap AND the
 	// target is a present vSwitch. Otherwise leave it pending for next start.
-	if !attach || bridge == "" || !netdrv.IfaceExists(tap) || !netdrv.IfaceExists(bridge) {
+	if plan.UserNet || plan.Bridge == "" || !netdrv.IfaceExists(tap) || !netdrv.IfaceExists(plan.Bridge) {
 		return false, nil
 	}
-	if err := netdrv.RebindTap(tap, bridge, vlan); err != nil {
+	if plan.MTU > 0 && plan.MTU < guestMTUOf(s.PID) {
+		return false, nil
+	}
+	if err := netdrv.RebindTap(tap, plan.Bridge, plan.VLAN); err != nil {
 		return false, err
+	}
+	if plan.MTU > 0 && netdrv.LinkMTU(tap) != plan.MTU {
+		_ = netdrv.SetLinkMTU(tap, plan.MTU) // keep the tap from capping the bridge
 	}
 	return true, nil
 }
@@ -1408,6 +1418,7 @@ func (m *Manager) Purge(id string) error {
 	if _, err := m.db.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
 		return err
 	}
+	m.releaseLeases(id) // give its static address back to the port group pool
 	// A zvol-backed disk is a ZFS volume, not a file — destroy it via zfs.
 	if backend == "zvol" && strings.HasPrefix(disk, "/dev/zvol/") {
 		_ = zfs.DestroyDataset(strings.TrimPrefix(disk, "/dev/zvol/"))
@@ -1620,6 +1631,24 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// randVNCPassword returns a per-launch VNC console password. RFB "VNC auth"
+// only ever uses the first 8 characters (they are a DES key), so a hex string
+// carried just 32 bits; 8 characters of a 62-symbol alphabet carry ~47.6.
+func randVNCPassword() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	out := make([]byte, 0, 8)
+	buf := make([]byte, 16)
+	for len(out) < 8 {
+		_, _ = rand.Read(buf)
+		for _, b := range buf {
+			if b < 248 && len(out) < 8 { // 248 = 4*62: rejection keeps it unbiased
+				out = append(out, alphabet[int(b)%len(alphabet)])
+			}
+		}
+	}
+	return string(out)
+}
+
 // randPassword returns a readable but high-entropy first-boot password (no
 // ambiguous characters), used when the caller does not supply one.
 func randPassword() string {
@@ -1656,24 +1685,40 @@ func sanitizeHostname(name string) string {
 // resolveTapTarget maps a VM's bound port group (sessions.network_id) to the
 // vSwitch bridge and VLAN its tap should attach to. A port group is "attachable"
 // when it names a host bridge (a vSwitch); its vlan_id becomes the access-port
-// PVID. Returns attach=false when the VM has no port group or the port group is
-// user-mode (no bridge), so the caller can fall back to the global bridge.
-func (m *Manager) resolveTapTarget(s *Session) (bridge string, vlan int, attach bool) {
+// PVID. Returns attach=false when the VM has no port group, the port group is
+// gone, or it is user-mode (no bridge), so planNIC can decide the fallback. A
+// port group of ANOTHER org is an error, never a bridge to attach to (e.g. a
+// network_id carried over from another node's DB by a migration).
+func (m *Manager) resolveTapTarget(s *Session) (bridge string, vlan int, attach bool, err error) {
 	if s.NetworkID == 0 {
-		return "", 0, false
+		return "", 0, false, nil
 	}
 	var br string
 	var vl int
-	err := m.db.QueryRow(`SELECT COALESCE(bridge,''), COALESCE(vlan_id,0) FROM networks WHERE id=?`, s.NetworkID).Scan(&br, &vl)
-	if err != nil || br == "" {
-		return "", 0, false
+	var org int64
+	err = m.db.QueryRow(`SELECT org_id, COALESCE(bridge,''), COALESCE(vlan_id,0) FROM networks WHERE id=?`, s.NetworkID).Scan(&org, &br, &vl)
+	if isNoRows(err) {
+		return "", 0, false, nil
 	}
-	return br, vl, true
+	if err != nil {
+		return "", 0, false, err
+	}
+	if org != s.OrgID {
+		return "", 0, false, fmt.Errorf("this instance's port group belongs to another organization — pick one of its own port groups in the Network setting")
+	}
+	if br == "" {
+		return "", 0, false, nil
+	}
+	return br, vl, true, nil
 }
 
-// ensureDefaultNetwork returns (creating if needed) an org's default bridge/
-// overlay network, from which guest IP leases are drawn. The CIDR/gateway come
-// from the cluster config so every node allocates from the same overlay subnet.
+// ensureDefaultNetwork returns (creating if needed) an org's row for the shared
+// cluster bridge, under which cluster-subnet guest leases are filed. The CIDR/
+// gateway come from the cluster config so every node allocates from the same
+// overlay subnet. It matches only the untagged cluster-bridge row on that subnet
+// (never just "the org's first bridged port group", which filed cluster-subnet
+// leases under unrelated VLAN port groups); allocLease's wide scope still counts
+// any such legacy lease as taken.
 func (m *Manager) ensureDefaultNetwork(orgID int64) (int64, string, string, error) {
 	cidr := m.cfg.Cluster.Subnet
 	gw := m.cfg.Cluster.Gateway
@@ -1681,7 +1726,8 @@ func (m *Manager) ensureDefaultNetwork(orgID int64) (int64, string, string, erro
 		cidr = "10.77.0.0/16"
 	}
 	var id int64
-	err := m.db.QueryRow(`SELECT id FROM networks WHERE org_id=? AND mode IN('bridge','overlay') ORDER BY id LIMIT 1`, orgID).Scan(&id)
+	err := m.db.QueryRow(`SELECT id FROM networks WHERE org_id=? AND mode IN('bridge','overlay') AND bridge=? AND vlan_id=0 AND cidr=?
+		ORDER BY id LIMIT 1`, orgID, m.cfg.Cluster.Bridge, cidr).Scan(&id)
 	if err == nil {
 		return id, cidr, gw, nil
 	}
@@ -1712,6 +1758,19 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 	if err := m.db.QueryRow(`SELECT path FROM images WHERE name=?`, s.ImageName).Scan(&base); err != nil {
 		return qemu.Spec{}, err
 	}
+	// The NIC policy a fresh start would apply (a tenant VM without a port group
+	// of its own is not launched anywhere — a receiver is a launch too). The NIC
+	// itself mirrors the SOURCE process exactly (netdev type, host_mtu): the
+	// device config must be identical or the migration stream is rejected.
+	plan, err := m.planNIC(s)
+	if err != nil {
+		return qemu.Spec{}, fmt.Errorf("can't migrate: %w", err)
+	}
+	srcArgs := procArgs(s.PID)
+	userNet := plan.UserNet
+	if u, known := userNetFromArgs(srcArgs); known {
+		userNet = u
+	}
 	spec := qemu.Spec{
 		ID:        s.ID,
 		BaseImage: base,
@@ -1721,8 +1780,13 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 		VNCPort:   s.VNCPort,
 		WSPort:    s.WSPort,
 		QMPSocket: s.QMPSocket,
-		UserNet:   m.cfg.Network.Mode == "user",
-		EnableKVM: qemu.KVMAvailable(),
+		UserNet:   userNet,
+		HostMTU:   hostMTUFromArgs(srcArgs),
+		// The console password travels with the spec so the destination can put
+		// it in its own 0600 secret file; without it the receiver's VNC would come
+		// up with no password at all.
+		VNCPassword: s.VNCPassword,
+		EnableKVM:   qemu.KVMAvailable(),
 		Firmware:  s.Firmware,
 		SeedISO:   s.SeedPath,
 		MAC:       s.MAC,
@@ -1808,19 +1872,11 @@ func (m *Manager) LaunchReceiver(specB64 string, port int) (int, error) {
 		}
 	}
 	spec.Incoming = fmt.Sprintf("tcp:0.0.0.0:%d", port)
-	// Drop privileges to the run-as user exactly as a normal Start does, so the
-	// receiver (and the VM it becomes) is not left running as root, and its
-	// disk/QMP/serial files have the right owner.
-	if m.cfg.VM.RunAs != "" {
-		if uid, gid, groups, ok := lookupUser(m.cfg.VM.RunAs); ok {
-			for _, f := range []string{spec.DiskPath, spec.OVMFVarsPath, spec.SeedISO} {
-				if f != "" {
-					_ = qemu.Chown(f, uid, gid)
-				}
-			}
-			_ = qemu.Chown(m.cfg.Paths.DiskDir, uid, gid)
-			spec.RunAsUID, spec.RunAsGID, spec.RunAsGroups = uid, gid, groups
-		}
+	// Launch identity exactly as a normal Start does (run-as user or the guard
+	// group, never trusted from the wire), the console password into a local
+	// secret file, and the SLIRP loopback guard for a user-mode receiver.
+	if err := m.prepareReceiverSpec(&spec); err != nil {
+		return 0, err
 	}
 	logPath := qemu.LogPath(m.cfg.Paths.DiskDir, "recv-"+spec.ID)
 	proc, err := qemu.Launch(spec, logPath)

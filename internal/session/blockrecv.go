@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
+
 	"vdxclone/internal/qemu"
 )
 
@@ -50,6 +52,10 @@ func (m *Manager) LaunchBlockReceiver(specB64 string, migratePort int, bindIP st
 	if err := json.Unmarshal(blob, &spec); err != nil {
 		return out, fmt.Errorf("unmarshal receiver spec: %w", err)
 	}
+	// The id names local files (target disk, secrets): it must be a session uuid.
+	if _, err := uuid.Parse(spec.ID); err != nil {
+		return out, fmt.Errorf("receiver spec: invalid instance id")
+	}
 
 	// Destination-local target. Refuse to clobber an existing file (a stale/retained
 	// disk for this id) — safety: never overwrite.
@@ -76,17 +82,11 @@ func (m *Manager) LaunchBlockReceiver(specB64 string, migratePort int, bindIP st
 	}
 	spec.Incoming = fmt.Sprintf("tcp:%s:%d", bindIP, mport)
 
-	// Drop privileges to the run-as user exactly as Start/LaunchReceiver do.
-	if m.cfg.VM.RunAs != "" {
-		if uid, gid, groups, ok := lookupUser(m.cfg.VM.RunAs); ok {
-			for _, f := range []string{spec.DiskPath, spec.OVMFVarsPath, spec.SeedISO} {
-				if f != "" {
-					_ = qemu.Chown(f, uid, gid)
-				}
-			}
-			_ = qemu.Chown(m.cfg.Paths.DiskDir, uid, gid)
-			spec.RunAsUID, spec.RunAsGID, spec.RunAsGroups = uid, gid, groups
-		}
+	// Launch identity, console secret and SLIRP guard exactly as Start/
+	// LaunchReceiver do.
+	if err := m.prepareReceiverSpec(&spec); err != nil {
+		_ = os.Remove(target)
+		return out, err
 	}
 
 	logPath := qemu.LogPath(m.cfg.Paths.DiskDir, "recv-"+spec.ID)

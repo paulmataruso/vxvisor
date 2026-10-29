@@ -35,22 +35,23 @@
     </tr>
     {{end}}
   </table>
-  {{range .Containers}}{{if ne .Status "creating"}}{{$cbr := .Bridge}}
+  {{range .Containers}}{{if ne .Status "creating"}}{{$cnid := .NetworkID}}{{$tenant := index $.TenantOrgs .OrgID}}
   <div class="modal" id="m-ctedit-{{.ID}}"><div class="modal-card">
     <div class="modal-head"><h3>Edit container — {{.Name}}</h3><button class="modal-x" data-close>&times;</button></div>
     <form class="mform" method="post" action="/containers/{{.ID}}/update">
       <input type="hidden" name="csrf" value="{{$.CSRF}}">
-      <label class="fld">Network (bridge / port group)
-        <select name="bridge">
-          <option value="lxcbr0"{{if eq $cbr "lxcbr0"}} selected{{end}}>lxcbr0 (default LXC NAT)</option>
-          {{range $.Interfaces}}{{if eq .Type "bridge"}}<option value="{{.Name}}"{{if eq .Name $cbr}} selected{{end}}>{{.Name}}</option>{{end}}{{end}}
+      <label class="fld">Port group
+        <select name="network_id" required>
+          {{if and (eq $cnid 0) (or $tenant (ne .Bridge "lxcbr0"))}}<option value="" selected disabled>— choose a port group (now on {{if .Bridge}}{{.Bridge}}{{else}}the default bridge{{end}}) —</option>{{end}}
+          {{if not $tenant}}<option value="0"{{if and (eq $cnid 0) (eq .Bridge "lxcbr0")}} selected{{end}}>lxcbr0 (default LXC NAT)</option>{{end}}
+          {{range index $.PortGroups .OrgID}}<option value="{{.ID}}"{{if eq .ID $cnid}} selected{{end}}>{{.Name}} — {{.Bridge}}{{if .VLANID}} · VLAN {{.VLANID}}{{end}}</option>{{end}}
         </select>
       </label>
       <div class="row" style="gap:10px">
         <label class="fld">vCPUs<input type="number" name="cpus" value="{{.CPUs}}" min="1" max="64" style="width:90px"></label>
         <label class="fld">Memory (MB)<input type="number" name="mem_mb" value="{{.MemoryMB}}" min="64" step="64" style="width:120px"></label>
       </div>
-      <p class="muted" style="margin:0">Changing the network moves the container to the chosen network right away, with no restart. CPU and memory changes also apply immediately.</p>
+      <p class="muted" style="margin:0">Changing the port group moves a running container right away, with no restart (a move onto a smaller-MTU port group, such as a VXLAN one, takes effect at the next start). CPU and memory changes also apply immediately.</p>
       <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
     </form>
   </div></div>
@@ -63,7 +64,7 @@
   <div class="modal-head"><h3>New LXC container</h3><button class="modal-x" data-close>&times;</button></div>
   <form class="mform row2" method="post" action="/containers">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld full">Name<input name="name" placeholder="web1" required pattern="[a-zA-Z0-9._-]+"></label>
+    <label class="fld full">Name<input name="name" placeholder="web1" required maxlength="64" pattern="[a-zA-Z0-9][a-zA-Z0-9._\-]*" title="Letters, digits, '.', '_' or '-', starting with a letter or digit"></label>
     <label class="fld">Distribution<select name="dist" id="ct-dist"><option value="ubuntu">ubuntu</option><option value="debian">debian</option><option value="alpine">alpine</option><option value="rockylinux">rockylinux</option><option value="centos">centos</option></select></label>
     <label class="fld">Release<select name="release" id="ct-release"></select></label>
     <label class="fld">vCPUs<input type="number" name="cpus" value="1" min="1" max="64"></label>
@@ -71,11 +72,12 @@
     <label class="fld full">Copies<input type="number" name="copies" value="1" min="1" max="50">
       <span style="display:block;margin-top:4px;font-size:11px;color:var(--muted)">Create multiple independent containers at once. A trailing number increments (web01 → web01, web02…); otherwise a suffix is added (web → web-1, web-2…).</span>
     </label>
-    <label class="fld">Bridge (network)
-      <select name="bridge">
-        <option value="lxcbr0">lxcbr0 (default LXC NAT)</option>
-        {{range .Interfaces}}{{if eq .Type "bridge"}}<option value="{{.Name}}">{{.Name}}</option>{{end}}{{end}}
+    <label class="fld">Port group
+      <select name="network_id" required>
+        {{if .MyTenant}}{{if not .MyPortGroups}}<option value="" selected disabled>— no port groups yet —</option>{{end}}{{else}}<option value="0">lxcbr0 (default LXC NAT)</option>{{end}}
+        {{range .MyPortGroups}}<option value="{{.ID}}">{{.Name}} — {{.Bridge}}{{if .VLANID}} · VLAN {{.VLANID}}{{end}}</option>{{end}}
       </select>
+      {{if and .MyTenant (not .MyPortGroups)}}<span style="display:block;margin-top:4px;font-size:11px;color:var(--muted)">This organization has no port groups yet. Create one under Networking first.</span>{{end}}
     </label>
     <label class="fld">Storage pool<select name="storage_pool_id"><option value="0">— default (/var/lib/lxc) —</option>{{range .Pools}}<option value="{{.ID}}">{{.Name}} ({{.Kind}})</option>{{end}}</select></label>
     <label class="fld">Root disk GB <span style="font-size:11px;color:var(--muted)">(RBD / LVM pools only)</span><input type="number" name="disk_gb" value="10" min="1" max="2048"></label>
