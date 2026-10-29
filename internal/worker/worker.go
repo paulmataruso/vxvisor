@@ -142,7 +142,20 @@ func (s *Supervisor) Run(ctx context.Context) {
 	go s.loop(ctx, "node-health", 30*time.Second, s.nodeHealth)
 	go s.loop(ctx, "account-sync", 10*time.Second, s.syncAccounts)
 	go s.loop(ctx, "guest-os", 60*time.Second, s.detectGuestOS)
+	go s.loop(ctx, "cbt-import", 15*time.Second, s.cbtImports)
 	<-ctx.Done()
+}
+
+// cbtImports drives the CBT warm imports from vCenter/ESXi off their DB state
+// (service.CBTTick): due delta passes, retries, cleanup. Its first run at
+// startup is the crash recovery — it resumes syncing, drops a cut-over a
+// restart interrupted back to syncing, and removes the leftover vxvisor-cbt-*
+// snapshots those imports recorded (only those) before anything else runs.
+// Per-node: each node drives the imports staged on its own disk.
+func (s *Supervisor) cbtImports() {
+	if s.svc != nil {
+		s.svc.CBTTick()
+	}
 }
 
 func (s *Supervisor) loop(ctx context.Context, name string, every time.Duration, fn func()) {

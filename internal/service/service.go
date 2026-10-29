@@ -46,6 +46,7 @@ type Service struct {
 	joins  *joinTracker
 	vmwimp *vmwImportTracker
 	vmwexp *vmExportTracker
+	cbt    *cbtRuntime // CBT warm imports: running jobs + test seams (cbtRT)
 	// adReload, when registered by the web layer, pushes a freshly-saved or
 	// freshly-replicated AD config to the live auth provider (no restart). Lets a
 	// follower apply the leader's AD settings the moment a snapshot lands.
