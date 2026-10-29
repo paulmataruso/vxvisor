@@ -114,6 +114,9 @@ func (m *Manager) MoveStorage(id string, targetPoolID int64, onProg func(done, t
 	if m.MigrationBusy(id) {
 		return fmt.Errorf("a storage move is already in progress for this instance")
 	}
+	if m.BackupBusy(id) {
+		return ErrBackupBusy
+	}
 	s, err := m.Get(id)
 	if err != nil {
 		return err
@@ -125,6 +128,9 @@ func (m *Manager) MoveStorage(id string, targetPoolID int64, onProg func(done, t
 	if s.DiskBackend == tgt.backend && sameLocation(s.DiskPath, tgt) {
 		return fmt.Errorf("instance disk is already on that storage")
 	}
+	// The moved disk does not carry the backup dirty bitmaps (neither a live
+	// mirror nor an offline convert copies them): the next backup is a full one.
+	m.DropCheckpoints(id)
 
 	if m.Running(s) {
 		// Live move pivots a running guest's writes; today that dance is only wired

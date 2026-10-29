@@ -113,19 +113,19 @@ type ovfInfo struct {
 	OS       string
 	MAC      string
 	// From vxvisor:Instance (zero values when absent).
-	Native      bool
-	OrgID       int64
-	NetID       int64
-	Firmware    string
-	SecureBoot  bool
-	Machine     string
-	OSType      string
-	DiskBus     string
-	NICModel    string
-	VGA         string
-	GuestAgent  bool
-	TPM         bool
-	SourceVMID  string
+	Native     bool
+	OrgID      int64
+	NetID      int64
+	Firmware   string
+	SecureBoot bool
+	Machine    string
+	OSType     string
+	DiskBus    string
+	NICModel   string
+	VGA        string
+	GuestAgent bool
+	TPM        bool
+	SourceVMID string
 }
 
 // parseOVF reads the fields a restore needs; unknown content is ignored.

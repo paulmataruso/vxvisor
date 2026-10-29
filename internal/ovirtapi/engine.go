@@ -61,11 +61,11 @@ type snapshot struct {
 }
 
 const (
-	backupIdle     = 2 * time.Hour  // a ready backup with no transfer activity fails after this
-	keepFinished   = time.Hour      // finished backups/transfers stay queryable this long
-	defaultIdle    = 60 * time.Second
-	maxTicketLife  = 24 * time.Hour
-	reapInterval   = 15 * time.Second
+	backupIdle    = 2 * time.Hour // a ready backup with no transfer activity fails after this
+	keepFinished  = time.Hour     // finished backups/transfers stay queryable this long
+	defaultIdle   = 60 * time.Second
+	maxTicketLife = 24 * time.Hour
+	reapInterval  = 15 * time.Second
 )
 
 // Run reaps idle transfers and backups until ctx is done, then fails
@@ -478,4 +478,3 @@ func secondsParam(v string) time.Duration {
 	}
 	return time.Duration(n) * time.Second
 }
-

@@ -17,6 +17,10 @@ type Backend interface {
 	// Login verifies credentials (the "@internal"-style profile suffix is
 	// already stripped) and returns the caller. It audits both outcomes.
 	Login(user, password, ip string) (Caller, error)
+	// Bind re-validates a caller for one request from ip (the user must still
+	// exist, be enabled and be allowed to use the API) and returns the caller
+	// the request's backend calls get, carrying ip for their audit records.
+	Bind(c Caller, ip string) (Caller, error)
 
 	Host(c Caller) (Host, error)
 	StoragePools(c Caller) ([]StoragePool, error)
@@ -186,5 +190,8 @@ func DiskIDForVM(vmID string) string { return derive("disk", vmID) }
 // PoolID / NetID map VXVisor ids to oVirt ids.
 func poolUUID(id int64) string { return derive("sd", itoa(id)) }
 func netUUID(id int64) string  { return derive("net", itoa(id)) }
+
+// NetUUID is the oVirt network (and vNIC profile) id of a VXVisor port group.
+func NetUUID(id int64) string { return netUUID(id) }
 
 const blankTemplate = "00000000-0000-0000-0000-000000000000"

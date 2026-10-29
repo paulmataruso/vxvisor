@@ -169,6 +169,9 @@ func (s *Service) MigrateSession(p *Principal, sessionID string, dstNodeID int64
 	if err != nil {
 		return err
 	}
+	if s.mgr.BackupBusy(sessionID) {
+		return session.ErrBackupBusy
+	}
 	// Resolve the source (this node) and destination nodes up front — both the
 	// live and the cold paths need them.
 	nodes, _ := s.cl.ListNodes()

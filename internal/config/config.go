@@ -6,8 +6,11 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -23,6 +26,62 @@ type Config struct {
 	Update  UpdateConfig  `toml:"update"`
 	License LicenseConfig `toml:"license"`
 	Guac    GuacConfig    `toml:"guac"`
+	Ovirt   OvirtConfig   `toml:"ovirt"`
+}
+
+// OvirtConfig is the OPTIONAL oVirt-engine–compatible backup API (for Veeam
+// Backup & Replication's oVirt KVM plug-in and other oVirt-SDK clients). It is
+// OFF unless Enabled is true; leaving the [ovirt] section out is a complete
+// rollback. Its two TLS listeners bind a specific address — the management IP
+// by default — and never a wildcard. See docs/VEEAM-OVIRT-API.md.
+type OvirtConfig struct {
+	// Enabled turns the API on. Default false.
+	Enabled bool `toml:"enabled"`
+	// Listen is the engine API listener ("<ip>:443"). Empty = the [server]
+	// addr's IP on port 443; with a wildcard [server] addr it must be set.
+	Listen string `toml:"listen"`
+	// ImageioListen is the imageio data listener ("<ip>:54322"). Empty = the
+	// Listen IP on port 54322. Transfers also work through Listen alone.
+	ImageioListen string `toml:"imageio_listen"`
+	// PublicHost is the name or IP clients reach this host by (the TLS
+	// certificate's name and the host in transfer URLs). Empty = the Listen IP.
+	PublicHost string `toml:"public_host"`
+	// ProductName is reported as the engine's product name.
+	ProductName string `toml:"product_name"`
+	// WorkDir holds backup scratch (fleecing images, NBD sockets); it must be
+	// on local disk with room for guest writes made during a backup. Empty =
+	// <data_dir>/backup-work.
+	WorkDir string `toml:"work_dir"`
+}
+
+// OvirtAddrs resolves the backup API's listen addresses. It refuses a
+// wildcard or hostname bind: the API must sit on one known interface.
+func (c *Config) OvirtAddrs() (api, imageio string, err error) {
+	api = c.Ovirt.Listen
+	if api == "" {
+		host, _, e := net.SplitHostPort(c.Server.Addr)
+		if e != nil || !specificIP(host) {
+			return "", "", fmt.Errorf("[ovirt] listen is not set and [server] addr %q has no specific IP; set listen to the management IP and port 443", c.Server.Addr)
+		}
+		api = net.JoinHostPort(host, "443")
+	}
+	host, _, e := net.SplitHostPort(api)
+	if e != nil || !specificIP(host) {
+		return "", "", fmt.Errorf("[ovirt] listen %q must be a specific IP and port (never a wildcard)", api)
+	}
+	imageio = c.Ovirt.ImageioListen
+	if imageio == "" {
+		imageio = net.JoinHostPort(host, "54322")
+	}
+	if h, _, e := net.SplitHostPort(imageio); e != nil || !specificIP(h) {
+		return "", "", fmt.Errorf("[ovirt] imageio_listen %q must be a specific IP and port (never a wildcard)", imageio)
+	}
+	return api, imageio, nil
+}
+
+func specificIP(host string) bool {
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && !ip.IsUnspecified()
 }
 
 // GuacConfig is the OPTIONAL rustguac "advanced console" integration — a test

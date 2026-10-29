@@ -237,6 +237,20 @@ func (s *Server) authenticate(r *http.Request) (Caller, string, bool) {
 	return caller, stripProfile(user), true
 }
 
+// forget drops the bearer token (or cached Basic login) a request used.
+func (s *Server) forget(_ Caller, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t := bearer(r); t != "" {
+		delete(s.tokens, t)
+		return
+	}
+	if user, pass, ok := r.BasicAuth(); ok {
+		sum := sha256.Sum256([]byte(user + "\x00" + pass))
+		delete(s.basic, hex.EncodeToString(sum[:]))
+	}
+}
+
 // ---- request plumbing -------------------------------------------------------
 
 type req struct {
@@ -263,6 +277,15 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	x := &req{s: s, w: w, r: r, ip: clientIP(r), segs: segs, q: r.URL.Query(), json: wantsJSON(r)}
 	c, user, ok := s.authenticate(r)
+	if ok {
+		// Re-checked on every request: a user disabled or demoted after login
+		// loses access at once, not when the token expires.
+		var err error
+		if c, err = s.be.Bind(c, x.ip); err != nil {
+			s.forget(c, r)
+			ok = false
+		}
+	}
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="ENGINE"`)
 		x.fault(http.StatusUnauthorized, "Unauthorized", "authentication required")
@@ -364,7 +387,9 @@ func (x *req) fail(err error) {
 	}
 }
 
-func (x *req) notFound() { x.fault(http.StatusNotFound, "Not Found", "Entity not found: "+x.r.URL.Path) }
+func (x *req) notFound() {
+	x.fault(http.StatusNotFound, "Not Found", "Entity not found: "+x.r.URL.Path)
+}
 
 func (x *req) audit(action, typ, id string, detail map[string]any) {
 	x.s.be.Audit(x.c, action, typ, id, x.ip, detail)
