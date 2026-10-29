@@ -77,6 +77,19 @@ func (t *vmwImportTracker) set(id string, fn func(*VMwareImportState)) {
 	fn(st)
 }
 
+func (t *vmwImportTracker) get(id string) (VMwareImportState, bool) {
+	if t == nil {
+		return VMwareImportState{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st, ok := t.m[id]
+	if !ok {
+		return VMwareImportState{}, false
+	}
+	return *st, true
+}
+
 func (t *vmwImportTracker) snapshot() []VMwareImportState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -511,6 +524,19 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, trans
 		}
 	}()
 
+	s.importDisksToInstance(id, lg, vm, vmdks, osType, diskBackend, zvolPool, targetPoolID, ov, p, ip, fail)
+}
+
+// importDisksToInstance is the shared tail of every import transport (the cold
+// ones above and the CBT warm-import cut-over): it converts the locally staged
+// source disks (device order, first = boot) into registered qcow2 base images
+// and auto-creates a stopped instance mirroring the source. A convert/register
+// failure calls fail and returns ok=false (images it made are rolled back).
+// Instance creation stays best-effort: if it fails, the import still finishes
+// "done" with the registered image (sessionID ""). It never removes the input
+// files — the caller owns them.
+func (s *Service) importDisksToInstance(id string, lg *importLogger, vm vmware.VMInfo, vmdks []string, osType, diskBackend, zvolPool string, targetPoolID int64, ov importOverride, p *Principal, ip string, fail func(step, msg string)) (image, sessionID string, ok bool) {
+	destDir := s.stg.ImageDir()
 	s.vmwimp.set(id, func(st *VMwareImportState) {
 		st.Status = "converting"
 		st.Step = "qemu-img convert → qcow2"
@@ -523,7 +549,7 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, trans
 		if err := qemu.ProbeReadable(vmdk); err != nil {
 			s.rollbackImages(registered)
 			fail("convert", "source disk not readable by qemu-img: "+err.Error())
-			return
+			return "", "", false
 		}
 		name := base
 		if len(vmdks) > 1 {
@@ -535,14 +561,14 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, trans
 			_ = os.Remove(dst)
 			s.rollbackImages(registered)
 			fail("convert", err.Error())
-			return
+			return "", "", false
 		}
 		lg.logf("registering base image %q", name)
 		if err := s.stg.RegisterImage(name, dst, "vmware:"+vm.Name); err != nil {
 			_ = os.Remove(dst)
 			s.rollbackImages(registered)
 			fail("register", err.Error())
-			return
+			return "", "", false
 		}
 		registered = append(registered, dst)
 		if i == 0 {
@@ -666,7 +692,7 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, trans
 			st.FinishedAt = time.Now().UnixMilli()
 			st.LogTail = lg.tailLines(30)
 		})
-		return
+		return firstImage, "", true
 	}
 	s.vmwimp.set(id, func(st *VMwareImportState) {
 		st.Status = "done"
@@ -678,6 +704,7 @@ func (s *Service) runVMwareImport(id string, c vmware.Creds, moid, osType, trans
 	s.audit(p, p.OrgID, "vmware.import_instance", "session", sess.ID, ip, map[string]any{
 		"vm": vm.Name, "image": firstImage, "cpus": cpus, "memory_mb": mem, "firmware": firmware,
 	})
+	return firstImage, sess.ID, true
 }
 
 // PlanItem is one row of a migration plan: a source VM plus the per-VM target
@@ -776,6 +803,9 @@ func (s *Service) SweepImportTemps() {
 	if s.stg == nil {
 		return
 	}
+	// CBT warm-import staging (.vdxcbt-*) DOES survive a restart — the import
+	// resumes — so only files no unfinished warm import owns are removed.
+	s.sweepCBTStaging()
 	dir := s.stg.ImageDir()
 	ents, err := os.ReadDir(dir)
 	if err != nil {

@@ -18,10 +18,12 @@ package vmware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/vmware/govmomi/fault"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/methods"
@@ -32,6 +34,38 @@ import (
 // SnapshotPrefix starts the name of every snapshot VXVisor creates. A snapshot
 // without it is never ours, and is never removed.
 const SnapshotPrefix = "vxvisor-cbt-"
+
+// ErrNotOurSnapshot is returned when a removal is refused because the snapshot
+// is not exactly the one we recorded (wrong prefix, or renamed since).
+var ErrNotOurSnapshot = errors.New("refusing to remove a snapshot VXVisor did not create")
+
+// IsNotFound reports whether err is vSphere saying the object (VM or snapshot)
+// no longer exists.
+func IsNotFound(err error) bool {
+	return err != nil && fault.Is(err, &types.ManagedObjectNotFound{})
+}
+
+// KeepAlive keeps the vSphere session from idling out (vCenter drops idle
+// sessions after ~30 min) during a long copy that makes no API calls, by
+// reading the server clock every interval. Read-only. Call stop when done.
+func (c *Client) KeepAlive(every time.Duration) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				rctx, rcancel := context.WithTimeout(ctx, 30*time.Second)
+				_, _ = methods.GetCurrentTime(rctx, c.gc.Client)
+				rcancel()
+			}
+		}
+	}()
+	return cancel
+}
 
 // taskTimeout bounds one vSphere task we start. Tasks run on a context that is
 // NOT cancelled with the caller's: once a snapshot create/remove or a
@@ -202,7 +236,7 @@ func (c *Client) RemoveCBTSnapshot(ctx context.Context, consent CBTConsent, more
 		return false, err
 	}
 	if !strings.HasPrefix(name, SnapshotPrefix) {
-		return false, fmt.Errorf("refusing to remove snapshot %q: not a VXVisor snapshot", name)
+		return false, fmt.Errorf("%w: %q has no %q prefix", ErrNotOurSnapshot, name, SnapshotPrefix)
 	}
 	st, err := c.CBTState(ctx, consent.moid)
 	if err != nil {
@@ -214,7 +248,7 @@ func (c *Client) RemoveCBTSnapshot(ctx context.Context, consent CBTConsent, more
 			continue
 		}
 		if s.Name != name {
-			return false, fmt.Errorf("refusing to remove snapshot %s: it is named %q, not our %q", moref, s.Name, name)
+			return false, fmt.Errorf("%w: %s is named %q, not our %q", ErrNotOurSnapshot, moref, s.Name, name)
 		}
 		found = true
 	}
