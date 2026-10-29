@@ -26,14 +26,33 @@ func validSnapTag(tag string) error {
 	if tag == "" {
 		return errors.New("snapshot tag required")
 	}
-	if err := validName(tag); err != nil {
+	if err := validName(tag); err != nil || !alnumStart(tag) {
 		return fmt.Errorf("invalid snapshot tag %q", tag)
 	}
 	return nil
 }
 
+func alnumStart(s string) bool {
+	c := s[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// strictDataset is validDatasetName plus: every component starts with a letter
+// or digit, so no component can be read as an option ("-r") or be "." / "..".
+func strictDataset(name string) error {
+	if err := validDatasetName(name); err != nil {
+		return err
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if !alnumStart(seg) {
+			return fmt.Errorf("invalid dataset name %q", name)
+		}
+	}
+	return nil
+}
+
 func snapName(dataset, tag string) (string, error) {
-	if err := validDatasetName(dataset); err != nil {
+	if err := strictDataset(dataset); err != nil {
 		return "", err
 	}
 	if err := validSnapTag(tag); err != nil {
@@ -83,7 +102,7 @@ func Clone(dataset, tag, target string) error {
 	if err != nil {
 		return err
 	}
-	if err := validDatasetName(target); err != nil {
+	if err := strictDataset(target); err != nil {
 		return err
 	}
 	if _, err := runCmd(60*time.Second, "zfs", "clone", sn, target); err != nil {
@@ -96,7 +115,7 @@ func Clone(dataset, tag, target string) error {
 // snapshot (and every older one), and the former origin becomes the clone. Used
 // before purging an origin so its dependent clones survive.
 func Promote(dataset string) error {
-	if err := validDatasetName(dataset); err != nil {
+	if err := strictDataset(dataset); err != nil {
 		return err
 	}
 	_, err := runCmd(60*time.Second, "zfs", "promote", dataset)
@@ -106,7 +125,7 @@ func Promote(dataset string) error {
 // ListSnapshotTags returns the tags of dataset's own snapshots (depth 1), oldest
 // first by creation transaction group.
 func ListSnapshotTags(dataset string) ([]string, error) {
-	if err := validDatasetName(dataset); err != nil {
+	if err := strictDataset(dataset); err != nil {
 		return nil, err
 	}
 	out, err := runCmd(30*time.Second, "zfs", "list", "-H", "-t", "snapshot", "-d", "1",

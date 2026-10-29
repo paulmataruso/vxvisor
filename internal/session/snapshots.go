@@ -1,6 +1,7 @@
 package session
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -530,10 +531,17 @@ func parseRBDSnapRef(ref string) (pool, image, tag string, ok bool) {
 }
 
 // isGone recognizes "it isn't there" from each backend's CLI.
+// A missing tool or a permission problem is NOT "gone": the row must stay.
 func isGone(err error) bool {
 	m := strings.ToLower(err.Error())
+	for _, s := range []string{"executable file not found", "permission denied", "timed out", "deadline",
+		"keyring", "conf", "connect"} { // rbd: a missing ceph.conf/keyring is not a missing snapshot
+		if strings.Contains(m, s) {
+			return false
+		}
+	}
 	for _, s := range []string{"does not exist", "could not find", "failed to find", "no such file",
-		"can't find the snapshot", "can't find snapshot", "not found"} {
+		"can't find the snapshot", "can't find snapshot", "snapshot not found"} {
 		if strings.Contains(m, s) {
 			return true
 		}
@@ -609,7 +617,11 @@ func (m *Manager) CloneFromSnapshot(o CloneOpts) (*Session, error) {
 	id := uuid.NewString()
 	var created []string
 	var undo []func()
+	var tx *sql.Tx
 	fail := func(e error) (*Session, error) {
+		if tx != nil {
+			_ = tx.Rollback() // first: it holds the DB's only writer connection
+		}
 		m.releaseLeases(id)
 		for _, f := range created {
 			_ = os.Remove(f)
@@ -709,8 +721,9 @@ func (m *Manager) CloneFromSnapshot(o CloneOpts) (*Session, error) {
 	if s.BootISOID > 0 {
 		bootISO = s.BootISOID
 	}
-	tx, err := m.db.Begin()
+	tx, err = m.db.Begin()
 	if err != nil {
+		tx = nil
 		return fail(err)
 	}
 	defer tx.Rollback()

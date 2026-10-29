@@ -592,7 +592,7 @@ func (s *Service) prunePolicy(pol SnapshotPolicy, now time.Time) []string {
 
 // pruneSelect returns the snapshots (all of ONE VM, taken by ONE policy) that
 // retention drops. A snapshot is kept while it is among the newest keepLast OR
-// younger than keepDays — a rule set to 0 is ignored, and with neither set
+// at most keepDays old — a rule set to 0 is ignored, and with neither set
 // nothing is pruned. Locked snapshots and snapshots instant clones depend on are
 // always kept.
 func pruneSelect(snaps []session.SnapRecord, keepLast, keepDays int, now time.Time) []session.SnapRecord {
@@ -609,7 +609,7 @@ func pruneSelect(snaps []session.SnapRecord, keepLast, keepDays int, now time.Ti
 		}
 		if keepDays > 0 {
 			t, ok := session.ParseDBTime(r.CreatedAt)
-			if !ok || t.After(horizon) {
+			if !ok || !t.Before(horizon) {
 				continue // young (or unknown age: keep)
 			}
 		}

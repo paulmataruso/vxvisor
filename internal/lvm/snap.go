@@ -16,11 +16,23 @@ import (
 // the exact argv without an LVM host).
 var runCmd = run
 
+// snapName is validName plus a leading letter or digit, so a VG/LV name can never
+// be read as an option ("-f") by lvcreate / lvrename / lvremove.
+func snapName(name string) error {
+	if err := validName(name); err != nil {
+		return err
+	}
+	if c := name[0]; !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		return fmt.Errorf("invalid name %q", name)
+	}
+	return nil
+}
+
 func vgLV(vg, lv string) (string, error) {
-	if err := validName(vg); err != nil {
+	if err := snapName(vg); err != nil {
 		return "", err
 	}
-	if err := validName(lv); err != nil {
+	if err := snapName(lv); err != nil {
 		return "", err
 	}
 	return vg + "/" + lv, nil
@@ -35,7 +47,7 @@ func ThinSnapshot(vg, origin, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := validName(name); err != nil {
+	if err := snapName(name); err != nil {
 		return err
 	}
 	_, err = runCmd(60*time.Second, "lvcreate", "-s", "-n", name, src)
@@ -50,7 +62,7 @@ func ThinCopy(vg, src, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := validName(name); err != nil {
+	if err := snapName(name); err != nil {
 		return err
 	}
 	if _, err := runCmd(60*time.Second, "lvcreate", "-s", "-kn", "-ay", "-n", name, from); err != nil {
@@ -65,7 +77,7 @@ func RenameLV(vg, from, to string) error {
 	if _, err := vgLV(vg, from); err != nil {
 		return err
 	}
-	if err := validName(to); err != nil {
+	if err := snapName(to); err != nil {
 		return err
 	}
 	_, err := runCmd(30*time.Second, "lvrename", vg, from, to)

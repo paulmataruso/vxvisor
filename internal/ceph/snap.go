@@ -22,6 +22,10 @@ func validRBDName(kind, s string) error {
 	if s == "" {
 		return fmt.Errorf("rbd %s name required", kind)
 	}
+	// A leading letter/digit: never read as an option, never "." / "..".
+	if c := s[0]; !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		return fmt.Errorf("invalid rbd %s name %q", kind, s)
+	}
 	for _, r := range s {
 		if !(r == '-' || r == '_' || r == '.' ||
 			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
