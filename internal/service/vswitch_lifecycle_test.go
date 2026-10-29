@@ -88,7 +88,7 @@ const mgmtNetplanYAML = `network:
   bridges:
     vSwitch0:
       interfaces: [bond0]
-      addresses: [172.16.0.163/24]
+      addresses: [192.168.10.163/24]
 `
 
 // TestDeleteVSwitchInUse: the management vSwitch and any vSwitch something is on

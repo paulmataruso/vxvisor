@@ -38,7 +38,7 @@ func mgmtHost() *fakeHost {
 			{Name: "eno2", Type: "physical", Master: "bond0"},
 			{Name: "eno3", Type: "physical"},
 			{Name: "lo", Type: "loopback", Addrs: []string{"127.0.0.1/8"}},
-			{Name: "vSwitch0", Type: "bridge", Addrs: []string{"172.16.0.163/24", "fe80::1/64"}},
+			{Name: "vSwitch0", Type: "bridge", Addrs: []string{"192.168.10.163/24", "fe80::1/64"}},
 		},
 		defaults: []string{"vSwitch0"},
 	}
@@ -51,7 +51,7 @@ func TestMgmtDetection(t *testing.T) {
 	h := mgmtHost()
 	stubHost(t, h)
 	s := &Service{cfg: &config.Config{}}
-	for _, addr := range []string{"172.16.0.163:8766", "0.0.0.0:8766", ":8766", "[::]:8766", "127.0.0.1:8766", "", "10.9.9.9:8766", "vxhost.example:8766"} {
+	for _, addr := range []string{"192.168.10.163:8766", "0.0.0.0:8766", ":8766", "[::]:8766", "127.0.0.1:8766", "", "10.9.9.9:8766", "vxhost.example:8766"} {
 		s.cfg.Server.Addr = addr
 		if got := s.mgmtIfaces(); !reflect.DeepEqual(got, []string{"vSwitch0"}) {
 			t.Fatalf("addr %q: mgmt = %v, want [vSwitch0]", addr, got)
@@ -99,7 +99,7 @@ func TestMgmtDetection(t *testing.T) {
 		t.Fatalf("transit candidates must fail closed, got %v", err)
 	}
 	// ...but a specific listener IP still identifies it.
-	s.cfg.Server.Addr = "172.16.0.163:8766"
+	s.cfg.Server.Addr = "192.168.10.163:8766"
 	if err := s.guardMgmt("vSwitch0"); err == nil || errors.Is(err, errMgmtUnknown) {
 		t.Fatalf("a specific listener IP identifies management without a default route, got %v", err)
 	}

@@ -28,16 +28,16 @@ network:
       dhcp6: no
       mtu: 9000
       addresses:
-        - 172.16.0.163/24
+        - 192.168.10.163/24
         - "2001:db8::163/64"
       routes:
-        - {to: default, via: 172.16.0.1}
+        - {to: default, via: 192.168.10.1}
         - {to: "::/0", via: "2001:db8::1"}
-        - {to: 10.9.0.0/16, via: 172.16.0.254}
+        - {to: 10.9.0.0/16, via: 192.168.10.254}
       nameservers:
         search: [lab.example]
         addresses:
-          - 172.16.0.1
+          - 192.168.10.1
           - "2001:db8::53"
       parameters:
         stp: false
@@ -115,7 +115,7 @@ func TestTeamMgmtUplinkKeepsAddressing(t *testing.T) {
 	if !strings.HasPrefix(string(out), "# Managed by VXVisor installer") {
 		t.Fatalf("the file's comments must survive:\n%s", out)
 	}
-	keep := []liveAddr{{IP: net.ParseIP("172.16.0.163"), Prefix: 24}, {IP: net.ParseIP("2001:db8::163"), Prefix: 64}}
+	keep := []liveAddr{{IP: net.ParseIP("192.168.10.163"), Prefix: 24}, {IP: net.ParseIP("2001:db8::163"), Prefix: 64}}
 	if err := netplanKeepsAddrs(out, "vSwitch0", "90.yaml", keep); err != nil {
 		t.Fatalf("every static address is still configured: %v", err)
 	}
@@ -142,13 +142,13 @@ func TestTeamMgmtUplinkDHCP(t *testing.T) {
 	if br["dhcp4"] != true || br["accept-ra"] != true || br["macaddress"] != "aa:bb:cc:dd:ee:01" {
 		t.Fatalf("DHCP bridge: %v", br)
 	}
-	lease := []liveAddr{{IP: net.ParseIP("172.16.0.45"), Prefix: 24, Dynamic: true}}
+	lease := []liveAddr{{IP: net.ParseIP("192.168.10.45"), Prefix: 24, Dynamic: true}}
 	if err := netplanKeepsAddrs(out, "vSwitch0", "f", lease); err != nil {
 		t.Fatalf("a DHCP lease is kept by dhcp4: %v", err)
 	}
 	// A static address on the bridge that the file doesn't have would be lost.
-	static := []liveAddr{{IP: net.ParseIP("172.16.0.200"), Prefix: 24}}
-	if err := netplanKeepsAddrs(out, "vSwitch0", "f", static); err == nil || !strings.Contains(err.Error(), "172.16.0.200/24") {
+	static := []liveAddr{{IP: net.ParseIP("192.168.10.200"), Prefix: 24}}
+	if err := netplanKeepsAddrs(out, "vSwitch0", "f", static); err == nil || !strings.Contains(err.Error(), "192.168.10.200/24") {
 		t.Fatalf("an address the file doesn't configure must block the apply, got %v", err)
 	}
 }
@@ -219,8 +219,8 @@ func TestFindNetplanBridge(t *testing.T) {
 
 func TestParseLiveAddrs(t *testing.T) {
 	js := `[{"ifindex":5,"ifname":"vSwitch0","addr_info":[
-		{"family":"inet","local":"172.16.0.163","prefixlen":24,"scope":"global","dynamic":true},
-		{"family":"inet","local":"172.16.0.200","prefixlen":24,"scope":"global"},
+		{"family":"inet","local":"192.168.10.163","prefixlen":24,"scope":"global","dynamic":true},
+		{"family":"inet","local":"192.168.10.200","prefixlen":24,"scope":"global"},
 		{"family":"inet6","local":"2001:db8::5","prefixlen":64,"scope":"global","dynamic":true},
 		{"family":"inet6","local":"fe80::1","prefixlen":64,"scope":"link"}]}]`
 	got, err := parseLiveAddrs([]byte(js))
@@ -228,21 +228,21 @@ func TestParseLiveAddrs(t *testing.T) {
 		t.Fatalf("global addresses: %v %v", got, err)
 	}
 	keep := mustKeepAddrs(got)
-	if len(keep) != 2 || keep[0].String() != "172.16.0.163/24" || keep[1].String() != "172.16.0.200/24" {
+	if len(keep) != 2 || keep[0].String() != "192.168.10.163/24" || keep[1].String() != "192.168.10.200/24" {
 		t.Fatalf("must keep static + DHCP IPv4 (not SLAAC): %v", keep)
 	}
 }
 
 func TestNetworkdKeepsAddrs(t *testing.T) {
-	const rendered = "[Match]\nName=vSwitch0\n\n[Network]\nLinkLocalAddressing=ipv6\nAddress=172.16.0.163/24\nAddress=2001:db8::163/64\n"
-	keep := []liveAddr{{IP: net.ParseIP("172.16.0.163"), Prefix: 24}, {IP: net.ParseIP("2001:db8::163"), Prefix: 64}}
+	const rendered = "[Match]\nName=vSwitch0\n\n[Network]\nLinkLocalAddressing=ipv6\nAddress=192.168.10.163/24\nAddress=2001:db8::163/64\n"
+	keep := []liveAddr{{IP: net.ParseIP("192.168.10.163"), Prefix: 24}, {IP: net.ParseIP("2001:db8::163"), Prefix: 64}}
 	if err := networkdKeepsAddrs(rendered, "vSwitch0", keep); err != nil {
 		t.Fatal(err)
 	}
 	if err := networkdKeepsAddrs(strings.Replace(rendered, "Address=2001:db8::163/64\n", "", 1), "vSwitch0", keep); err == nil {
 		t.Fatalf("a dropped IPv6 address must be caught")
 	}
-	lease := []liveAddr{{IP: net.ParseIP("172.16.0.45"), Prefix: 24, Dynamic: true}}
+	lease := []liveAddr{{IP: net.ParseIP("192.168.10.45"), Prefix: 24, Dynamic: true}}
 	if err := networkdKeepsAddrs("[Network]\nDHCP=ipv4\n", "vSwitch0", lease); err != nil {
 		t.Fatalf("DHCP keeps a lease: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestStagedNetplanCheck(t *testing.T) {
 	oldDirs, oldGen := netplanReadDirs, netplanGenerate
 	t.Cleanup(func() { netplanReadDirs, netplanGenerate = oldDirs, oldGen })
 	netplanReadDirs = []string{dir}
-	render := "Address=172.16.0.163/24\n"
+	render := "Address=192.168.10.163/24\n"
 	netplanGenerate = func(root string) error {
 		staged, err := os.ReadFile(filepath.Join(root, path))
 		if err != nil || string(staged) != "NEW" {
@@ -274,11 +274,11 @@ func TestStagedNetplanCheck(t *testing.T) {
 		os.MkdirAll(out, 0o755)
 		return os.WriteFile(filepath.Join(out, "10-netplan-vSwitch0.network"), []byte("[Network]\n"+render), 0o644)
 	}
-	keep := []liveAddr{{IP: net.ParseIP("172.16.0.163"), Prefix: 24}}
+	keep := []liveAddr{{IP: net.ParseIP("192.168.10.163"), Prefix: 24}}
 	if err := stagedNetplanCheck(path, []byte("NEW"), "vSwitch0", keep); err != nil {
 		t.Fatal(err)
 	}
-	render = "Address=172.16.0.99/24\n"
+	render = "Address=192.168.10.99/24\n"
 	if err := stagedNetplanCheck(path, []byte("NEW"), "vSwitch0", keep); err == nil {
 		t.Fatalf("a render without the admin IP must block the apply")
 	}
@@ -297,11 +297,11 @@ func TestEditMgmtNetplanRefusesDroppingAdminIP(t *testing.T) {
 	t.Cleanup(func() { netplanDir, netplanReadDirs, liveBridgeAddrs = oldDir, oldDirs, oldLive })
 	netplanDir, netplanReadDirs = dir, []string{dir}
 	liveBridgeAddrs = func(string) ([]liveAddr, error) {
-		return []liveAddr{{IP: net.ParseIP("172.16.0.163"), Prefix: 24}, {IP: net.ParseIP("172.16.0.77"), Prefix: 24}}, nil
+		return []liveAddr{{IP: net.ParseIP("192.168.10.163"), Prefix: 24}, {IP: net.ParseIP("192.168.10.77"), Prefix: 24}}, nil
 	}
 	s := &Service{}
 	err := s.teamMgmtUplinkNetplan("vSwitch0", "eno1", "bond0", "balance-alb", "", []string{"eno1", "eno2"})
-	if err == nil || !strings.Contains(err.Error(), "172.16.0.77/24") {
+	if err == nil || !strings.Contains(err.Error(), "192.168.10.77/24") {
 		t.Fatalf("want a refusal naming the unconfigured address, got %v", err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != staticMgmtNetplan {
