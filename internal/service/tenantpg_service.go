@@ -260,6 +260,9 @@ func (s *Service) DeleteTenantPortGroup(p *Principal, id int64, ip string) error
 	if pg.VRouterID != 0 {
 		return fmt.Errorf("this port group is attached to router %q — detach it first", pg.VRouterName)
 	}
+	if vr := s.routerLegOn(pg.NetworkID); vr != "" {
+		return fmt.Errorf("router %q has an interface on this port group — detach it from the router first", vr)
+	}
 	if pg.VMs > 0 {
 		return fmt.Errorf("%d instance(s) are still attached to this port group — move or delete them first", pg.VMs)
 	}

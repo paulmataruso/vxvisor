@@ -21,7 +21,10 @@ func TestRenderFirewallZBFW(t *testing.T) {
 			{From: "App", To: "DB", Action: "deny", Proto: "any"},
 		},
 	}
-	out := RenderFirewall(VRouter{}, legs, fw)
+	out, err := RenderFirewall(VRouter{}, legs, fw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Log("\n" + out)
 	must := []string{
 		"table inet vdxfw {",
@@ -40,8 +43,21 @@ func TestRenderFirewallZBFW(t *testing.T) {
 		}
 	}
 	// disabled → empty
-	if RenderFirewall(VRouter{}, legs, VRFirewall{Enabled: false}) != "" {
+	if off, err := RenderFirewall(VRouter{}, legs, VRFirewall{Enabled: false}); off != "" || err != nil {
 		t.Error("disabled firewall should render empty")
+	}
+	// A value that isn't one token never reaches the ruleset (sink backstop).
+	for _, pol := range []VRPolicy{
+		{From: "App", To: "DB", Action: "allow", Proto: "tcp", DPort: "80\n}\ntable inet x {"},
+		{From: "App", To: "DB", Action: "allow", Src: "10.0.0.0/8 accept\n"},
+		{From: "App", To: "DB", Action: "allow", Dst: "1.2.3.4 drop"},
+		{From: "App", To: "DB", Action: "accept; flush ruleset"},
+	} {
+		inj := fw
+		inj.Policies = []VRPolicy{pol}
+		if out, err := RenderFirewall(VRouter{}, legs, inj); err == nil || out != "" {
+			t.Errorf("policy %+v rendered:\n%s", pol, out)
+		}
 	}
 	// validation
 	bad := VRPolicy{From: "App", To: "DB", Action: "allow", Proto: "tcp", DPort: "99999"}

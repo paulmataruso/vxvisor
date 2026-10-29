@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/routing"
 )
 
 // netnsBackend runs a vRouter as a Linux network namespace with its own FRR
@@ -115,14 +116,23 @@ func netnsIfacePresent(ns, iface string) bool {
 // A leg that is only half-applied (peer moved but not renamed, or a stale pair)
 // is torn down and rebuilt clean: deleting the host end removes the veth pair
 // wherever its peer landed, and we also clear any stale un-renamed peer in the ns.
+//
+// A wired leg is still reconciled: its host end must be a port of the leg's
+// bridge before its VLAN is set. If that bridge was deleted and re-created the
+// port fell off it; re-enslaving heals that, and a bridge that is gone yields a
+// clear error instead of a VLAN failure on a non-port (which used to fail every
+// later change on the router with an opaque RTNETLINK message).
 func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 	for _, l := range legs {
-		host := "vrh" + strconv.FormatInt(vr.ID, 10) + "e" + strconv.Itoa(l.Idx)
+		host := legHostVeth(vr, l)
 		peer := host + "p"
 		if len(host) > 15 || len(peer) > 15 {
 			return fmt.Errorf("veth name %q too long", host)
 		}
 		if netnsIfacePresent(vr.NetnsName, l.IfaceName) {
+			if err := relinkLeg(host, l); err != nil {
+				return err
+			}
 			if err := legAccessVlan(host, l); err != nil {
 				return err
 			}
@@ -150,6 +160,47 @@ func (netnsBackend) ApplyLegs(vr VRouter, legs []Leg) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// legHostVeth is the host-side veth end of a netns leg.
+func legHostVeth(vr VRouter, l Leg) string {
+	return "vrh" + strconv.FormatInt(vr.ID, 10) + "e" + strconv.Itoa(l.Idx)
+}
+
+// linkMaster returns the bridge an interface is enslaved to ("" if none).
+func linkMaster(iface string) string {
+	t, err := os.Readlink("/sys/class/net/" + iface + "/master")
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(t)
+}
+
+// relinkLeg puts a wired leg's host end back on its bridge if it fell off.
+func relinkLeg(host string, l Leg) error {
+	if l.Bridge == "" || linkMaster(host) == l.Bridge {
+		return nil
+	}
+	if !netdrv.IfaceExists(l.Bridge) {
+		return fmt.Errorf("interface %s: its network's bridge %s no longer exists — detach this interface from the router", l.IfaceName, l.Bridge)
+	}
+	if err := netdrv.EnslaveToBridge(host, l.Bridge); err != nil {
+		return fmt.Errorf("interface %s: re-attach to %s: %w", l.IfaceName, l.Bridge, err)
+	}
+	return nil
+}
+
+// RemoveLeg stops the leg's dnsmasq and deletes its veth pair: deleting the
+// in-namespace end removes the host end too, so the bridge is untouched.
+func (b netnsBackend) RemoveLeg(vr VRouter, l Leg) error {
+	off := l
+	off.DHCP = false
+	_ = b.SetDHCP(vr, off)
+	if vr.NetnsName != "" && l.IfaceName != "" {
+		netdrv.NetnsDelLink(vr.NetnsName, l.IfaceName)
+	}
+	netdrv.DeleteLink(legHostVeth(vr, l)) // a half-applied pair whose ns end never got renamed
 	return nil
 }
 
@@ -226,6 +277,9 @@ func (b netnsBackend) PushFirewall(vr VRouter, ruleset string) error {
 }
 
 func (netnsBackend) SetDHCP(vr VRouter, leg Leg) error {
+	if routing.ValidIface(leg.IfaceName) != nil {
+		return fmt.Errorf("DHCP: invalid interface name %q", leg.IfaceName)
+	}
 	pid := filepath.Join("/run", "vdx-vrouter-"+strconv.FormatInt(vr.ID, 10)+"-dnsmasq-"+leg.IfaceName+".pid")
 	// Stop any existing instance for this leg.
 	if b, err := os.ReadFile(pid); err == nil {
@@ -235,13 +289,17 @@ func (netnsBackend) SetDHCP(vr VRouter, leg Leg) error {
 	if !leg.DHCP {
 		return nil
 	}
+	frag, err := DnsmasqConf(leg)
+	if err != nil {
+		return err
+	}
 	lease := filepath.Join(nsStateDir(vr), "dnsmasq-"+leg.IfaceName+".leases")
 	confPath := filepath.Join(nsStateDir(vr), "dnsmasq-"+leg.IfaceName+".conf")
-	conf := DnsmasqConf(leg) + "dhcp-leasefile=" + lease + "\npid-file=" + pid + "\n"
+	conf := frag + "dhcp-leasefile=" + lease + "\npid-file=" + pid + "\n"
 	if err := os.WriteFile(confPath, []byte(conf), 0o644); err != nil {
 		return err
 	}
-	_, err := nsrun(10*time.Second, "ip", "netns", "exec", vr.NetnsName, "dnsmasq", "-C", confPath)
+	_, err = nsrun(10*time.Second, "ip", "netns", "exec", vr.NetnsName, "dnsmasq", "-C", confPath)
 	return err
 }
 

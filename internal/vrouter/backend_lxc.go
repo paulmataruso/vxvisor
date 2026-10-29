@@ -8,6 +8,7 @@ import (
 
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
+	"vdxclone/internal/routing"
 )
 
 // lxcBackend runs a vRouter as a privileged LXC container with its own FRR.
@@ -16,8 +17,8 @@ import (
 // re-wired to the real transit/internal legs.
 type lxcBackend struct{}
 
-func (lxcBackend) Kind() string     { return RuntimeLXC }
-func (lxcBackend) available() bool  { return lxc.Available() }
+func (lxcBackend) Kind() string    { return RuntimeLXC }
+func (lxcBackend) available() bool { return lxc.Available() }
 
 // Provision creates the container on lxcbr0, installs FRR + dnsmasq from the
 // distro, enables the FRR daemons, and leaves it stopped.
@@ -201,11 +202,18 @@ func (b lxcBackend) ensureNft(vr VRouter) error {
 // SetDHCP writes a per-leg dnsmasq config into the container and (re)starts
 // dnsmasq. A leg with DHCP off removes its config.
 func (b lxcBackend) SetDHCP(vr VRouter, leg Leg) error {
+	if routing.ValidIface(leg.IfaceName) != nil {
+		return fmt.Errorf("DHCP: invalid interface name %q", leg.IfaceName)
+	}
 	rel := "/etc/dnsmasq.d/vdx-" + leg.IfaceName + ".conf"
 	if !leg.DHCP {
 		_ = lxc.WriteRootfsFile(vr.ContainerName, vr.LxcPath, rel, []byte("# disabled\n"), 0o644)
 	} else {
-		if err := lxc.WriteRootfsFile(vr.ContainerName, vr.LxcPath, rel, []byte(DnsmasqConf(leg)), 0o644); err != nil {
+		frag, err := DnsmasqConf(leg)
+		if err != nil {
+			return err
+		}
+		if err := lxc.WriteRootfsFile(vr.ContainerName, vr.LxcPath, rel, []byte(frag), 0o644); err != nil {
 			return err
 		}
 	}
@@ -224,6 +232,19 @@ func (b lxcBackend) SetDHCP(vr VRouter, leg Leg) error {
 	if _, err := lxc.AttachRun(vr.ContainerName, vr.LxcPath, 30*time.Second,
 		"sh", "-c", "systemctl enable --now dnsmasq 2>/dev/null; systemctl restart dnsmasq"); err != nil {
 		return fmt.Errorf("start dnsmasq in container (check the DHCP range, e.g. 10.60.0.100,10.60.0.200): %w", err)
+	}
+	return nil
+}
+
+// RemoveLeg turns the leg's DHCP off and, in a running container, deletes the
+// interface (removing the veth pair, so the host bridge keeps nothing of it).
+// A stopped container just loses the leg from its config on the next ApplyLegs.
+func (b lxcBackend) RemoveLeg(vr VRouter, l Leg) error {
+	off := l
+	off.DHCP = false
+	_ = b.SetDHCP(vr, off)
+	if st, _ := b.running(vr); st && routing.ValidIface(l.IfaceName) == nil {
+		_, _ = lxc.AttachRun(vr.ContainerName, vr.LxcPath, 10*time.Second, "ip", "link", "del", l.IfaceName)
 	}
 	return nil
 }

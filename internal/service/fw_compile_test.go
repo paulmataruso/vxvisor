@@ -41,7 +41,7 @@ func TestCompileNorthSouth_WholePGToExternal(t *testing.T) {
 	if len(fw.Policies) != 1 {
 		t.Fatalf("expected 1 compiled policy, got %d: %+v", len(fw.Policies), fw.Policies)
 	}
-	out := vrouter.RenderFirewall(vrouter.VRouter{}, legs, fw)
+	out := renderFW(t, legs, fw)
 	for _, want := range []string{
 		"table inet vdxfw {",
 		"policy drop;",
@@ -69,7 +69,7 @@ func TestCompileNorthSouth_NoRulesStaysOpen(t *testing.T) {
 	if fw.Enabled {
 		t.Fatal("expected disabled firewall (no policy applies to this vRouter)")
 	}
-	if out := vrouter.RenderFirewall(vrouter.VRouter{}, legs, fw); out != "" {
+	if out := renderFW(t, legs, fw); out != "" {
 		t.Errorf("expected empty ruleset, got:\n%s", out)
 	}
 }
@@ -86,7 +86,7 @@ func TestCompileNorthSouth_SubsetNarrowsSource(t *testing.T) {
 		{Idx: 1, Kind: vrouter.LegInternal, IfaceName: "eth1", NetworkID: 1},
 	}
 	fw := compileVRouterFW(f, testMaps(), legs)
-	out := vrouter.RenderFirewall(vrouter.VRouter{}, legs, fw)
+	out := renderFW(t, legs, fw)
 	if !strings.Contains(out, "ether saddr "+macA1) {
 		t.Errorf("expected per-MAC source narrowing for %s\n---\n%s", macA1, out)
 	}
@@ -104,7 +104,7 @@ func TestCompileNorthSouth_FromVM(t *testing.T) {
 		{Idx: 0, Kind: vrouter.LegTransit, IfaceName: "eth0"},
 		{Idx: 1, Kind: vrouter.LegInternal, IfaceName: "eth1", NetworkID: 1},
 	}
-	out := vrouter.RenderFirewall(vrouter.VRouter{}, legs, compileVRouterFW(f, testMaps(), legs))
+	out := renderFW(t, legs, compileVRouterFW(f, testMaps(), legs))
 	if !strings.Contains(out, "ether saddr "+macA2) {
 		t.Errorf("expected source narrowed to %s\n---\n%s", macA2, out)
 	}
@@ -168,4 +168,15 @@ func TestCompileEastWest_CrossSegmentSkipped(t *testing.T) {
 	if _, pols := compileNetEW(f, testMaps(), 2); len(pols) != 0 {
 		t.Errorf("net 2 should have no policy (ga has no members there), got %d", len(pols))
 	}
+}
+
+// renderFW renders a compiled gateway firewall, failing the test on a render
+// error (a compiled policy must always be renderable).
+func renderFW(t *testing.T, legs []vrouter.Leg, fw vrouter.VRFirewall) string {
+	t.Helper()
+	out, err := vrouter.RenderFirewall(vrouter.VRouter{}, legs, fw)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	return out
 }

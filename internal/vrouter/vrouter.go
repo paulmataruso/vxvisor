@@ -112,7 +112,7 @@ func RenderEdgeNAT(legs []Leg) string {
 	b.WriteString("table ip " + NATTable + " {}\ndelete table ip " + NATTable + "\n")
 	var out []string
 	for _, l := range legs {
-		if l.Kind == LegUplink && l.SNAT && l.IfaceName != "" {
+		if l.Kind == LegUplink && l.SNAT && routing.ValidIface(l.IfaceName) == nil {
 			out = append(out, `    oifname "`+l.IfaceName+`" masquerade`)
 		}
 	}
@@ -147,6 +147,11 @@ type Backend interface {
 	PushFirewall(vr VRouter, ruleset string) error
 	// SetDHCP (re)configures dnsmasq for an internal leg inside the runtime.
 	SetDHCP(vr VRouter, leg Leg) error
+	// RemoveLeg takes one leg out of a live runtime: stops its DHCP server and
+	// deletes its interface (the veth pair), leaving the bridge it sat on alone.
+	// The caller then drops the leg row and re-applies (ApplyLegs/PushFRR).
+	// Best effort: a runtime that isn't up has nothing to remove.
+	RemoveLeg(vr VRouter, leg Leg) error
 	// Status returns the runtime's live routing state (state, route table, BGP
 	// summary, OSPF neighbors). It must use the runtime's own vtysh (lxc-attach /
 	// vtysh -N), never host vtysh.
@@ -205,7 +210,7 @@ func RenderForVRouter(vr VRouter, legs []Leg, cfg routing.Config) (string, error
 	if cfg.FRRVersion == "" {
 		cfg.FRRVersion = FRRVersionFor(vr)
 	}
-	cfg.Prefixes = cfg.Prefixes[:0]
+	cfg.Prefixes = nil // never [:0] — that would overwrite the caller's backing array
 	for _, l := range legs {
 		if l.IfaceName == "" || l.CIDR == "" {
 			continue
@@ -242,13 +247,34 @@ func FRRVersionFor(vr VRouter) string { return "10.5" }
 // serves DHCP on the leg interface only, hands out the vRouter leg IP as the
 // gateway (option 3) and, if set, DNS servers (option 6). The range accepts
 // either "start,end" or a friendlier "start-N" shorthand on the last octet.
-func DnsmasqConf(leg Leg) string {
+//
+// dnsmasq runs as root and a config line can name a script to run, so every
+// value written here must be a single token of the expected shape: it refuses
+// (writes nothing) otherwise. The service layer checks the same first.
+func DnsmasqConf(leg Leg) (string, error) {
+	if err := routing.ValidIface(leg.IfaceName); err != nil {
+		return "", fmt.Errorf("DHCP on leg: %w", err)
+	}
+	if err := routing.ValidIfaceAddr(leg.CIDR); err != nil {
+		return "", fmt.Errorf("DHCP on %s: gateway %w", leg.IfaceName, err)
+	}
+	rng := ""
+	if strings.TrimSpace(leg.DHCPRange) != "" {
+		start, end, err := ParseDHCPRange(leg.DHCPRange)
+		if err != nil {
+			return "", fmt.Errorf("DHCP on %s: %w", leg.IfaceName, err)
+		}
+		rng = start.String() + "," + end.String()
+	}
+	dns, err := NormalizeDNS(leg.DHCPDNS)
+	if err != nil {
+		return "", fmt.Errorf("DHCP on %s: %w", leg.IfaceName, err)
+	}
 	var b strings.Builder
 	b.WriteString("interface=" + leg.IfaceName + "\n")
 	b.WriteString("bind-interfaces\n")
 	b.WriteString("except-interface=lo\n")
 	gw, mask := splitCIDR(leg.CIDR)
-	rng := normalizeRange(leg.DHCPRange)
 	if rng != "" {
 		if mask != "" {
 			b.WriteString("dhcp-range=" + rng + "," + mask + ",12h\n")
@@ -259,14 +285,65 @@ func DnsmasqConf(leg Leg) string {
 	if gw != "" {
 		b.WriteString("dhcp-option=3," + gw + "\n") // default gateway = the vRouter leg IP
 	}
-	if dns := strings.TrimSpace(leg.DHCPDNS); dns != "" {
+	if dns != "" {
 		b.WriteString("dhcp-option=6," + dns + "\n") // DNS servers
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // NormalizeDHCPRange is the exported form of normalizeRange for validation.
 func NormalizeDHCPRange(r string) string { return normalizeRange(r) }
+
+// ParseDHCPRange parses a DHCP range ("start,end", or the "A.B.C.X-Y"
+// shorthand) into two IPv4 addresses, start ≤ end.
+func ParseDHCPRange(r string) (start, end net.IP, err error) {
+	bad := fmt.Errorf("DHCP range must be start,end (e.g. 10.60.0.100,10.60.0.200) — got %q", strings.TrimSpace(r))
+	parts := strings.Split(normalizeRange(r), ",")
+	if len(parts) != 2 {
+		return nil, nil, bad
+	}
+	a, b := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if !routing.IsIPv4(a) || !routing.IsIPv4(b) {
+		return nil, nil, bad
+	}
+	start, end = net.ParseIP(a).To4(), net.ParseIP(b).To4()
+	if bytesCompare(start, end) > 0 {
+		return nil, nil, fmt.Errorf("DHCP range %s,%s ends before it starts", a, b)
+	}
+	return start, end, nil
+}
+
+func bytesCompare(a, b net.IP) int {
+	for i := range a {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
+}
+
+// NormalizeDNS checks a DHCP DNS-server list ("1.1.1.1,8.8.8.8"; spaces around
+// the commas are fine) and returns dnsmasq's comma-separated form.
+func NormalizeDNS(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	var out []string
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if !routing.IsIPv4(f) {
+			return "", fmt.Errorf("DNS server %q must be an IPv4 address (e.g. 1.1.1.1)", f)
+		}
+		out = append(out, f)
+	}
+	if len(out) > 8 {
+		return "", fmt.Errorf("at most 8 DNS servers can be handed out")
+	}
+	return strings.Join(out, ","), nil
+}
 
 // normalizeRange turns a friendly "A.B.C.X-Y" into dnsmasq's "A.B.C.X,A.B.C.Y";
 // a value already containing a comma is returned trimmed.
