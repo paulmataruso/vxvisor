@@ -1,0 +1,145 @@
+{
+  "vm": [
+    {
+      "actions": {
+        "link": [
+          {
+            "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/shutdown",
+            "rel": "shutdown"
+          },
+          {
+            "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/start",
+            "rel": "start"
+          },
+          {
+            "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/stop",
+            "rel": "stop"
+          },
+          {
+            "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/poweroff",
+            "rel": "poweroff"
+          },
+          {
+            "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/backups",
+            "rel": "backups"
+          }
+        ]
+      },
+      "bios": {
+        "boot_menu": {
+          "enabled": "false"
+        },
+        "type": "q35_ovmf"
+      },
+      "cluster": {
+        "href": "/ovirt-engine/api/clusters/365be992-9ad1-5660-84a0-6eeea1f40ecb",
+        "id": "365be992-9ad1-5660-84a0-6eeea1f40ecb"
+      },
+      "comment": "",
+      "cpu": {
+        "architecture": "x86_64",
+        "topology": {
+          "cores": "1",
+          "sockets": "2",
+          "threads": "1"
+        }
+      },
+      "creation_time": 1790856000000,
+      "delete_protected": "false",
+      "description": "",
+      "display": {
+        "monitors": "1",
+        "type": "vnc"
+      },
+      "high_availability": {
+        "enabled": "false",
+        "priority": "0"
+      },
+      "host": {
+        "href": "/ovirt-engine/api/hosts/0184242a-c51d-5aee-a6ce-949dc23f39d5",
+        "id": "0184242a-c51d-5aee-a6ce-949dc23f39d5"
+      },
+      "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111",
+      "id": "11111111-1111-4111-8111-111111111111",
+      "initialization": {
+        "configuration": {
+          "data": "\u003c?xml version=\"1.0\" encoding=\"UTF-8\"?\u003e\u003covf:Envelope xmlns:ovf=\"http://schemas.dmtf.org/ovf/envelope/1/\" xmlns:rasd=\"http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData\" xmlns:vssd=\"http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:vxvisor=\"urn:vxvisor:ovf:1\" ovf:version=\"4.4.0.0\"\u003e\u003cReferences\u003e\u003cFile ovf:href=\"5547fbde-8efa-5cce-840f-b4999519257e\" ovf:id=\"5547fbde-8efa-5cce-840f-b4999519257e\" ovf:size=\"10737418240\" ovf:description=\"web01_disk0\"/\u003e\u003c/References\u003e\u003cSection xsi:type=\"ovf:DiskSection_Type\"\u003e\u003cInfo\u003eList of Virtual Disks\u003c/Info\u003e\u003cDisk ovf:diskId=\"5547fbde-8efa-5cce-840f-b4999519257e\" ovf:size=\"10\" ovf:actual_size=\"3\" ovf:fileRef=\"5547fbde-8efa-5cce-840f-b4999519257e\" ovf:volume-format=\"COW\" ovf:volume-type=\"Sparse\" ovf:disk-interface=\"VirtIO\" ovf:boot=\"true\" ovf:disk-alias=\"web01_disk0\"/\u003e\u003c/Section\u003e\u003cContent ovf:id=\"out\" xsi:type=\"ovf:VirtualSystem_Type\"\u003e\u003cName\u003eweb01\u003c/Name\u003e\u003cDescription\u003e\u003c/Description\u003e\u003cCreationDate\u003e2026/10/01 12:00:00\u003c/CreationDate\u003e\u003cBiosType\u003e2\u003c/BiosType\u003e\u003cClusterCompatibilityVersion\u003e4.7\u003c/ClusterCompatibilityVersion\u003e\u003cvxvisor:Instance vxvisor:id=\"11111111-1111-4111-8111-111111111111\" vxvisor:org_id=\"1\" vxvisor:firmware=\"uefi\" vxvisor:secure_boot=\"false\" vxvisor:machine=\"q35\" vxvisor:os_type=\"linux\" vxvisor:disk_bus=\"virtio-blk\" vxvisor:nic_model=\"virtio\" vxvisor:vga=\"qxl\" vxvisor:guest_agent=\"true\" vxvisor:tpm=\"false\" vxvisor:network_id=\"5\" vxvisor:mac=\"52:54:00:12:34:56\"/\u003e\u003cSection ovf:id=\"11111111-1111-4111-8111-111111111111\" ovf:required=\"false\" xsi:type=\"ovf:OperatingSystemSection_Type\"\u003e\u003cInfo\u003eGuest Operating System\u003c/Info\u003e\u003cDescription\u003eother_linux\u003c/Description\u003e\u003c/Section\u003e\u003cSection xsi:type=\"ovf:VirtualHardwareSection_Type\"\u003e\u003cInfo\u003e2 CPU, 2048 Memory\u003c/Info\u003e\u003cSystem\u003e\u003cvssd:VirtualSystemType\u003eENGINE 4.4.0.0\u003c/vssd:VirtualSystemType\u003e\u003c/System\u003e\u003cItem\u003e\u003crasd:Caption\u003e2 virtual cpu\u003c/rasd:Caption\u003e\u003crasd:Description\u003eNumber of virtual CPU\u003c/rasd:Description\u003e\u003crasd:InstanceId\u003e1\u003c/rasd:InstanceId\u003e\u003crasd:ResourceType\u003e3\u003c/rasd:ResourceType\u003e\u003crasd:num_of_sockets\u003e2\u003c/rasd:num_of_sockets\u003e\u003crasd:cpu_per_socket\u003e1\u003c/rasd:cpu_per_socket\u003e\u003crasd:threads_per_cpu\u003e1\u003c/rasd:threads_per_cpu\u003e\u003crasd:VirtualQuantity\u003e2\u003c/rasd:VirtualQuantity\u003e\u003c/Item\u003e\u003cItem\u003e\u003crasd:Caption\u003e2048 MB of memory\u003c/rasd:Caption\u003e\u003crasd:Description\u003eMemory Size\u003c/rasd:Description\u003e\u003crasd:InstanceId\u003e2\u003c/rasd:InstanceId\u003e\u003crasd:ResourceType\u003e4\u003c/rasd:ResourceType\u003e\u003crasd:AllocationUnits\u003eMegaBytes\u003c/rasd:AllocationUnits\u003e\u003crasd:VirtualQuantity\u003e2048\u003c/rasd:VirtualQuantity\u003e\u003c/Item\u003e\u003cItem\u003e\u003crasd:Caption\u003eweb01_disk0\u003c/rasd:Caption\u003e\u003crasd:InstanceId\u003e5547fbde-8efa-5cce-840f-b4999519257e\u003c/rasd:InstanceId\u003e\u003crasd:ResourceType\u003e17\u003c/rasd:ResourceType\u003e\u003crasd:HostResource\u003e5547fbde-8efa-5cce-840f-b4999519257e\u003c/rasd:HostResource\u003e\u003crasd:Parent\u003e00000000-0000-0000-0000-000000000000\u003c/rasd:Parent\u003e\u003crasd:Template\u003e00000000-0000-0000-0000-000000000000\u003c/rasd:Template\u003e\u003crasd:StorageId\u003e63c5c75c-0406-5d79-a71f-b375d39dc6fc\u003c/rasd:StorageId\u003e\u003crasd:StoragePoolId\u003e4ee3fdcb-c88c-539f-acfe-3ed7e23f935b\u003c/rasd:StoragePoolId\u003e\u003cBootOrder\u003e1\u003c/BootOrder\u003e\u003cIsReadOnly\u003efalse\u003c/IsReadOnly\u003e\u003cAlias\u003eweb01_disk0\u003c/Alias\u003e\u003c/Item\u003e\u003cItem\u003e\u003crasd:Caption\u003eEthernet adapter on 5\u003c/rasd:Caption\u003e\u003crasd:InstanceId\u003e2b2772c5-8242-568e-a7ea-36c65349141e\u003c/rasd:InstanceId\u003e\u003crasd:ResourceType\u003e10\u003c/rasd:ResourceType\u003e\u003crasd:OtherResourceType\u003e5\u003c/rasd:OtherResourceType\u003e\u003crasd:ResourceSubType\u003e3\u003c/rasd:ResourceSubType\u003e\u003crasd:Connection\u003e5\u003c/rasd:Connection\u003e\u003crasd:Linked\u003etrue\u003c/rasd:Linked\u003e\u003crasd:Name\u003enic1\u003c/rasd:Name\u003e\u003crasd:MACAddress\u003e52:54:00:12:34:56\u003c/rasd:MACAddress\u003e\u003crasd:speed\u003e10000\u003c/rasd:speed\u003e\u003c/Item\u003e\u003c/Section\u003e\u003c/Content\u003e\u003c/ovf:Envelope\u003e",
+          "type": "ovf"
+        }
+      },
+      "io": {
+        "threads": "1"
+      },
+      "link": [
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/diskattachments",
+          "rel": "diskattachments"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/nics",
+          "rel": "nics"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/snapshots",
+          "rel": "snapshots"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/backups",
+          "rel": "backups"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/checkpoints",
+          "rel": "checkpoints"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/reporteddevices",
+          "rel": "reporteddevices"
+        },
+        {
+          "href": "/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/tags",
+          "rel": "tags"
+        }
+      ],
+      "memory": "2147483648",
+      "memory_policy": {
+        "ballooning": "true",
+        "guaranteed": "2147483648",
+        "max": "2147483648"
+      },
+      "name": "web01",
+      "next_run_configuration_exists": "false",
+      "origin": "ovirt",
+      "original_template": {
+        "href": "/ovirt-engine/api/templates/00000000-0000-0000-0000-000000000000",
+        "id": "00000000-0000-0000-0000-000000000000"
+      },
+      "os": {
+        "boot": {
+          "devices": {
+            "device": [
+              "hd"
+            ]
+          }
+        },
+        "type": "other_linux"
+      },
+      "placement_policy": {
+        "affinity": "migratable"
+      },
+      "start_paused": "false",
+      "start_time": 1790856000000,
+      "stateless": "false",
+      "status": "up",
+      "storage_error_resume_behaviour": "auto_resume",
+      "template": {
+        "href": "/ovirt-engine/api/templates/00000000-0000-0000-0000-000000000000",
+        "id": "00000000-0000-0000-0000-000000000000"
+      },
+      "tpm_enabled": "false",
+      "type": "server",
+      "usb": {
+        "enabled": "false"
+      }
+    }
+  ]
+}

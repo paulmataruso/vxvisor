@@ -1,0 +1,45 @@
+{
+  "cluster": [
+    {
+      "ballooning_enabled": "true",
+      "bios_type": "q35_ovmf",
+      "cpu": {
+        "architecture": "x86_64",
+        "type": "Host CPU"
+      },
+      "data_center": {
+        "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+        "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b"
+      },
+      "description": "",
+      "error_handling": {
+        "on_error": "migrate"
+      },
+      "firewall_type": "firewalld",
+      "firewall_type_iptables": "false",
+      "gluster_service": "false",
+      "href": "/ovirt-engine/api/clusters/365be992-9ad1-5660-84a0-6eeea1f40ecb",
+      "id": "365be992-9ad1-5660-84a0-6eeea1f40ecb",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/clusters/365be992-9ad1-5660-84a0-6eeea1f40ecb/networks",
+          "rel": "networks"
+        }
+      ],
+      "memory_policy": {
+        "over_commit": {
+          "percent": "100"
+        }
+      },
+      "name": "node1",
+      "switch_type": "legacy",
+      "threads_as_cores": "false",
+      "trusted_service": "false",
+      "version": {
+        "major": "4",
+        "minor": "7"
+      },
+      "virt_service": "true"
+    }
+  ]
+}

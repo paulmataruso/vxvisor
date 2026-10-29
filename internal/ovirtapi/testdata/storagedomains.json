@@ -1,0 +1,80 @@
+{
+  "storage_domain": [
+    {
+      "available": "107374182400",
+      "backup": "false",
+      "block_size": "512",
+      "committed": "21474836480",
+      "critical_space_action_blocker": "5",
+      "data_centers": {
+        "data_center": [
+          {
+            "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+            "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b"
+          }
+        ]
+      },
+      "description": "VXVisor storage pool (dir)",
+      "discard_after_delete": "false",
+      "external_status": "ok",
+      "href": "/ovirt-engine/api/storagedomains/63c5c75c-0406-5d79-a71f-b375d39dc6fc",
+      "id": "63c5c75c-0406-5d79-a71f-b375d39dc6fc",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/storagedomains/63c5c75c-0406-5d79-a71f-b375d39dc6fc/disks",
+          "rel": "disks"
+        }
+      ],
+      "master": "true",
+      "name": "default",
+      "status": "active",
+      "storage": {
+        "type": "localfs"
+      },
+      "storage_format": "v5",
+      "supports_discard": "true",
+      "type": "data",
+      "used": "21474836480",
+      "warning_low_space_indicator": "10",
+      "wipe_after_delete": "false"
+    },
+    {
+      "available": "0",
+      "backup": "false",
+      "block_size": "512",
+      "committed": "0",
+      "critical_space_action_blocker": "5",
+      "data_centers": {
+        "data_center": [
+          {
+            "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+            "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b"
+          }
+        ]
+      },
+      "description": "VXVisor storage pool (rbd)",
+      "discard_after_delete": "false",
+      "external_status": "ok",
+      "href": "/ovirt-engine/api/storagedomains/4fd73dd2-84dd-53b7-b13a-2f6e76bf57aa",
+      "id": "4fd73dd2-84dd-53b7-b13a-2f6e76bf57aa",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/storagedomains/4fd73dd2-84dd-53b7-b13a-2f6e76bf57aa/disks",
+          "rel": "disks"
+        }
+      ],
+      "master": "false",
+      "name": "ceph",
+      "status": "active",
+      "storage": {
+        "type": "managed_block_storage"
+      },
+      "storage_format": "v5",
+      "supports_discard": "true",
+      "type": "data",
+      "used": "0",
+      "warning_low_space_indicator": "10",
+      "wipe_after_delete": "false"
+    }
+  ]
+}

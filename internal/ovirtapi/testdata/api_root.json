@@ -1,0 +1,99 @@
+{
+  "authenticated_user": {
+    "id": "42596960-166b-520b-9f38-22bc606a734c"
+  },
+  "effective_user": {
+    "id": "42596960-166b-520b-9f38-22bc606a734c"
+  },
+  "link": [
+    {
+      "href": "/ovirt-engine/api/clusters",
+      "rel": "clusters"
+    },
+    {
+      "href": "/ovirt-engine/api/datacenters",
+      "rel": "datacenters"
+    },
+    {
+      "href": "/ovirt-engine/api/disks",
+      "rel": "disks"
+    },
+    {
+      "href": "/ovirt-engine/api/hosts",
+      "rel": "hosts"
+    },
+    {
+      "href": "/ovirt-engine/api/imagetransfers",
+      "rel": "imagetransfers"
+    },
+    {
+      "href": "/ovirt-engine/api/networks",
+      "rel": "networks"
+    },
+    {
+      "href": "/ovirt-engine/api/storagedomains",
+      "rel": "storagedomains"
+    },
+    {
+      "href": "/ovirt-engine/api/tags",
+      "rel": "tags"
+    },
+    {
+      "href": "/ovirt-engine/api/vms",
+      "rel": "vms"
+    },
+    {
+      "href": "/ovirt-engine/api/vnicprofiles",
+      "rel": "vnicprofiles"
+    },
+    {
+      "href": "/ovirt-engine/api/vms?search={query}",
+      "rel": "vms/search"
+    },
+    {
+      "href": "/ovirt-engine/api/disks?search={query}",
+      "rel": "disks/search"
+    }
+  ],
+  "product_info": {
+    "instance_id": "5e1f0c2a-0000-4000-8000-000000000001",
+    "name": "VXVisor oVirt-compatible API",
+    "vendor": "VXVisor",
+    "version": {
+      "build": "0",
+      "full_version": "4.5.6-1.vxvisor",
+      "major": "4",
+      "minor": "5",
+      "revision": "6"
+    }
+  },
+  "special_objects": {
+    "blank_template": {
+      "href": "/ovirt-engine/api/templates/00000000-0000-0000-0000-000000000000",
+      "id": "00000000-0000-0000-0000-000000000000"
+    },
+    "root_tag": {
+      "href": "/ovirt-engine/api/tags/00000000-0000-0000-0000-000000000000",
+      "id": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "summary": {
+    "hosts": {
+      "active": "1",
+      "total": "1"
+    },
+    "storage_domains": {
+      "active": "2",
+      "total": "2"
+    },
+    "users": {
+      "active": "1",
+      "total": "1"
+    },
+    "vms": {
+      "active": "1",
+      "total": "1"
+    }
+  },
+  "time": 1790863200000
+}

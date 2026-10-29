@@ -1,0 +1,57 @@
+{
+  "network": [
+    {
+      "data_center": {
+        "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+        "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b"
+      },
+      "description": "VXVisor port group",
+      "display": "false",
+      "href": "/ovirt-engine/api/networks/3801ab65-d61a-5e6d-bb75-4c4962df61e2",
+      "id": "3801ab65-d61a-5e6d-bb75-4c4962df61e2",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/networks/3801ab65-d61a-5e6d-bb75-4c4962df61e2/vnicprofiles",
+          "rel": "vnicprofiles"
+        }
+      ],
+      "mtu": "0",
+      "name": "vxvisor-nat",
+      "required": "false",
+      "stp": "false",
+      "usages": {
+        "usage": [
+          "vm"
+        ]
+      }
+    },
+    {
+      "data_center": {
+        "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+        "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b"
+      },
+      "description": "VXVisor port group",
+      "display": "false",
+      "href": "/ovirt-engine/api/networks/573893a6-b506-5a74-85e1-c0562c6f3f42",
+      "id": "573893a6-b506-5a74-85e1-c0562c6f3f42",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/networks/573893a6-b506-5a74-85e1-c0562c6f3f42/vnicprofiles",
+          "rel": "vnicprofiles"
+        }
+      ],
+      "mtu": "0",
+      "name": "lan",
+      "required": "false",
+      "stp": "false",
+      "usages": {
+        "usage": [
+          "vm"
+        ]
+      },
+      "vlan": {
+        "id": "20"
+      }
+    }
+  ]
+}
