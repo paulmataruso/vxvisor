@@ -51,20 +51,34 @@ func TestConnectAndList(t *testing.T) {
 	}
 }
 
+// forbiddenOps are the source-mutating vSphere operation names. None may appear
+// in the package's non-test source — except the four the consented CBT warm
+// migration needs (cbtAllowedOps), and those only in cbtFile.
+var forbiddenOps = []string{
+	"PowerOff", "PowerOn", "Reset", "Suspend", "Standby",
+	"Reconfigure", "CreateSnapshot", "RemoveSnapshot", "RevertToSnapshot",
+	"MarkAsTemplate", "MarkAsVirtualMachine", "Consolidate",
+	"Relocate", "Migrate", "Clone", "Rename",
+	"ShutdownGuest", "RebootGuest", "StandbyGuest", "Upgrade",
+	"SetCustomValue", "CustomizeVM", ".Import(", "CreateVM",
+}
+
+// cbtFile is the ONE file allowed to change a source VM, and cbtAllowedOps the
+// only operations it may use (each behind a CBTConsent — see cbt_test.go).
+const cbtFile = "cbt.go"
+
+var cbtAllowedOps = map[string]bool{"Reconfigure": true, "CreateSnapshot": true, "RemoveSnapshot": true, "ShutdownGuest": true}
+
 // TestReadOnlyDiscipline enforces the hard safety requirement: the package must
 // only ever READ the source. It fails if any source-mutating vSphere operation
 // name appears in the non-test source — a whitelist-by-denylist guard so a future
 // edit can't accidentally (e.g.) call PowerOff or Reconfigure on a source VM.
+// The single exception is cbt.go (the opt-in, consented warm migration), which
+// may use only the four operations in cbtAllowedOps — never a power-off, revert,
+// disk merge, or anything else in the list.
 func TestReadOnlyDiscipline(t *testing.T) {
-	forbidden := []string{
-		"PowerOff", "PowerOn", "Reset", "Suspend", "Standby",
-		"Reconfigure", "CreateSnapshot", "RemoveSnapshot", "RevertToSnapshot",
-		"MarkAsTemplate", "MarkAsVirtualMachine", "Consolidate",
-		"Relocate", "Migrate", "Clone", "Rename",
-		"ShutdownGuest", "RebootGuest", "StandbyGuest", "Upgrade",
-		"SetCustomValue", "CustomizeVM", ".Import(", "CreateVM",
-	}
 	files, _ := filepath.Glob("*.go")
+	sawCBT := false
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -74,10 +88,17 @@ func TestReadOnlyDiscipline(t *testing.T) {
 			t.Fatal(err)
 		}
 		src := string(b)
-		for _, bad := range forbidden {
+		for _, bad := range forbiddenOps {
+			if f == cbtFile && cbtAllowedOps[bad] {
+				sawCBT = true
+				continue
+			}
 			if strings.Contains(src, bad) {
-				t.Errorf("%s contains forbidden source-mutating op %q — the vmware package must be read-only on the source", f, bad)
+				t.Errorf("%s contains forbidden source-mutating op %q — the vmware package must be read-only on the source (only %s may change a source, and only with consent)", f, bad, cbtFile)
 			}
 		}
+	}
+	if !sawCBT {
+		t.Errorf("%s not found — the allowlist above must name the real file", cbtFile)
 	}
 }

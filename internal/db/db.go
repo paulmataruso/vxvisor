@@ -1129,6 +1129,104 @@ ALTER TABLE net_vswitches ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
 -- ignores it (its containers queries use explicit column lists).
 ALTER TABLE containers ADD COLUMN network_id INTEGER NOT NULL DEFAULT 0;
 `},
+	{53, "vmware-cbt-import", `
+-- CBT warm migration from vCenter/ESXi (docs/CBT-IMPORT.md). The whole state
+-- machine lives here so a vdxd restart resumes or cleans up: which snapshots WE
+-- created on the source (so only those are ever removed), the CBT state we
+-- found (so it is put back), each disk's staging file and last applied change
+-- id. STRICTLY ADDITIVE: new tables only.
+--
+-- vmware_cbt_imports: one warm import. consent=1 is the operator's tick of
+-- "Use CBT (warm migration)" — the only thing that lets vdxd change the source.
+-- vc_pass_enc is the vCenter password sealed with the install key (encSeal),
+-- needed to resume/clean up after a restart; it is wiped when the import ends.
+-- cbt_orig: CBT as found before we touched it (-1 = not read yet, 0 off, 1 on).
+-- state: starting|base-copy|syncing|cutover|finishing|cleanup|done|cancelled|error;
+-- in 'cleanup', end_state is where it lands once cleanup succeeds.
+CREATE TABLE IF NOT EXISTS vmware_cbt_imports (
+    id             TEXT PRIMARY KEY,
+    org_id         INTEGER NOT NULL DEFAULT 0,
+    user_id        INTEGER NOT NULL DEFAULT 0,
+    vc_url         TEXT NOT NULL,
+    vc_host        TEXT NOT NULL,
+    vc_user        TEXT NOT NULL,
+    vc_pass_enc    TEXT NOT NULL DEFAULT '',
+    vc_insecure    INTEGER NOT NULL DEFAULT 0,
+    moid           TEXT NOT NULL,
+    vm_name        TEXT NOT NULL DEFAULT '',
+    consent        INTEGER NOT NULL DEFAULT 0,
+    cbt_orig       INTEGER NOT NULL DEFAULT -1,
+    cbt_enabled_by_us INTEGER NOT NULL DEFAULT 0,
+    state          TEXT NOT NULL DEFAULT 'starting',
+    end_state      TEXT NOT NULL DEFAULT '',
+    cancel_req     INTEGER NOT NULL DEFAULT 0,
+    step           TEXT NOT NULL DEFAULT '',
+    last_error     TEXT NOT NULL DEFAULT '',
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    os_type        TEXT NOT NULL DEFAULT 'linux',
+    target_pool_id INTEGER NOT NULL DEFAULT 0,
+    interval_sec   INTEGER NOT NULL DEFAULT 1800,
+    next_run_at    INTEGER NOT NULL DEFAULT 0,
+    last_sync_at   INTEGER NOT NULL DEFAULT 0,
+    passes         INTEGER NOT NULL DEFAULT 0,
+    snap_seq       INTEGER NOT NULL DEFAULT 0,
+    base_bytes     INTEGER NOT NULL DEFAULT 0,
+    shutdown_guest INTEGER NOT NULL DEFAULT 0,
+    result_image   TEXT NOT NULL DEFAULT '',
+    result_session TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at    TEXT NOT NULL DEFAULT ''
+);
+-- One row per source disk: its sparse raw staging file on this host and the
+-- CBT change id of the last snapshot whose changes are applied to it.
+CREATE TABLE IF NOT EXISTS vmware_cbt_disks (
+    import_id  TEXT NOT NULL REFERENCES vmware_cbt_imports(id),
+    device_key INTEGER NOT NULL,
+    idx        INTEGER NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    capacity   INTEGER NOT NULL,
+    staging    TEXT NOT NULL,
+    change_id  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (import_id, device_key)
+);
+-- Every snapshot vdxd creates on a source. The row is written BEFORE the create
+-- call (name only), the moref filled in when it returns — so even a crash in
+-- between leaves a record to find it by its unique vxvisor-cbt-* name. A row is
+-- never deleted; removed_at marks it gone. Nothing outside this table is ever
+-- removed from a source.
+CREATE TABLE IF NOT EXISTS vmware_cbt_snapshots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_id  TEXT NOT NULL REFERENCES vmware_cbt_imports(id),
+    moid       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    moref      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    removed_at INTEGER NOT NULL DEFAULT 0
+);
+-- One row per copy pass (base, delta, final): what it moved, for the UI.
+CREATE TABLE IF NOT EXISTS vmware_cbt_passes (
+    import_id   TEXT NOT NULL REFERENCES vmware_cbt_imports(id),
+    pass        INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    extents     INTEGER NOT NULL DEFAULT 0,
+    started_at  INTEGER NOT NULL DEFAULT 0,
+    finished_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (import_id, pass)
+);
+`},
+	{54, "vmware-cbt-import-unique", `
+-- Race backstops for the warm import (standalone indexes — an inline UNIQUE ...
+-- WHERE is a syntax error on modernc): at most one ACTIVE warm import per source
+-- VM, and snapshot names unique (a name is how a snapshot whose create was
+-- interrupted is found again). The tables are new in 53, so no existing rows
+-- can violate these. STRICTLY ADDITIVE.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cbt_active_vm ON vmware_cbt_imports(vc_host, moid)
+    WHERE state NOT IN ('done','cancelled','error');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cbt_snap_name ON vmware_cbt_snapshots(name);
+CREATE INDEX IF NOT EXISTS ix_cbt_snap_pending ON vmware_cbt_snapshots(import_id) WHERE removed_at = 0;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -228,4 +229,169 @@ func allocatedBytes(path string) int64 {
 // shell string.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// NBDServer is one nbdkit process serving a disk READ-ONLY on a private unix
+// socket, for vdxd's own NBD client (internal/nbd) to read from. Close stops it
+// and removes its directory (and with it the password file).
+type NBDServer struct {
+	cmd    *exec.Cmd
+	dir    string
+	sock   string
+	done   chan struct{}
+	err    error // nbdkit's exit status, valid once done is closed
+	stderr *lockedBuf
+}
+
+// Addr is the nbd.Dial address of the server ("unix:/path").
+func (s *NBDServer) Addr() string { return "unix:" + s.sock }
+
+// Close stops nbdkit (it holds the VDDK disk handle, which must be released
+// before the snapshot it reads can be removed) and removes its directory.
+func (s *NBDServer) Close() error {
+	if s == nil {
+		return nil
+	}
+	select {
+	case <-s.done:
+	default:
+		_ = s.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-s.done:
+		case <-time.After(30 * time.Second):
+			_ = s.cmd.Process.Kill()
+			<-s.done
+		}
+	}
+	return os.RemoveAll(s.dir)
+}
+
+// startNBDKit runs `nbdkit -r -f --exit-with-parent -U <sock> <plugin args>` in
+// a fresh private directory and waits for the socket. -r: the export is
+// read-only whatever the plugin; --exit-with-parent: a vdxd crash never leaves
+// an nbdkit holding a source disk open. setup may drop files (a password file)
+// into the directory before nbdkit starts, and returns the plugin arguments.
+func startNBDKit(ctx context.Context, setup func(dir string) ([]string, error)) (*NBDServer, error) {
+	dir, err := os.MkdirTemp("", "vdxnbd-")
+	if err != nil {
+		return nil, err
+	}
+	pluginArgs, err := setup(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	sock := filepath.Join(dir, "nbd.sock")
+	args := append([]string{"-r", "-f", "--exit-with-parent", "-U", sock}, pluginArgs...)
+	s := &NBDServer{cmd: exec.Command("nbdkit", args...), dir: dir, sock: sock, done: make(chan struct{}), stderr: &lockedBuf{}}
+	s.cmd.Stderr = s.stderr
+	if err := s.cmd.Start(); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("start nbdkit: %w", err)
+	}
+	go func() { s.err = s.cmd.Wait(); close(s.done) }()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		if _, err := os.Stat(sock); err == nil {
+			return s, nil
+		}
+		select {
+		case <-s.done:
+			_ = os.RemoveAll(dir)
+			return nil, fmt.Errorf("nbdkit exited before serving: %v: %s", s.err, s.stderr.tail(400))
+		case <-ctx.Done():
+			_ = s.Close()
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			_ = s.Close()
+			return nil, fmt.Errorf("nbdkit did not open its socket within 60s: %s", s.stderr.tail(400))
+		}
+	}
+}
+
+// Stderr returns the tail of nbdkit's diagnostics (for an error message).
+func (s *NBDServer) Stderr() string { return s.stderr.tail(400) }
+
+// VDDKDisk names one disk to serve through VDDK: the VM, the disk file as the
+// snapshot froze it, and the snapshot to read it at.
+type VDDKDisk struct {
+	LibDir   string
+	User     string
+	Pass     string
+	MOID     string
+	File     string // "[ds] dir/disk.vmdk"
+	Snapshot string // snapshot moref, e.g. "snapshot-123"
+}
+
+// ServeVDDKDisk starts nbdkit's VDDK plugin READ-ONLY for one disk on a private
+// unix socket. Reading a snapshot of a running VM is consistent: the snapshot's
+// disk file is frozen while the VM writes to the delta created above it.
+func (c *Client) ServeVDDKDisk(ctx context.Context, d VDDKDisk) (*NBDServer, error) {
+	if !VDDKAvailable() {
+		return nil, fmt.Errorf("the VDDK transport needs nbdkit + its VDDK plugin — not installed")
+	}
+	if strings.TrimSpace(d.LibDir) == "" {
+		return nil, fmt.Errorf("the VDDK library path is not set")
+	}
+	if d.Snapshot == "" {
+		return nil, fmt.Errorf("a warm-migration read needs a snapshot")
+	}
+	host := c.gc.Client.URL().Hostname()
+	tp, err := tlsThumbprint(host)
+	if err != nil {
+		return nil, fmt.Errorf("get %s SSL thumbprint for VDDK: %w", host, err)
+	}
+	return startNBDKit(ctx, func(dir string) ([]string, error) {
+		// Password via a 0600 file (password=+FILE), never on the argv.
+		pf := filepath.Join(dir, "pass")
+		if err := os.WriteFile(pf, []byte(d.Pass), 0o600); err != nil {
+			return nil, err
+		}
+		return []string{
+			"vddk",
+			"libdir=" + d.LibDir,
+			"server=" + host,
+			"user=" + d.User,
+			"password=+" + pf,
+			"thumbprint=" + tp,
+			"vm=moref=" + d.MOID,
+			"snapshot=" + d.Snapshot,
+			"file=" + d.File,
+			"transports=nbd:nbdssl",
+		}, nil
+	})
+}
+
+// ServeFile serves a local image READ-ONLY through nbdkit's file plugin. It
+// exists so the nbdkit + NBD-client read path can be exercised on a host
+// against a scratch image, without a vCenter.
+func ServeFile(ctx context.Context, path string) (*NBDServer, error) {
+	return startNBDKit(ctx, func(string) ([]string, error) { return []string{"file", "file=" + path}, nil })
+}
+
+// lockedBuf collects a child's stderr (capped) for error messages.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (w *lockedBuf) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.b.Len() < 64<<10 {
+		w.b.Write(p)
+	}
+	return len(p), nil
+}
+
+func (w *lockedBuf) tail(n int) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := strings.TrimSpace(w.b.String())
+	if len(s) > n {
+		s = s[len(s)-n:]
+	}
+	return s
 }
