@@ -1083,6 +1083,17 @@ ALTER TABLE vrouter_legs ADD COLUMN vlan_id INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE vrouter_legs ADD COLUMN upstream_gw TEXT NOT NULL DEFAULT '';
 ALTER TABLE vrouter_legs ADD COLUMN snat INTEGER NOT NULL DEFAULT 0;
 `},
+	{55, "container-portgroup", `
+-- LXC containers attach to a PORT GROUP the org owns (networks.id), like VMs,
+-- instead of a free-text host bridge from the request (which let a member put a
+-- container on the management bridge or another tenant's bridge, and inject
+-- lxc.* config keys). The bridge (+ VLAN) is resolved server-side from this row;
+-- containers.bridge stays as the resolved name for display/topology. 0 = the
+-- Default org's lxcbr0 NAT (or a legacy row created before this migration).
+-- STRICTLY ADDITIVE: one column with a constant default — an older binary
+-- ignores it (its containers queries use explicit column lists).
+ALTER TABLE containers ADD COLUMN network_id INTEGER NOT NULL DEFAULT 0;
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

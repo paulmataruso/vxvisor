@@ -14,7 +14,7 @@ import (
 // NetLeg is one virtual-router NIC: a veth whose host end lands on Bridge and
 // whose in-container name is pinned to Name (eth0, eth1, …) for deterministic
 // ordering. Used by the vRouter LXC backend; distinct from the single-NIC
-// container create path (applyConfig).
+// container create path (managedBlock).
 type NetLeg struct {
 	Bridge string
 	Name   string // in-container interface name, e.g. "eth0"
@@ -40,7 +40,7 @@ func RootfsPath(name, lxcpath string) string {
 
 // WriteLegs REWRITES the vdxd-managed block of a container config with N NIC
 // legs plus CPU/memory limits and lxc.start.auto so the container returns after
-// a host reboot. Unlike applyConfig (which appends a single net.0), this owns
+// a host reboot. Unlike managedBlock (which appends a single net.0), this owns
 // the whole managed block: it truncates everything from the marker onward and
 // rewrites it, so repeated calls (provision → swap to real legs) are idempotent.
 func WriteLegs(name, lxcpath string, legs []NetLeg, cpus, memMB int) error {
@@ -68,19 +68,17 @@ func WriteLegs(name, lxcpath string, legs []NetLeg, cpus, memMB int) error {
 		if l.Bridge == "" {
 			continue
 		}
-		p := "lxc.net." + strconv.Itoa(i)
-		fmt.Fprintf(&b, "%s.type = veth\n", p)
-		fmt.Fprintf(&b, "%s.link = %s\n", p, l.Bridge)
-		fmt.Fprintf(&b, "%s.veth.pair = %s\n", p, LegVethName(name, i))
-		name := l.Name
-		if name == "" {
-			name = "eth" + strconv.Itoa(i)
+		ifname := l.Name
+		if ifname == "" {
+			ifname = "eth" + strconv.Itoa(i)
 		}
-		fmt.Fprintf(&b, "%s.name = %s\n", p, name)
-		fmt.Fprintf(&b, "%s.flags = up\n", p)
-		if l.MAC != "" {
-			fmt.Fprintf(&b, "%s.hwaddr = %s\n", p, l.MAC)
+		// Validated rendering: bridge/ifname must be interface names, MAC a MAC,
+		// and no value may break out of its line (lxc.* injection backstop).
+		nic, err := nicLines(i, l.Bridge, LegVethName(name, i), ifname, l.MAC, 0, 0)
+		if err != nil {
+			return err
 		}
+		b.WriteString(nic)
 	}
 	if memMB > 0 {
 		fmt.Fprintf(&b, "lxc.cgroup2.memory.max = %d\n", int64(memMB)<<20)
@@ -92,18 +90,36 @@ func WriteLegs(name, lxcpath string, legs []NetLeg, cpus, memMB int) error {
 }
 
 // UpdateManaged rewrites the single-NIC container's vdxd-managed settings in
-// place — the NIC's bridge (lxc.net.0.link) and the CPU/memory cgroup limits —
-// preserving everything else (MAC, veth pair name, rootfs). Used by "edit
-// container". Keys not already present are appended inside the managed block.
-func UpdateManaged(name, lxcpath, bridge string, cpus, memMB int) error {
+// place — the NIC's bridge (lxc.net.0.link), its port group VLAN
+// (lxc.net.0.veth.vlan.id) and MTU (lxc.net.0.mtu), and the CPU/memory cgroup
+// limits — preserving everything else (MAC, veth pair name, rootfs). Used by
+// "edit container". A zero VLAN / MTU removes that key; an empty bridge leaves
+// the NIC alone. Keys not already present are appended.
+func UpdateManaged(name, lxcpath, bridge string, vlan, mtu, cpus, memMB int) error {
 	cfgPath := ConfigPath(name, lxcpath)
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return err
 	}
 	want := map[string]string{}
+	drop := map[string]bool{}
 	if bridge != "" {
+		// Same validation as a fresh create (interface name, VLAN/MTU ranges,
+		// single-line values) — the lxc.* injection backstop.
+		if _, err := nicLines(0, bridge, VethName(name), "", "", vlan, mtu); err != nil {
+			return err
+		}
 		want["lxc.net.0.link"] = "lxc.net.0.link = " + bridge
+		if vlan > 0 {
+			want["lxc.net.0.veth.vlan.id"] = "lxc.net.0.veth.vlan.id = " + strconv.Itoa(vlan)
+		} else {
+			drop["lxc.net.0.veth.vlan.id"] = true
+		}
+		if mtu > 0 {
+			want["lxc.net.0.mtu"] = "lxc.net.0.mtu = " + strconv.Itoa(mtu)
+		} else {
+			drop["lxc.net.0.mtu"] = true
+		}
 	}
 	if memMB > 0 {
 		want["lxc.cgroup2.memory.max"] = "lxc.cgroup2.memory.max = " + strconv.FormatInt(int64(memMB)<<20, 10)
@@ -111,24 +127,40 @@ func UpdateManaged(name, lxcpath, bridge string, cpus, memMB int) error {
 	if cpus > 0 {
 		want["lxc.cgroup2.cpuset.cpus"] = "lxc.cgroup2.cpuset.cpus = 0-" + strconv.Itoa(cpus-1)
 	}
-	lines := strings.Split(string(raw), "\n")
+	var lines []string
 	seen := map[string]bool{}
-	for i, l := range lines {
-		t := strings.TrimSpace(l)
-		for k, v := range want {
-			if strings.HasPrefix(t, k+" ") || strings.HasPrefix(t, k+"=") || t == k {
-				lines[i] = v
-				seen[k] = true
-			}
+	for _, l := range strings.Split(string(raw), "\n") {
+		k := configKey(l)
+		if drop[k] {
+			continue
 		}
+		if v, ok := want[k]; ok {
+			l = v
+			seen[k] = true
+		}
+		lines = append(lines, l)
 	}
 	// Append any key not already present (keep it inside the config; order is fine).
-	for k, v := range want {
-		if !seen[k] {
+	for _, k := range []string{"lxc.net.0.link", "lxc.net.0.veth.vlan.id", "lxc.net.0.mtu", "lxc.cgroup2.memory.max", "lxc.cgroup2.cpuset.cpus"} {
+		if v, ok := want[k]; ok && !seen[k] {
 			lines = append(lines, v)
 		}
 	}
 	return os.WriteFile(cfgPath, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// configKey returns the key of a "key = value" config line ("" for comments,
+// blanks and anything without '=').
+func configKey(line string) string {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "#") {
+		return ""
+	}
+	k, _, ok := strings.Cut(t, "=")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(k)
 }
 
 // AttachRun runs a command inside a (running) container via lxc-attach and

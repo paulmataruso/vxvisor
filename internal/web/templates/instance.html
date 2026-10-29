@@ -91,12 +91,13 @@
     <div class="si wide"><span class="si-l">Network</span>
       <form method="post" action="/sessions/{{$s.ID}}/network" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
-        <select name="network_id">
-          <option value="0"{{if eq $s.NetworkID 0}} selected{{end}}>default (NAT)</option>
+        <select name="network_id"{{if $.TenantOrg}} required{{end}}>
+          {{if $.TenantOrg}}{{if eq $s.NetworkID 0}}<option value="" selected disabled>— choose a port group —</option>{{end}}
+          {{else}}<option value="0"{{if eq $s.NetworkID 0}} selected{{end}}>default (NAT)</option>{{end}}
           {{range $.Networks}}<option value="{{.ID}}"{{if eq $s.NetworkID .ID}} selected{{end}}>{{.Name}}{{if .VLANID}} · VLAN {{.VLANID}}{{end}}</option>{{end}}
         </select>
         <button class="btn sm">Change</button>
-        <span class="muted" style="font-size:11px">moves live — no restart (to/from NAT needs a restart)</span>
+        <span class="muted" style="font-size:11px">{{if $.TenantOrg}}moves live — no restart (onto a smaller-MTU network applies on restart){{else}}moves live — no restart (to/from NAT needs a restart){{end}}</span>
       </form>
     </div>
     <div class="si wide"><span class="si-l">Features <span class="muted" style="font-weight:400;text-transform:none;letter-spacing:0">— toggle any; applies on next start</span></span>

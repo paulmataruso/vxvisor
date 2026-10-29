@@ -143,3 +143,31 @@ func TestLaunchReapsExitedChild(t *testing.T) {
 	data, _ := os.ReadFile(stat)
 	t.Fatalf("exited child %d was never reaped (zombie): %s", proc.Pid, data)
 }
+
+// TestArgsHostMTU: a port group MTU below 1500 (VXLAN) is advertised to the
+// guest on the virtio NIC; emulated NICs and the unset case get no host_mtu.
+func TestArgsHostMTU(t *testing.T) {
+	s := Spec{ID: "m", DiskPath: "/d", CPUs: 2, MemoryMB: 512, VNCPort: 5900,
+		TapName: "vdxtabc", HostMTU: 1450}
+	if a := strings.Join(s.Args(), " "); !strings.Contains(a, "virtio-net-pci,netdev=n0,packed=on,rx_queue_size=1024,mq=on,vectors=6,host_mtu=1450") {
+		t.Errorf("host_mtu missing on virtio NIC: %s", a)
+	}
+	s.NICModel = "e1000e"
+	if a := strings.Join(s.Args(), " "); strings.Contains(a, "host_mtu") {
+		t.Errorf("host_mtu on an emulated NIC: %s", a)
+	}
+	s.NICModel, s.HostMTU = "", 0
+	if a := strings.Join(s.Args(), " "); strings.Contains(a, "host_mtu") {
+		t.Errorf("unexpected host_mtu when unset: %s", a)
+	}
+}
+
+// TestArgsNoVNCPasswordInline: the migration-carried console password must never
+// reach the command line (only the 0600 secret file does).
+func TestArgsNoVNCPasswordInline(t *testing.T) {
+	s := Spec{ID: "p", DiskPath: "/d", CPUs: 1, MemoryMB: 512, VNCPort: 5900,
+		VNCPassword: "S3cretPw", VNCPwFile: "/run/p.vncpw"}
+	if a := strings.Join(s.Args(), " "); strings.Contains(a, "S3cretPw") {
+		t.Errorf("VNC password leaked onto the command line: %s", a)
+	}
+}

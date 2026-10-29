@@ -122,6 +122,7 @@ func cmdServe(cfgPath string) {
 	stg := storage.New(cfg, d)
 	net := netdrv.New(d)
 	mgr := session.NewManager(cfg, d)
+	mgr.StartSlirpGuard() // nft guard: user-mode guests can't reach host-loopback consoles
 	mc := metrics.NewCollector(d, cfg.Paths.DiskDir)
 	cl := cluster.New(d)
 	hostname, _ := os.Hostname()

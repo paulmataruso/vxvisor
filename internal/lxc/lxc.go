@@ -122,7 +122,9 @@ type CreateOpts struct {
 	Dist      string
 	Release   string
 	Arch      string
-	Bridge    string
+	Bridge    string // host bridge the veth joins (resolved server-side, never client text)
+	VLAN      int    // port group VLAN: the veth's untagged PVID on a vlan_filtering vSwitch (0 = untagged)
+	MTU       int    // NIC MTU when the bridge runs below 1500 (a VXLAN segment's 1450); 0 = default
 	MAC       string
 	CPUs      int
 	MemMB     int
@@ -139,6 +141,23 @@ type CreateOpts struct {
 func Create(o CreateOpts) error {
 	if o.Arch == "" {
 		o.Arch = "amd64"
+	}
+	// Backstop: the name is a path component and an lxc-* argument; dist/release/
+	// arch become template cache + image URL path components (lxc-create runs as
+	// root), whatever the caller already checked.
+	if err := ValidName(o.Name); err != nil {
+		return err
+	}
+	for _, a := range [][2]string{{"distribution", o.Dist}, {"release", o.Release}, {"architecture", o.Arch}} {
+		if err := ValidTemplateArg(a[0], a[1]); err != nil {
+			return err
+		}
+	}
+	// Render the managed block BEFORE creating anything, so a bad NIC value is
+	// refused without leaving a half-configured container behind.
+	managed, err := managedBlock(o.Name, o.Bridge, o.MAC, o.VLAN, o.MTU, o.CPUs, o.MemMB)
+	if err != nil {
+		return err
 	}
 	tmpl := []string{"-t", "download", "--", "--dist", o.Dist, "--release", o.Release, "--arch", o.Arch}
 	var args []string
@@ -181,24 +200,23 @@ func Create(o CreateOpts) error {
 	if _, err := run(600*time.Second, "lxc-create", args...); err != nil {
 		return err
 	}
-	return applyConfig(o.Name, o.Lxcpath, o.Bridge, o.MAC, o.CPUs, o.MemMB)
+	return appendConfig(o.Name, o.Lxcpath, managed)
 }
 
-// applyConfig appends vdxd-managed NIC + limit settings to the container config.
-func applyConfig(name, lxcpath, bridge, mac string, cpus, memMB int) error {
-	cfgPath := filepath.Join(basePath(lxcpath), name, "config")
+// managedBlock renders the vdxd-managed NIC + limit settings appended to a new
+// container's config. Every NIC value is validated (see nicLines): the bridge
+// must be an interface name and nothing may break out of its line.
+func managedBlock(name, bridge, mac string, vlan, mtu, cpus, memMB int) (string, error) {
 	var b strings.Builder
 	b.WriteString("\n# --- managed by vdxd ---\n")
 	if bridge != "" {
-		b.WriteString("lxc.net.0.type = veth\n")
-		b.WriteString("lxc.net.0.link = " + bridge + "\n")
 		// Pin the host-side veth name so the topology diagram can match this
 		// container's cable back to it (LXC would otherwise pick a random name).
-		b.WriteString("lxc.net.0.veth.pair = " + VethName(name) + "\n")
-		b.WriteString("lxc.net.0.flags = up\n")
-		if mac != "" {
-			b.WriteString("lxc.net.0.hwaddr = " + mac + "\n")
+		nic, err := nicLines(0, bridge, VethName(name), "", mac, vlan, mtu)
+		if err != nil {
+			return "", err
 		}
+		b.WriteString(nic)
 	}
 	if memMB > 0 {
 		fmt.Fprintf(&b, "lxc.cgroup2.memory.max = %d\n", int64(memMB)<<20)
@@ -206,12 +224,18 @@ func applyConfig(name, lxcpath, bridge, mac string, cpus, memMB int) error {
 	if cpus > 0 {
 		fmt.Fprintf(&b, "lxc.cgroup2.cpuset.cpus = 0-%d\n", cpus-1)
 	}
+	return b.String(), nil
+}
+
+// appendConfig appends a rendered managed block to the container config.
+func appendConfig(name, lxcpath, block string) error {
+	cfgPath := filepath.Join(basePath(lxcpath), name, "config")
 	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = f.WriteString(b.String())
+	_, err = f.WriteString(block)
 	return err
 }
 

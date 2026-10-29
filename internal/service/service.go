@@ -398,11 +398,10 @@ func (s *Service) CreateSession(p *Principal, in CreateInput, ip string) (*sessi
 		}
 	}
 	// A bound port group must belong to this org (prevents attaching a NIC to
-	// another tenant's network).
-	if in.NetworkID > 0 {
-		if _, err := s.net.GetNetwork(p.OrgID, in.NetworkID); err != nil {
-			return nil, fmt.Errorf("unknown port group")
-		}
+	// another tenant's network), and a tenant org's VM must sit on one of its own
+	// vSwitch-backed port groups — never the shared provider network.
+	if err := s.vmPortGroupCheck(p.OrgID, in.NetworkID, true); err != nil {
+		return nil, err
 	}
 	sess, err := s.mgr.Create(session.CreateOpts{
 		OrgID: p.OrgID, OwnerID: p.User.ID,
@@ -531,8 +530,9 @@ func (s *Service) UpdateSessionSpec(p *Principal, id string, hw session.Hardware
 }
 
 // SetSessionNetwork rebinds an instance's NIC to a different port group (network).
-// 0 = default/NAT. The change is persisted now and applied when the tap attaches
-// on the next start (same model as a resize), so it never disrupts a running NIC.
+// 0 = default/NAT (Default org only — a tenant org's VM must stay on one of its
+// own vSwitch-backed port groups). The binding is persisted now and moved live
+// when possible, else applied on the next start.
 func (s *Service) SetSessionNetwork(p *Principal, id string, networkID int64, ip string) (live bool, err error) {
 	if !p.atLeast("member") {
 		return false, ErrUnauthorized
@@ -541,10 +541,8 @@ func (s *Service) SetSessionNetwork(p *Principal, id string, networkID int64, ip
 	if err != nil {
 		return false, err
 	}
-	if networkID > 0 {
-		if _, err := s.net.GetNetwork(sess.OrgID, networkID); err != nil {
-			return false, fmt.Errorf("unknown port group")
-		}
+	if err := s.vmPortGroupCheck(sess.OrgID, networkID, false); err != nil {
+		return false, err
 	}
 	live, err = s.mgr.SetNetwork(id, networkID)
 	if err != nil {

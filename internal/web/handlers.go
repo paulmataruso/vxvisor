@@ -87,7 +87,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 	images, _ := image.List(s.svc.DB())
 	isos, _ := s.svc.ListISOs(p)
 	templates, _ := s.svc.ListTemplates(p)
-	networks, _ := s.svc.ListNetworks(p)
+	networks, defNet, _ := s.svc.LaunchPortGroups(p) // a tenant org: own vSwitch port groups only
 	pools, _ := s.svc.ListPools(p)
 	zfspools, _ := s.svc.ZFSPools(p) // for the raw-zvol disk option (admin; empty otherwise)
 	hasLVM := false                  // enables the raw-LVM-thin disk option
@@ -118,6 +118,8 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 		"ISOs":      isos,
 		"Templates": templates,
 		"Networks":  networks,
+		"DefNetID":  defNet,
+		"TenantOrg": s.svc.TenantOrg(p.OrgID), // no "default (NAT)" launch choice for tenants
 		"Pools":     pools,
 		"ZFSPools":  zfspools,
 		"HasLVMPool": hasLVM,
@@ -201,9 +203,10 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 	forwards, _ := s.svc.ListPortForwards(p, sess.ID)
 	nodes, _ := s.svc.ListNodes(p)
 	pools, _ := s.svc.ListPools(p)
-	networks, _ := s.svc.ListNetworks(p)
+	networks, _ := s.svc.SessionPortGroups(p, sess) // the VM's own org's port groups
 	targets, _ := s.svc.ListBackupTargets(p)
 	s.render(w, p, "instance.html", "compute", map[string]any{
+		"TenantOrg":   s.svc.TenantOrg(sess.OrgID), // no "no port group" choice for tenants
 		"Session":     sess,
 		"GuacEnabled": s.svc.GuacEnabled(),
 		"Running":     s.svc.Manager().Running(sess),

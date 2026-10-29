@@ -75,14 +75,25 @@ type Spec struct {
 	MAC      string
 	TapName  string
 	HostFwds []HostFwd
+	// HostMTU, when set, is advertised to the guest via virtio-net host_mtu so it
+	// sizes its NIC to the port group's bridge (e.g. 1450 on a VXLAN segment)
+	// instead of the 1500 default. virtio NICs only; emulated NICs ignore it.
+	HostMTU int
 
 	// Privilege separation: when RunAsUID is non-zero QEMU is launched under
 	// this uid/gid (via the launcher's Credential) instead of as root.
 	// RunAsGroups MUST include the kvm group, or /dev/kvm is inaccessible —
 	// Credential replaces the process's supplementary groups entirely.
+	// RunAsUID 0 with a non-zero RunAsGID keeps QEMU root but swaps its primary
+	// group (the SLIRP guard group), so the host nft guard can match its sockets.
 	RunAsUID    uint32
 	RunAsGID    uint32
 	RunAsGroups []uint32
+
+	// VNCPassword carries a migrating VM's console password to the destination
+	// node, which writes it to its own 0600 secret file (VNCPwFile) before launch.
+	// It is NEVER rendered into the command line.
+	VNCPassword string `json:",omitempty"`
 
 	// Passthrough holds host PCI addresses (e.g. 0000:01:00.0) assigned to the
 	// guest via vfio-pci. Only populated when the host pre-flight confirms IOMMU.
@@ -426,6 +437,11 @@ func (s Spec) Args() []string {
 		if nq := s.netQueues(); nq > 1 {
 			dev += fmt.Sprintf(",mq=on,vectors=%d", 2*nq+2)
 		}
+		// Tell the guest the segment MTU (a VXLAN port group runs at 1450), or it
+		// defaults to 1500 and full-size frames are silently dropped by the bridge.
+		if s.HostMTU >= 68 && s.HostMTU <= 65535 {
+			dev += fmt.Sprintf(",host_mtu=%d", s.HostMTU)
+		}
 	}
 	// VGA adapter. qxl (default) gives the guest a real KMS/DRM GPU and renders
 	// cleanly over VNC and SPICE; std is the safe choice for Windows (in-box
@@ -602,8 +618,10 @@ func Launch(s Spec, logPath string) (*os.Process, error) {
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	// Privilege separation: launch the VM under a dedicated unprivileged uid/gid
-	// when configured, so a QEMU compromise does not run as root.
-	if s.RunAsUID != 0 {
+	// when configured, so a QEMU compromise does not run as root. Without a
+	// run-as user it stays root but takes the guard group as its primary gid
+	// (RunAsUID 0, RunAsGID set) so the SLIRP loopback guard can match it.
+	if s.RunAsUID != 0 || s.RunAsGID != 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Credential: &syscall.Credential{Uid: s.RunAsUID, Gid: s.RunAsGID, Groups: s.RunAsGroups},
 		}
