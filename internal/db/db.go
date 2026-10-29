@@ -1112,13 +1112,13 @@ UPDATE tenant_networks SET is_default=0
  WHERE is_default=1 AND id <> (SELECT MIN(t2.id) FROM tenant_networks t2 WHERE t2.org_id=tenant_networks.org_id AND t2.is_default=1);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_tnet_org_default ON tenant_networks(org_id) WHERE is_default=1;
 `},
-	{54, "vswitch-mtu", `
+	{51, "vswitch-mtu", `
 -- A vSwitch's MTU (jumbo frames), applied to its bridge, its physical adapter
 -- and the VM taps on it. 0 = never set: the kernel default (1500) is left alone.
 -- STRICTLY ADDITIVE: one constant-default column; older binaries ignore it.
 ALTER TABLE net_vswitches ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
 `},
-	{55, "container-portgroup", `
+	{52, "container-portgroup", `
 -- LXC containers attach to a PORT GROUP the org owns (networks.id), like VMs,
 -- instead of a free-text host bridge from the request (which let a member put a
 -- container on the management bridge or another tenant's bridge, and inject

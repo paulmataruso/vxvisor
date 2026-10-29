@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// TestMigration55 validates the strictly-additive containers.network_id column
-// (migration 55): it applies cleanly on a fresh DB through the real modernc
+// TestMigration52 validates the strictly-additive containers.network_id column
+// (migration 52): it applies cleanly on a fresh DB through the real modernc
 // driver, defaults to 0 for a row that doesn't set it, and stores a port group id.
-func TestMigration55(t *testing.T) {
+func TestMigration52(t *testing.T) {
 	d, err := Open(filepath.Join(t.TempDir(), "cp.db"))
 	if err != nil {
-		t.Fatalf("open (migrations through 55 must apply clean): %v", err)
+		t.Fatalf("open (migrations through 52 must apply clean): %v", err)
 	}
 	defer d.Close()
 
