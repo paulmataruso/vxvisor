@@ -12,7 +12,9 @@ package netdrv
 import (
 	"crypto/rand"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"vdxclone/internal/db"
@@ -59,6 +61,20 @@ func TeardownTap(tap string) { _ = run("ip", "link", "del", tap) }
 // power on every physical NIC so the UI can show which ports have a live cable
 // (carrier), even for ports that carry no configured network.
 func LinkUp(name string) error { return run("ip", "link", "set", name, "up") }
+
+// NoIPv6Autoconf turns off router-advertisement processing and SLAAC on an
+// interface, so bringing an unconfigured port up gives the host no address on
+// whatever network it's cabled to (only its link-local one). A host without
+// IPv6 has nothing to turn off.
+func NoIPv6Autoconf(name string) error {
+	for _, k := range []string{"accept_ra", "autoconf"} {
+		err := os.WriteFile(filepath.Join("/proc/sys/net/ipv6/conf", name, k), []byte("0"), 0o644)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
 
 func ifaceExists(name string) bool {
 	return exec.Command("ip", "link", "show", name).Run() == nil

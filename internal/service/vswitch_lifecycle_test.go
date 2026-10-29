@@ -313,17 +313,24 @@ func TestReensureVSwitches(t *testing.T) {
 		t.Fatalf("unknown management must not claim NICs: %+v", calls)
 	}
 
-	// Boot links-up: only NICs vdxd manages (team members / uplinks), never
-	// netplan's or unrelated ones.
+	// Boot links-up: every physical NIC except netplan's (eno1/eno2); the one
+	// vdxd doesn't manage (eno3) gets IPv6 autoconfiguration turned off first.
 	h.defaults = []string{"vSwitch0"}
 	for i := range h.ifs {
 		h.ifs[i].State = "down"
 	}
 	*calls = hostCalls{}
+	var quiet []string
+	oldQuiet := noIPv6Autoconf
+	noIPv6Autoconf = func(n string) error { quiet = append(quiet, n); return nil }
+	defer func() { noIPv6Autoconf = oldQuiet }()
 	s.EnsurePhysicalLinksUp()
 	slices.Sort(calls.linksUp)
-	if want := []string{"vxa", "vxb", "vxc", "vxeno9", "vxst"}; !slices.Equal(calls.linksUp, want) {
+	if want := []string{"eno3", "vxa", "vxb", "vxc", "vxeno9", "vxst"}; !slices.Equal(calls.linksUp, want) {
 		t.Fatalf("links brought up: %q, want %q", calls.linksUp, want)
+	}
+	if !slices.Equal(quiet, []string{"eno3"}) {
+		t.Fatalf("IPv6 autoconfiguration turned off on %q, want only the unmanaged eno3", quiet)
 	}
 
 	// Even with no netplan file to recognise them by, the management bridge and

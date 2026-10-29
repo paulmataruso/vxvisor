@@ -165,22 +165,33 @@ func ifaceGroup(i hostinfo.Iface, vsw, vr map[string]bool) string {
 	}
 }
 
-// EnsurePhysicalLinksUp administratively brings up, at boot, the physical NICs
-// vdxd itself manages (managedNICs) that are down, so the UI shows their carrier.
-// Every other NIC is left exactly as the admin / netplan left it: bringing up an
-// unconfigured port can autoconfigure IPv6 from router advertisements on whatever
-// network it's cabled to — putting a wildcard-bound admin UI on that network.
-// Idempotent; one-shot at boot — it does NOT fight an admin who later downs a
-// port by hand (there's no re-up loop).
+// EnsurePhysicalLinksUp administratively brings every admin-down physical NIC
+// up at boot, so the UI can show which ports have a live cable (carrier) even
+// when they carry no configured network. Ports netplan defines are left to
+// netplan. A port vdxd doesn't manage (managedNICs) first gets IPv6
+// autoconfiguration turned off: an unconfigured port must never pick up an
+// address from router advertisements on whatever it's cabled to (that would put
+// a wildcard-bound admin UI on that network). Idempotent; one-shot at boot — it
+// does NOT fight an admin who later downs a port by hand (there's no re-up loop).
 func (s *Service) EnsurePhysicalLinksUp() {
 	ifaces, err := hostIfaces()
 	if err != nil {
 		return
 	}
 	managed := s.managedNICs()
+	planned := netplanDefinedIfaces()
 	for _, it := range ifaces {
-		if it.Type != "physical" || it.State == "up" || !managed[it.Name] {
+		if it.Type != "physical" || it.State == "up" {
 			continue
+		}
+		if _, ok := planned[it.Name]; ok {
+			continue
+		}
+		if !managed[it.Name] {
+			if err := noIPv6Autoconf(it.Name); err != nil {
+				log.Printf("leave %s down: can't turn off IPv6 autoconfiguration: %v", it.Name, err)
+				continue
+			}
 		}
 		if err := linkUp(it.Name); err != nil {
 			log.Printf("bring up %s: %v", it.Name, err)
@@ -188,8 +199,11 @@ func (s *Service) EnsurePhysicalLinksUp() {
 	}
 }
 
-// linkUp is swapped in tests.
-var linkUp = netdrv.LinkUp
+// linkUp and noIPv6Autoconf are swapped in tests.
+var (
+	linkUp         = netdrv.LinkUp
+	noIPv6Autoconf = netdrv.NoIPv6Autoconf
+)
 
 // managedNICs is the set of devices vdxd configures itself: NIC-team members,
 // vSwitch uplinks, dedicated tenant trunks (and their slaves) and dedicated
@@ -226,11 +240,11 @@ func (s *Service) managedNICs() map[string]bool {
 // (e.g. a point-to-point transit to another router), as the L3 page lists them.
 type TransitIface struct {
 	Name      string   `json:"name"`
-	State     string   `json:"state"`     // up | down | unknown
-	Carrier   bool     `json:"carrier"`   // a live cable is present
+	State     string   `json:"state"`   // up | down | unknown
+	Carrier   bool     `json:"carrier"` // a live cable is present
 	SpeedMbps int      `json:"speed_mbps"`
-	Addrs     []string `json:"addrs"`     // IPs already on it (e.g. a transit IP already assigned)
-	Neighbor  string   `json:"neighbor"`  // LLDP/CDP: "<switch> <port>" on the other end, if heard
+	Addrs     []string `json:"addrs"`    // IPs already on it (e.g. a transit IP already assigned)
+	Neighbor  string   `json:"neighbor"` // LLDP/CDP: "<switch> <port>" on the other end, if heard
 }
 
 // TransitCandidates returns the "free" interfaces usable for a routed/transit
@@ -418,7 +432,7 @@ type DiskStatusRow struct {
 	FSType      string `json:"fstype"`
 	InUse       bool   `json:"in_use"`
 	UseNote     string `json:"use_note"`
-	Health      string `json:"health"` // PASSED | FAILED | unknown | n/a
+	Health      string `json:"health"`  // PASSED | FAILED | unknown | n/a
 	Reclaim     bool   `json:"reclaim"` // can be cleared for reuse (Ceph remnants, not mounted)
 	ReclaimNote string `json:"reclaim_note"`
 	Wipeable    bool   `json:"wipeable"`  // has only inert leftovers (foreign partition table/fs) and is NOT actively used → safe to initialize
@@ -721,9 +735,9 @@ type TopoVM struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Tap   string `json:"tap"`
-	State string `json:"state"` // running | stopped | ""
-	Kind  string `json:"kind"`  // "" = VM, "container" = LXC container
-	Veth  string `json:"veth"`  // container only: its host-side veth (drawn as an inline node)
+	State string `json:"state"`        // running | stopped | ""
+	Kind  string `json:"kind"`         // "" = VM, "container" = LXC container
+	Veth  string `json:"veth"`         // container only: its host-side veth (drawn as an inline node)
 	IP    string `json:"ip,omitempty"` // DHCP-assigned address (vRouter internal port groups)
 }
 
@@ -779,10 +793,10 @@ type TopoSwitch struct {
 // TopoVRInternal is one internal port group served by a vRouter (diagram).
 type TopoVRInternal struct {
 	Name   string   `json:"name"`
-	GW     string   `json:"gw"`     // vRouter gateway IP/CIDR on this segment (IPv4)
-	Subnet string   `json:"subnet"` // the port-group subnet (networks.cidr)
-	Bridge string   `json:"bridge"` // host bridge device for this leg (e.g. vr4-bgp-test)
-	Iface  string   `json:"iface"`  // the vRouter's interface on this leg (e.g. eth1)
+	GW     string   `json:"gw"`             // vRouter gateway IP/CIDR on this segment (IPv4)
+	Subnet string   `json:"subnet"`         // the port-group subnet (networks.cidr)
+	Bridge string   `json:"bridge"`         // host bridge device for this leg (e.g. vr4-bgp-test)
+	Iface  string   `json:"iface"`          // the vRouter's interface on this leg (e.g. eth1)
 	Zone   string   `json:"zone,omitempty"` // firewall zone this port group belongs to, if any
 	VMs    []TopoVM `json:"vms"`
 }
