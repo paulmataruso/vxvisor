@@ -217,6 +217,23 @@ func TestPutPatch(t *testing.T) {
 	}
 }
 
+// TestRawOnly: a raw upload ticket refuses a qcow2 container at offset 0 and
+// accepts the same bytes elsewhere (guest data can contain anything).
+func TestRawOnly(t *testing.T) {
+	disk := newMemDisk(1 << 20)
+	_, hs := setup(t, Ticket{Read: true, Write: true, RawOnly: true}, disk)
+	url := hs.URL + "/images/" + tid
+	img := append([]byte("QFI\xfb\x00\x00\x00\x03"), make([]byte, 504)...)
+	res, body := do(t, "PUT", url, bytes.NewReader(img), map[string]string{"Content-Range": "bytes 0-511/*"})
+	if res.StatusCode != 400 || !strings.Contains(string(body), "qcow2") || disk.data[0] != 0 {
+		t.Fatalf("qcow2 header at 0: %d %s", res.StatusCode, body)
+	}
+	res, _ = do(t, "PUT", url, bytes.NewReader(img), map[string]string{"Content-Range": "bytes 4096-4607/*"})
+	if res.StatusCode != 200 || disk.data[4096] != 'Q' {
+		t.Fatalf("qcow2 bytes inside the disk: %d", res.StatusCode)
+	}
+}
+
 func TestExtents(t *testing.T) {
 	disk := newMemDisk(4 * blk)
 	disk.alloc[1] = true

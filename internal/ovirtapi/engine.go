@@ -337,11 +337,12 @@ func (s *Server) startTransfer(c Caller, spec transferSpec) (*transfer, error) {
 			return nil, err
 		}
 		t.export, t.release = exp, release
-		tk.Read, tk.Write, tk.Size = true, true, exp.Size
+		tk.Read, tk.Write, tk.Size, tk.RawOnly = true, true, exp.Size, true
 		tk.Dial = dialer(exp, "")
 	default:
-		// A plain download (no backup): only a disk nothing is using — a staged
-		// disk or a stopped VM's disk — read through qemu-nbd.
+		// A plain download (no backup) is not offered: backup clients (Veeam,
+		// the SDK's backup examples) always download inside a VM backup, which
+		// is what gives the read a consistent point in time.
 		return nil, fmt.Errorf("%w: downloading a disk outside a backup is not supported; start a VM backup", ErrBadRequest)
 	}
 	t.size = tk.Size

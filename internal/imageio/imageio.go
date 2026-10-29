@@ -18,6 +18,7 @@
 package imageio
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,10 @@ type Ticket struct {
 	Deadline          time.Time
 	// MaxConns bounds parallel backend connections (default 4).
 	MaxConns int
+	// RawOnly refuses an upload whose data at offset 0 is a qcow2 header:
+	// the backend takes guest data, so a client sending a qcow2 container
+	// (oVirt format "cow" semantics) would otherwise write a corrupt disk.
+	RawOnly bool
 	// Dial opens one backend connection.
 	Dial func() (Backend, error)
 }
@@ -451,6 +456,8 @@ func flushParam(r *http.Request, def bool) bool {
 	return def
 }
 
+var qcow2Magic = []byte("QFI\xfb")
+
 func (s *Server) put(w http.ResponseWriter, r *http.Request, id string) error {
 	tk, err := s.acquire(id, "write")
 	if err != nil {
@@ -479,6 +486,10 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, id string) error {
 		if _, err := io.ReadFull(r.Body, p); err != nil {
 			tk.put(b, false)
 			return herr(http.StatusBadRequest, "short request body: %v", err)
+		}
+		if tk.RawOnly && off+n == 0 && bytes.HasPrefix(p, qcow2Magic) {
+			tk.put(b, false)
+			return herr(http.StatusBadRequest, "this transfer takes raw guest data, not a qcow2 image; upload with format=raw")
 		}
 		if _, err := b.WriteAt(p, int64(off+n)); err != nil {
 			tk.put(b, true)
