@@ -53,7 +53,7 @@ func (s *Server) createVRouter(w http.ResponseWriter, r *http.Request, p *servic
 	if _, err := s.svc.CreateVRouter(p, in, clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "vRouter is being created — it provisions FRR in the background; refresh to watch its status.")
+		setFlashOK(w, "Gateway is being created — it provisions FRR in the background; refresh to watch its status.")
 	}
 	http.Redirect(w, r, "/vrouters", http.StatusSeeOther)
 }
@@ -145,6 +145,11 @@ func (s *Server) addTransitLink(w http.ResponseWriter, r *http.Request, p *servi
 	s.vrDo(w, r, p, func(id int64) error {
 		return s.svc.AddTransitLink(p, id, r.FormValue("iface"), r.FormValue("cidr"), clientIP(r))
 	})
+}
+
+// deleteTransitLink removes a gateway's provider link (instance admin).
+func (s *Server) deleteTransitLink(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	s.vrDo(w, r, p, func(id int64) error { return s.svc.DeleteTransitLink(p, id, clientIP(r)) })
 }
 func (s *Server) attachInternal(w http.ResponseWriter, r *http.Request, p *service.Principal) {
 	s.vrDo(w, r, p, func(id int64) error {

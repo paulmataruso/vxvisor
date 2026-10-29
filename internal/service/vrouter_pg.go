@@ -2,11 +2,12 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"strconv"
 	"strings"
 
-	"vdxclone/internal/netdrv"
+	"vdxclone/internal/routing"
 	"vdxclone/internal/vrouter"
 )
 
@@ -64,12 +65,12 @@ func (s *Service) UplinkLegChoices(p *Principal) ([]UplinkLegChoice, error) {
 			continue
 		}
 		if t.DefaultCarried {
-			out = append(out, UplinkLegChoice{TnetID: t.ID, Label: t.Name + " · untagged (uplink " + t.UplinkName + ")"})
+			out = append(out, UplinkLegChoice{TnetID: t.ID, Label: t.Name + " · untagged (external network " + t.UplinkName + ")"})
 		}
 		for _, pg := range t.PortGroups {
 			if pg.Carried {
 				out = append(out, UplinkLegChoice{TnetID: t.ID, VLAN: pg.VLAN,
-					Label: fmt.Sprintf("%s / %s · VLAN %d (uplink %s)", t.Name, pg.Name, pg.VLAN, t.UplinkName)})
+					Label: fmt.Sprintf("%s / %s · VLAN %d (external network %s)", t.Name, pg.Name, pg.VLAN, t.UplinkName)})
 			}
 		}
 	}
@@ -136,10 +137,9 @@ func (s *Service) AttachPortGroup(p *Principal, vrID, pgID int64, gatewayCIDR st
 	if err != nil {
 		return err
 	}
-	if dhcp {
-		if err := validDHCPRange(dhcpRange); err != nil {
-			return err
-		}
+	dhcpRange, dns, err = legDHCP(dhcp, dhcpRange, dns, legCIDR)
+	if err != nil {
+		return err
 	}
 	var vsNet int64
 	if err := s.db.QueryRow(`SELECT network_id FROM tenant_networks WHERE id=?`, pg.TnetID).Scan(&vsNet); err != nil {
@@ -204,25 +204,86 @@ func (s *Service) AttachUplinkLeg(p *Principal, vrID, tnetID int64, vlan int, ci
 	if !carriedOut(mode, native, vlan) {
 		return fmt.Errorf("the uplink doesn't carry that port group (an access uplink carries only the vSwitch's native port group)")
 	}
-	addr, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
-	if err != nil || addr.To4() == nil {
-		return fmt.Errorf("the router's uplink address must be an IPv4 address with prefix (e.g. 203.0.113.10/29)")
-	}
+	var pgCIDR string
+	_ = s.db.QueryRow(`SELECT COALESCE(cidr,'') FROM networks WHERE id=?`, netID).Scan(&pgCIDR)
 	upstreamGW = strings.TrimSpace(upstreamGW)
-	if upstreamGW != "" {
-		if gw := net.ParseIP(upstreamGW); gw == nil || gw.To4() == nil || !ipnet.Contains(gw) || gw.Equal(addr) {
-			return fmt.Errorf("upstream gateway %q must be another IPv4 address inside %s", upstreamGW, ipnet)
-		}
+	legCIDR, err := checkUplinkLegAddr(cidr, pgCIDR, upstreamGW, s.legAddrsOn(netID))
+	if err != nil {
+		return err
 	}
 	idx := s.legIndex(vrID)
 	if _, err := s.db.Exec(`INSERT INTO vrouter_legs(vrouter_id,idx,kind,bridge,network_id,iface_name,cidr,vlan_id,upstream_gw,snat)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`, vrID, idx, vrouter.LegUplink, tenantBridgeName(vsNet), netID,
-		"eth"+strconv.Itoa(idx), strings.TrimSpace(cidr), vlan, upstreamGW, b2iDHCP(snat)); err != nil {
+		"eth"+strconv.Itoa(idx), legCIDR, vlan, upstreamGW, b2iDHCP(snat)); err != nil {
 		return err
 	}
 	s.audit(p, p.OrgID, "vrouter.uplink.attach", "vrouter", v.Name, ip,
-		map[string]any{"vswitch": vsName, "vlan": vlan, "cidr": cidr, "upstream": upstreamGW, "snat": snat})
+		map[string]any{"vswitch": vsName, "vlan": vlan, "cidr": legCIDR, "upstream": upstreamGW, "snat": snat})
 	return s.applyAndPush(vrID)
+}
+
+// legAddrsOn returns the addresses (IP/prefix) of every router leg on network
+// netID, across all routers.
+func (s *Service) legAddrsOn(netID int64) []string {
+	var out []string
+	rows, err := s.db.Query(`SELECT cidr FROM vrouter_legs WHERE network_id=? AND cidr<>''`, netID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c string
+		if rows.Scan(&c) == nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// routerLegOn returns the name of a router with an interface on network netID
+// ("" = none). The tenant delete paths refuse while there is one: its veth would
+// be left on a bridge or VLAN that no longer exists.
+func (s *Service) routerLegOn(netID int64) string {
+	var name string
+	_ = s.db.QueryRow(`SELECT v.name FROM vrouter_legs l JOIN vrouters v ON v.id=l.vrouter_id
+		WHERE l.network_id=? LIMIT 1`, netID).Scan(&name)
+	return name
+}
+
+// checkUplinkLegAddr checks a router's address on a carried (external) port
+// group and returns it as IP/prefix: inside the port group's subnet pgCIDR
+// ("" = not recorded; then the address must carry its own prefix), not the
+// subnet's network or broadcast address, not the upstream gateway, and not an
+// address another router leg on that port group already uses (taken). A given
+// upstream gateway must be another usable address inside the leg's subnet.
+func checkUplinkLegAddr(cidr, pgCIDR, upstreamGW string, taken []string) (string, error) {
+	if strings.TrimSpace(cidr) == "" {
+		return "", fmt.Errorf("the router's address on the external network is required (e.g. 203.0.113.10/29)")
+	}
+	ipStr, legCIDR, err := legAddr(cidr, pgCIDR)
+	if err != nil {
+		return "", err
+	}
+	addr := net.ParseIP(ipStr)
+	_, sn, _ := net.ParseCIDR(legCIDR)
+	if upstreamGW != "" {
+		gw := net.ParseIP(upstreamGW)
+		if !routing.IsIPv4(upstreamGW) || !sn.Contains(gw) {
+			return "", fmt.Errorf("upstream gateway %q must be an IPv4 address inside %s", upstreamGW, sn)
+		}
+		if gw.Equal(addr) {
+			return "", fmt.Errorf("the router's address %s can't be the upstream gateway — use another address in %s", addr, sn)
+		}
+		if netOrBroadcast(gw, sn) {
+			return "", fmt.Errorf("upstream gateway %s is the network or broadcast address of %s", gw, sn)
+		}
+	}
+	for _, t := range taken {
+		if tip, _, err := net.ParseCIDR(strings.TrimSpace(t)); err == nil && tip.Equal(addr) {
+			return "", fmt.Errorf("%s is already used by another router's interface on this port group — pick a free address", addr)
+		}
+	}
+	return legCIDR, nil
 }
 
 // DetachUplinkLeg removes a router's uplink leg (org admin), which also drops
@@ -235,12 +296,23 @@ func (s *Service) DetachUplinkLeg(p *Principal, vrID int64, ip string) error {
 	if err != nil {
 		return err
 	}
-	var idx int
-	if err := s.db.QueryRow(`SELECT idx FROM vrouter_legs WHERE vrouter_id=? AND kind=?`, vrID, vrouter.LegUplink).Scan(&idx); err != nil {
-		return fmt.Errorf("this router has no uplink leg")
+	legs, err := s.loadLegs(vrID)
+	if err != nil {
+		return err
 	}
-	if v.NetnsName != "" {
-		netdrv.NetnsDelLink(v.NetnsName, "eth"+strconv.Itoa(idx))
+	var up *vrouter.Leg
+	for i := range legs {
+		if legs[i].Kind == vrouter.LegUplink {
+			up = &legs[i]
+		}
+	}
+	if up == nil {
+		return fmt.Errorf("this gateway has no external interface")
+	}
+	if b, err := vrouterBackend(v.Runtime); err == nil {
+		if err := b.RemoveLeg(v, *up); err != nil {
+			log.Printf("vrouter %s: remove external interface: %v", v.Name, err)
+		}
 	}
 	if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND kind=?`, vrID, vrouter.LegUplink); err != nil {
 		return err
@@ -249,9 +321,11 @@ func (s *Service) DetachUplinkLeg(p *Principal, vrID int64, ip string) error {
 	return s.applyAndPush(vrID)
 }
 
-// legAddr turns a router leg's gateway ("10.20.0.1/24", or a bare IP) into
+// legAddr turns a router leg's address ("10.20.0.1/24", or a bare IP) into
 // (bare IP, IP/prefix), checking it sits inside subnet (sizing a bare IP from
-// it). subnet may be empty only when gatewayCIDR carries its own prefix.
+// it). subnet may be empty only when gatewayCIDR carries its own prefix. The
+// leg's own subnet must lie inside subnet, be at least /vrouter.MinLegPrefix,
+// and the address can't be its network or broadcast address.
 func legAddr(gatewayCIDR, subnet string) (string, string, error) {
 	gatewayCIDR = strings.TrimSpace(gatewayCIDR)
 	var sn *net.IPNet
@@ -264,22 +338,50 @@ func legAddr(gatewayCIDR, subnet string) (string, string, error) {
 	if i := strings.IndexByte(gatewayCIDR, '/'); i >= 0 {
 		gw, prefix = gatewayCIDR[:i], gatewayCIDR[i+1:]
 	}
-	ip := net.ParseIP(gw)
-	if ip == nil || ip.To4() == nil {
-		return "", "", fmt.Errorf("a gateway IP for the router leg is required (e.g. 10.20.0.1/24)")
+	if !routing.IsIPv4(gw) {
+		return "", "", fmt.Errorf("an IPv4 address for the router interface is required (e.g. 10.20.0.1/24)")
 	}
+	ip := net.ParseIP(gw).To4()
 	if sn != nil && !sn.Contains(ip) {
-		return "", "", fmt.Errorf("gateway %s is not inside the port group subnet %s", gw, sn)
+		return "", "", fmt.Errorf("%s is not inside the network's subnet %s", gw, sn)
 	}
 	if prefix == "" {
 		if sn == nil {
-			return "", "", fmt.Errorf("give the gateway with its prefix (e.g. %s/24)", gw)
+			return "", "", fmt.Errorf("give the address with its prefix (e.g. %s/24)", gw)
 		}
 		ones, _ := sn.Mask.Size()
 		prefix = strconv.Itoa(ones)
 	}
-	if _, _, err := net.ParseCIDR(gw + "/" + prefix); err != nil {
-		return "", "", fmt.Errorf("invalid gateway %q", gatewayCIDR)
+	_, own, err := net.ParseCIDR(gw + "/" + prefix)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid address %q", gatewayCIDR)
+	}
+	ones, _ := own.Mask.Size()
+	if ones < vrouter.MinLegPrefix {
+		return "", "", fmt.Errorf("%s: an interface prefix must be /%d or longer", gatewayCIDR, vrouter.MinLegPrefix)
+	}
+	if sn != nil {
+		if snOnes, _ := sn.Mask.Size(); ones < snOnes {
+			return "", "", fmt.Errorf("%s is wider than the network's subnet %s — use /%d", gatewayCIDR, sn, snOnes)
+		}
+	}
+	if netOrBroadcast(ip, own) || (sn != nil && netOrBroadcast(ip, sn)) {
+		return "", "", fmt.Errorf("%s is the network or broadcast address of its subnet — use a host address", gw)
 	}
 	return gw, gw + "/" + prefix, nil
+}
+
+// netOrBroadcast reports whether ip is the network or broadcast address of n
+// (/31 and /32 have neither).
+func netOrBroadcast(ip net.IP, n *net.IPNet) bool {
+	ip4 := ip.To4()
+	if ones, bits := n.Mask.Size(); ip4 == nil || bits-ones < 2 {
+		return false
+	}
+	base := n.IP.To4()
+	bcast := make(net.IP, 4)
+	for i := range bcast {
+		bcast[i] = base[i] | ^n.Mask[len(n.Mask)-4+i]
+	}
+	return ip4.Equal(base) || ip4.Equal(bcast)
 }

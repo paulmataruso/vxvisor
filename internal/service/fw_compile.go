@@ -43,11 +43,19 @@ func (s *Service) buildFWMaps(orgID int64) fwMaps {
 		m.netToMACs[v.NetID] = append(m.netToMACs[v.NetID], v.MAC)
 	}
 	// MAC → IP from DHCP/static leases, so a destination-VM rule can match ip daddr.
-	if rows, err := s.db.Query(`SELECT COALESCE(mac,''), ip FROM ip_leases`); err == nil {
+	// Only this org's live VMs, and only the lease on the network each VM is on
+	// now: an address is unique per network (bridge+VLAN), not globally, so
+	// another org's lease — or a stale one from a VM's earlier network — can
+	// carry the same MAC or IP and must never narrow this org's rules.
+	if rows, err := s.db.Query(`SELECT COALESCE(NULLIF(l.mac,''),v.mac,''), l.ip, l.network_id
+		FROM ip_leases l JOIN sessions v ON v.id=l.session_id
+		WHERE v.org_id=? AND v.deleted_at IS NULL AND l.network_id=COALESCE(v.network_id,0)`, orgID); err == nil {
 		for rows.Next() {
 			var mac, ip string
-			if rows.Scan(&mac, &ip) == nil {
-				if mac = strings.ToLower(strings.TrimSpace(mac)); mac != "" && ip != "" {
+			var nid int64
+			if rows.Scan(&mac, &ip, &nid) == nil {
+				mac = strings.ToLower(strings.TrimSpace(mac))
+				if mac != "" && ip != "" && m.macToNet[mac] == nid {
 					m.macToIP[mac] = ip
 				}
 			}

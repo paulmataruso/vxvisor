@@ -364,6 +364,9 @@ func (s *Service) DeleteTenantNetwork(p *Principal, id int64, ip string) error {
 	if vrouterID != 0 {
 		return fmt.Errorf("this segment is attached to a router — detach it from the router first")
 	}
+	if vr := s.routerLegOn(netID); vr != "" {
+		return fmt.Errorf("router %q has an interface on this vSwitch — detach it from the router first", vr)
+	}
 	var pgs int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tenant_portgroups WHERE tnet_id=?`, id).Scan(&pgs)
 	if pgs > 0 {

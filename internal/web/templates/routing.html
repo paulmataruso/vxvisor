@@ -4,7 +4,7 @@
     <h2>L3 Routing</h2>
     <form method="post" action="/routing/apply" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn primary">Apply / refresh</button></form>
   </div>
-  <p class="muted" style="margin:0">Set up routing and NAT with the buttons below — each change is applied to the host immediately.{{if not .FRRReady}} <strong style="color:var(--danger)">Routing tools aren't installed — OSPF/BGP/static routes won't apply.</strong>{{end}}</p>
+  <p class="muted" style="margin:0">Set up the host's routing and NAT with the buttons below — each change is applied to the host immediately and saved only once it applied (a change that fails to apply is rolled back). Changes that would take management traffic off the management interface are refused.{{if not .FRRReady}} <strong style="color:var(--danger)">Routing tools aren't installed — OSPF/BGP/static routes won't apply.</strong>{{end}}</p>
 </div>
 
 <!-- Edge NAT uplink -->
@@ -25,14 +25,14 @@
 
 <!-- Routed interfaces / transit links -->
 <div class="card">
-  <div class="card-head"><h2>Routed interfaces <span class="muted" style="font-weight:400;font-size:12px">— transit links</span></h2><button class="btn primary" data-modal="m-prefix">+ Assign IP to interface</button></div>
-  <p class="muted" style="margin:0 0 12px">Assign an IP directly to an unused network port — for example a <strong>transit link</strong> to another router. The address stays across reboots. The management port and any port already in a vSwitch or team are excluded.</p>
+  <div class="card-head"><h2>Routed interfaces <span class="muted" style="font-weight:400;font-size:12px">— provider links (Tier-0 uplinks)</span></h2><button class="btn primary" data-modal="m-prefix">+ Assign IP to interface</button></div>
+  <p class="muted" style="margin:0 0 12px">Assign an IP directly to an unused network port — for example a <strong>provider link (Tier-0 uplink)</strong> to another router. The address stays across reboots. The management port and any port already in a vSwitch or NIC team are excluded.</p>
   {{if .Cfg.Prefixes}}
   <table><tr><th>Interface</th><th>IP / prefix (CIDR)</th><th></th></tr>
     {{range $i, $x := .Cfg.Prefixes}}<tr><td class="mono">{{$x.Iface}}</td><td class="mono">{{$x.CIDR}}</td>
       <td style="text-align:right"><form method="post" action="/routing/prefix/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form></td></tr>{{end}}
   </table>
-  {{else}}<div class="empty">No routed interfaces yet. Assign an IP to a free interface below to create a transit link.</div>{{end}}
+  {{else}}<div class="empty">No routed interfaces yet. Assign an IP to a free interface below to create a provider link.</div>{{end}}
 
   <h3 style="margin:16px 0 8px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">Available interfaces</h3>
   {{if .Transit}}
@@ -50,7 +50,7 @@
     </div>
     {{end}}
   </div>
-  {{else}}<div class="empty">No free interfaces. Every physical NIC is either the management interface or already in a vSwitch/bond.</div>{{end}}
+  {{else}}<div class="empty">No free interfaces. Every physical NIC is either the management interface or already in a vSwitch or NIC team.</div>{{end}}
 </div>
 
 <!-- Static routes -->
@@ -62,11 +62,12 @@
       <td style="text-align:right"><form method="post" action="/routing/static/{{$i}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>{{end}}
   </table>
   {{else}}<div class="empty">No static routes.</div>{{end}}
+  <p class="muted" style="margin:8px 0 0;font-size:12px">A default route needs a gateway on one of the host's own networks. A route into the management subnet, or one that would move the default route or your own session off the management interface, is refused.</p>
 </div>
 
 <!-- Firewall -->
 <div class="card">
-  <div class="card-head"><h2>Firewall (forward chain)</h2><button class="btn primary" data-modal="m-fw">+ Add rule</button></div>
+  <div class="card-head"><h2>Host edge firewall (forward chain)</h2><button class="btn primary" data-modal="m-fw">+ Add rule</button></div>
   {{if .Cfg.Firewall}}
   <table><tr><th>Action</th><th>Proto</th><th>Dport</th><th>Source</th><th></th></tr>
     {{range $i, $x := .Cfg.Firewall}}<tr><td><span class="pill {{if eq $x.Action "accept"}}running{{else}}error{{end}}">{{$x.Action}}</span></td><td>{{if $x.Proto}}{{$x.Proto}}{{else}}any{{end}}</td><td>{{if $x.DPort}}{{$x.DPort}}{{else}}any{{end}}</td><td class="mono">{{if $x.Source}}{{$x.Source}}{{else}}any{{end}}</td>
@@ -152,7 +153,7 @@
     <label class="fld">Router ID<input name="router_id" value="{{.Cfg.EIGRP.RouterID}}" placeholder="1.1.1.1"></label>
     <button class="btn">Save EIGRP</button>
   </form>
-  <p class="muted" style="margin:6px 0 0;font-size:12px">All routers in the same EIGRP group must use the same AS number. Each network you add is advertised to the others.</p>
+  <p class="muted" style="margin:6px 0 0;font-size:12px">All routers in the same EIGRP group must use the same AS number. Each network you add is advertised to the others. EIGRP is available on the host and provider gateways only — tenant gateways use OSPF or BGP.</p>
   {{if .Cfg.EIGRP.Networks}}
   <h3 style="margin:14px 0 6px;font-size:13px">Networks</h3>
   <table><tr><th>Network</th><th></th></tr>
@@ -170,7 +171,7 @@
 
 <!-- ===================== modals ===================== -->
 <div class="modal" id="m-prefix"><div class="modal-card">
-  <div class="modal-head"><h3>Assign IP to interface (transit link)</h3><button class="modal-x" data-close>&times;</button></div>
+  <div class="modal-head"><h3>Assign IP to interface (provider link)</h3><button class="modal-x" data-close>&times;</button></div>
   <form class="mform" method="post" action="/routing/prefix">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Interface<select name="iface" id="prefix-iface">

@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"vdxclone/internal/routing"
 )
 
 // Zone-based firewall (ZBFW) for a vRouter.
@@ -153,17 +155,53 @@ func validMatch(s string, allowMAC bool) error {
 // isMAC reports whether s parses as a hardware address.
 func isMAC(s string) bool { _, err := net.ParseMAC(strings.TrimSpace(s)); return err == nil }
 
+// renderablePolicy re-checks, at the sink, the policy fields that reach the nft
+// ruleset as text (ValidatePolicy also checks zones, which a compiled policy
+// carries as internal leg keys).
+func renderablePolicy(pol VRPolicy) error {
+	if pol.Action != "allow" && pol.Action != "deny" {
+		return fmt.Errorf("action %q must be allow or deny", pol.Action)
+	}
+	switch pol.Proto {
+	case "", "any", "tcp", "udp", "icmp":
+	default:
+		return fmt.Errorf("protocol %q must be any, tcp, udp or icmp", pol.Proto)
+	}
+	if dp := strings.TrimSpace(pol.DPort); dp != "" {
+		if pol.Proto != "tcp" && pol.Proto != "udp" {
+			return fmt.Errorf("a destination port needs protocol tcp or udp")
+		}
+		if !reDPort.MatchString(dp) {
+			return fmt.Errorf("destination port %q must be a number or range", dp)
+		}
+	}
+	if err := validMatch(pol.Src, true); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := validMatch(pol.Dst, false); err != nil {
+		return fmt.Errorf("destination: %w", err)
+	}
+	return nil
+}
+
 // RenderFirewall builds the `inet vdxfw` ruleset for a vRouter. It returns ""
 // when the firewall is disabled or resolves to no enforceable zones (the caller
 // then removes the table). Only the forward chain is hooked; policy is drop.
-func RenderFirewall(vr VRouter, legs []Leg, f VRFirewall) string {
+// A policy with a value that isn't a single valid token fails the whole render
+// (nothing is pushed) rather than splicing text into the ruleset.
+func RenderFirewall(vr VRouter, legs []Leg, f VRFirewall) (string, error) {
 	if !f.Enabled {
-		return ""
+		return "", nil
+	}
+	for i, pol := range f.Policies {
+		if err := renderablePolicy(pol); err != nil {
+			return "", fmt.Errorf("gateway firewall policy %d: %w", i+1, err)
+		}
 	}
 	// Which leg indexes actually exist, and their iface names.
 	ifaceByIdx := map[int]string{}
 	for _, l := range legs {
-		if l.IfaceName != "" {
+		if routing.ValidIface(l.IfaceName) == nil {
 			ifaceByIdx[l.Idx] = l.IfaceName
 		}
 	}
@@ -245,7 +283,16 @@ func RenderFirewall(vr VRouter, legs []Leg, f VRFirewall) string {
 	}
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
-	return b.String()
+	return b.String(), nil
+}
+
+// DenyAllFirewall is the ruleset pushed instead when a router's firewall config
+// can't be rendered: nothing is forwarded until the config is fixed (input and
+// output are untouched, so the router's own control plane keeps working). A
+// gateway firewall never fails open.
+func DenyAllFirewall() string {
+	return "table inet " + FWTable + " {\n  chain forward {\n" +
+		"    type filter hook forward priority filter; policy drop;\n  }\n}\n"
 }
 
 // ifaceSet renders a single iface as "eth0" and several as { "eth1", "eth2" }.

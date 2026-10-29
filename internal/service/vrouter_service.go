@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"vdxclone/internal/netdrv"
 	"vdxclone/internal/routing"
@@ -27,14 +28,86 @@ type VRouterView struct {
 	Cfg        routing.Config // parsed frr_json, for listing/deleting protocol entries
 	LiveState  string
 	RouteTable string
+	// Tenant: a tenant org's gateway, whose routing runs under the tenant
+	// policy (vrouter.ConstrainTenant).
+	Tenant bool
+	// Ignored lists stored routing entries the gateway doesn't run (outside
+	// the tenant policy, or no longer valid).
+	Ignored []string
+	// Owned marks the downlinks (by network id) this gateway created itself;
+	// removing one deletes its port group. Others are attached tenant segments
+	// or port groups, which removing only detaches.
+	Owned map[int64]bool
 }
 
+// Tier is the NSX-style gateway tier: "Tier-0" when it has a provider link
+// (transit), else "Tier-1".
+func (v VRouterView) Tier() string {
+	for _, l := range v.Legs {
+		if l.Kind == vrouter.LegTransit {
+			return "Tier-0"
+		}
+	}
+	return "Tier-1"
+}
+
+// parseFRRJSON decodes a router's stored routing config, cleaned of entries
+// the renderer would refuse (routing.Sanitize). It is the view the page lists
+// and the index-based CRUD edits, so an index always names the entry shown.
 func parseFRRJSON(blob string) routing.Config {
+	c, _ := decodeFRRJSON(blob)
+	c, _ = routing.Sanitize(c)
+	return c
+}
+
+func decodeFRRJSON(blob string) (routing.Config, error) {
 	var c routing.Config
 	if strings.TrimSpace(blob) != "" && blob != "{}" {
-		_ = json.Unmarshal([]byte(blob), &c)
+		if err := json.Unmarshal([]byte(blob), &c); err != nil {
+			return c, fmt.Errorf("parse vrouter frr config: %w", err)
+		}
 	}
-	return c
+	return c, nil
+}
+
+// isTenantRouter reports whether a router belongs to a tenant org (any org but
+// the provider's Default org), so its routing runs under the tenant policy. It
+// fails closed: if the Default org can't be resolved, the router is a tenant's.
+func (s *Service) isTenantRouter(v vrouter.VRouter) bool {
+	def, err := s.store.DefaultOrgID()
+	return err != nil || def == 0 || v.OrgID != def
+}
+
+// vrouterRouting returns the routing config a router actually runs: cfg cleaned
+// of entries the renderer would refuse and, for a tenant router, limited by the
+// tenant policy. ignored describes every stored entry left out.
+func (s *Service) vrouterRouting(v vrouter.VRouter, legs []vrouter.Leg, cfg routing.Config) (routing.Config, []string) {
+	eff, ignored := routing.Sanitize(cfg)
+	if s.isTenantRouter(v) {
+		var more []string
+		eff, more = vrouter.ConstrainTenant(eff, legs)
+		ignored = append(ignored, more...)
+	}
+	return eff, ignored
+}
+
+// fillView loads a router's legs and routing state into its view.
+func (s *Service) fillView(view *VRouterView) {
+	v := view.VRouter
+	view.Legs, _ = s.loadLegs(v.ID)
+	view.Cfg = parseFRRJSON(v.FRRJSON)
+	view.Tenant = s.isTenantRouter(v)
+	if stored, err := decodeFRRJSON(v.FRRJSON); err != nil {
+		view.Ignored = []string{err.Error()}
+	} else {
+		_, view.Ignored = s.vrouterRouting(v, view.Legs, stored)
+	}
+	view.Owned = map[int64]bool{}
+	for _, l := range view.Legs {
+		if l.Kind == vrouter.LegInternal && l.NetworkID != 0 && !s.isTenantSegment(l.NetworkID) {
+			view.Owned[l.NetworkID] = true
+		}
+	}
 }
 
 // VRouterInput is the create form.
@@ -157,10 +230,9 @@ func (s *Service) ListVRouters(p *Principal) ([]VRouterView, error) {
 	out := make([]VRouterView, 0, len(vs))
 	for _, v := range vs {
 		view := VRouterView{VRouter: v}
-		view.Legs, _ = s.loadLegs(v.ID)
-		view.Cfg = parseFRRJSON(v.FRRJSON)
+		s.fillView(&view)
 		if v.Status != "creating" && v.Status != "error" {
-			if b, err := vrouter.For(v.Runtime); err == nil {
+			if b, err := vrouterBackend(v.Runtime); err == nil {
 				if ls, e := b.Status(v); e == nil {
 					view.LiveState, view.RouteTable = ls.State, ls.RouteTable
 				}
@@ -181,10 +253,9 @@ func (s *Service) GetVRouterView(p *Principal, id int64) (VRouterView, error) {
 		return VRouterView{}, err
 	}
 	view := VRouterView{VRouter: v}
-	view.Legs, _ = s.loadLegs(id)
-	view.Cfg = parseFRRJSON(v.FRRJSON)
+	s.fillView(&view)
 	if v.Status != "creating" && v.Status != "error" {
-		if b, err := vrouter.For(v.Runtime); err == nil {
+		if b, err := vrouterBackend(v.Runtime); err == nil {
 			if ls, e := b.Status(v); e == nil {
 				view.LiveState, view.RouteTable = ls.State, ls.RouteTable
 			}
@@ -206,7 +277,7 @@ func (s *Service) VRouterLive(p *Principal, id int64) (vrouter.LiveStatus, error
 	if v.Status == "creating" || v.Status == "error" {
 		return vrouter.LiveStatus{State: v.Status}, nil
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err != nil {
 		return vrouter.LiveStatus{}, err
 	}
@@ -275,7 +346,7 @@ func (s *Service) CreateVRouter(p *Principal, in VRouterInput, ip string) (int64
 		if err != nil {
 			return
 		}
-		b, err := vrouter.For(v.Runtime)
+		b, err := vrouterBackend(v.Runtime)
 		if err != nil {
 			s.vrouterFail(id, err)
 			return
@@ -381,9 +452,15 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 	if err != nil {
 		return err
 	}
-	physIface = strings.TrimSpace(physIface)
-	if physIface == "" || strings.TrimSpace(cidr) == "" {
-		return fmt.Errorf("an interface and a transit CIDR are required")
+	physIface, cidr = strings.TrimSpace(physIface), strings.TrimSpace(cidr)
+	if physIface == "" || cidr == "" {
+		return fmt.Errorf("an interface and a provider-link IP/CIDR are required")
+	}
+	if err := routing.ValidIface(physIface); err != nil {
+		return err
+	}
+	if err := validLegCIDR(cidr); err != nil {
+		return err
 	}
 	// Guard: never the mgmt NIC; must be a free (non-enslaved) transit candidate.
 	if err := s.guardMgmt(physIface); err != nil {
@@ -412,7 +489,7 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 		return fmt.Errorf("%s is not a free transit interface (it may be the mgmt NIC, the storage NIC, enslaved, or missing)", physIface)
 	}
 	if n := s.legCount(vrID, vrouter.LegTransit); n > 0 {
-		return fmt.Errorf("this vRouter already has a transit link")
+		return fmt.Errorf("this gateway already has a provider link")
 	}
 	br := transitBridge(vrID)
 	if err := netdrv.EnsureBridge(br); err != nil {
@@ -429,11 +506,70 @@ func (s *Service) AddTransitLink(p *Principal, vrID int64, physIface, cidr, ip s
 	return s.applyAndPush(vrID)
 }
 
+// DeleteTransitLink removes a router's provider link (Tier-0 uplink): it takes
+// the leg out of the runtime, releases the physical NIC from the link's bridge
+// and deletes that bridge. Instance admin only — it changes a host NIC.
+func (s *Service) DeleteTransitLink(p *Principal, vrID int64, ip string) error {
+	if !p.IsAdmin {
+		return ErrUnauthorized
+	}
+	v, err := s.getVRouter(p, vrID)
+	if err != nil {
+		return err
+	}
+	legs, err := s.loadLegs(vrID)
+	if err != nil {
+		return err
+	}
+	var tr *vrouter.Leg
+	for i := range legs {
+		if legs[i].Kind == vrouter.LegTransit {
+			tr = &legs[i]
+		}
+	}
+	if tr == nil {
+		return fmt.Errorf("this gateway has no provider link")
+	}
+	if b, err := vrouterBackend(v.Runtime); err == nil {
+		if err := b.RemoveLeg(v, *tr); err != nil {
+			log.Printf("vrouter %s: remove provider link: %v", v.Name, err)
+		}
+	}
+	if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND kind=?`, vrID, vrouter.LegTransit); err != nil {
+		return err
+	}
+	if tr.PhysIface != "" {
+		if err := netdrv.DetachFromBridge(tr.PhysIface); err != nil {
+			log.Printf("vrouter %s: release %s from %s: %v", v.Name, tr.PhysIface, tr.Bridge, err)
+		}
+	}
+	if tr.Bridge != "" {
+		netdrv.DeleteLink(tr.Bridge)
+	}
+	s.audit(p, p.OrgID, "vrouter.transit.delete", "vrouter", v.Name, ip, map[string]any{"iface": tr.PhysIface, "cidr": tr.CIDR})
+	return s.applyAndPush(vrID)
+}
+
+// validLegCIDR checks a router interface address (IPv4 address with a prefix of
+// at least vrouter.MinLegPrefix).
+func validLegCIDR(cidr string) error {
+	if err := routing.ValidIfaceAddr(cidr); err != nil {
+		return err
+	}
+	_, n, _ := net.ParseCIDR(cidr)
+	if ones, _ := n.Mask.Size(); ones < vrouter.MinLegPrefix {
+		return fmt.Errorf("%s: an interface prefix must be /%d or longer", cidr, vrouter.MinLegPrefix)
+	}
+	return nil
+}
+
 // AttachInternalNetwork creates an isolated internal port group served by the
 // vRouter (its leg IP is the gateway) and attaches a new leg. Optionally runs
-// DHCP on the leg.
+// DHCP on the leg. Instance admin only: it creates a host bridge outside the
+// tenant vSwitch model (a tenant's gateway attaches its own segments and port
+// groups instead — AttachSegment / AttachPortGroup).
 func (s *Service) AttachInternalNetwork(p *Principal, vrID int64, name, cidr, gatewayCIDR string, dhcp bool, dhcpRange, dns, ip string) error {
-	if !p.atLeast("admin") {
+	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
 	v, err := s.getVRouter(p, vrID)
@@ -443,13 +579,22 @@ func (s *Service) AttachInternalNetwork(p *Principal, vrID int64, name, cidr, ga
 	if v.Status == "creating" {
 		return fmt.Errorf("the router is still being created — wait a moment, then attach")
 	}
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(gatewayCIDR) == "" {
-		return fmt.Errorf("a name and the vRouter's gateway IP/CIDR are required")
+	name, cidr = strings.TrimSpace(name), strings.TrimSpace(cidr)
+	if name == "" || strings.TrimSpace(gatewayCIDR) == "" {
+		return fmt.Errorf("a name and the gateway's IP/CIDR on the downlink are required")
 	}
-	if dhcp {
-		if err := validDHCPRange(dhcpRange); err != nil {
+	if cidr != "" {
+		if cidr, err = routing.CanonPrefix(cidr); err != nil {
 			return err
 		}
+	}
+	gwIP, gatewayCIDR, err := legAddr(gatewayCIDR, cidr)
+	if err != nil {
+		return err
+	}
+	dhcpRange, dns, err = legDHCP(dhcp, dhcpRange, dns, gatewayCIDR)
+	if err != nil {
+		return err
 	}
 	idx := s.nextLegIdx(vrID)
 	if idx == 0 {
@@ -462,14 +607,11 @@ func (s *Service) AttachInternalNetwork(p *Principal, vrID int64, name, cidr, ga
 	// A networks row so VMs can bind to this port group via the normal tap path.
 	// gateway = the vRouter leg IP (the VM's default gateway). vlan_id=0 avoids
 	// the VLAN-stranding trap.
-	gwIP := gatewayCIDR
-	if i := strings.IndexByte(gwIP, '/'); i >= 0 {
-		gwIP = gwIP[:i]
-	}
 	nid, err := s.CreateNetwork(p, netdrv.Network{
 		Name: name, Mode: "bridge", Bridge: br, VLANID: 0, CIDR: cidr, Gateway: gwIP,
 	}, ip)
 	if err != nil {
+		netdrv.DeleteLink(br)
 		return fmt.Errorf("create internal port group: %w", err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO vrouter_legs(vrouter_id,idx,kind,bridge,network_id,iface_name,cidr,dhcp,dhcp_range,dhcp_dns)
@@ -537,23 +679,13 @@ func (s *Service) AttachSegment(p *Principal, vrID, tnetID int64, gatewayCIDR st
 	if mode, native := s.vswitchEgress(tnetID); carriedOut(mode, native, 0) {
 		return fmt.Errorf("that vSwitch's untagged port group is carried out its uplink (the upstream network owns its gateway) — connect the router to the uplink instead")
 	}
-	gatewayCIDR = strings.TrimSpace(gatewayCIDR)
-	gwIP := gatewayCIDR
-	if i := strings.IndexByte(gwIP, '/'); i >= 0 {
-		gwIP = gwIP[:i]
+	gwIP, gatewayCIDR, err := legAddr(gatewayCIDR, segCIDR)
+	if err != nil {
+		return err
 	}
-	if net.ParseIP(gwIP) == nil {
-		return fmt.Errorf("a gateway IP/CIDR for the router leg is required (e.g. 10.50.0.1/24)")
-	}
-	if segCIDR != "" {
-		if _, ipnet, e := net.ParseCIDR(segCIDR); e == nil && !ipnet.Contains(net.ParseIP(gwIP)) {
-			return fmt.Errorf("gateway %s is not inside the segment subnet %s", gwIP, segCIDR)
-		}
-	}
-	if dhcp {
-		if err := validDHCPRange(dhcpRange); err != nil {
-			return err
-		}
+	dhcpRange, dns, err = legDHCP(dhcp, dhcpRange, dns, gatewayCIDR)
+	if err != nil {
+		return err
 	}
 	idx := s.nextLegIdx(vrID)
 	if idx == 0 {
@@ -583,10 +715,13 @@ func (s *Service) AttachSegment(p *Principal, vrID, tnetID int64, gatewayCIDR st
 	return nil
 }
 
-// DetachSegment removes a tenant segment's leg from a vRouter without destroying
-// the segment (its bridge/networks row + any VMs survive). It deletes the in-ns
-// interface (which removes the veth pair, leaving the segment bridge intact),
-// drops the leg row, clears the gateway, and re-pushes FRR.
+// DetachSegment removes a downlink from a vRouter. An attached tenant segment or
+// port group is only detached (its bridge/networks row + any VMs survive; its
+// gateway is cleared so it can be attached again). An internal port group the
+// router created itself (AttachInternalNetwork) has no life of its own, so it is
+// deleted with its bridge — refused while instances are still on it. Either way
+// the leg is taken out of the runtime (its veth pair; the bridge it sat on is
+// left alone), its row dropped, and FRR re-pushed.
 func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
@@ -595,39 +730,73 @@ func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) erro
 	if err != nil {
 		return err
 	}
-	// Resolve the owning tenant segment (or vSwitch port group) by its backing
-	// networks id, scoped to the org — rejects a foreign/non-segment network_id.
+	legs, err := s.loadLegs(vrID)
+	if err != nil {
+		return err
+	}
+	var leg *vrouter.Leg
+	for i := range legs {
+		if legs[i].Kind == vrouter.LegInternal && legs[i].NetworkID == netID && netID != 0 {
+			leg = &legs[i]
+		}
+	}
+	if leg == nil {
+		return fmt.Errorf("that network is not a downlink of this gateway")
+	}
+	// Resolve the owner by the backing networks id, scoped to the org — a
+	// tenant segment, a vSwitch port group, or (neither) the router's own.
 	var tnetID, pgID int64
 	var segName string
 	err = s.db.QueryRow(`SELECT id,name FROM tenant_networks WHERE network_id=? AND org_id=?`, netID, p.OrgID).Scan(&tnetID, &segName)
 	if err == sql.ErrNoRows {
 		err = s.db.QueryRow(`SELECT id,name FROM tenant_portgroups WHERE network_id=? AND org_id=?`, netID, p.OrgID).Scan(&pgID, &segName)
 	}
+	owned := false
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("segment not found in this organization")
+		if err = s.db.QueryRow(`SELECT name FROM networks WHERE id=? AND org_id=?`, netID, p.OrgID).Scan(&segName); err == sql.ErrNoRows {
+			return fmt.Errorf("that network is not in this organization")
+		}
+		owned = true
 	}
 	if err != nil {
 		return err
 	}
-	var idx int
-	if err := s.db.QueryRow(`SELECT idx FROM vrouter_legs WHERE vrouter_id=? AND network_id=? AND kind='internal'`, vrID, netID).Scan(&idx); err == sql.ErrNoRows {
-		return fmt.Errorf("that segment is not attached to this router")
-	} else if err != nil {
-		return err
+	if owned {
+		var n int
+		s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE network_id=? AND deleted_at IS NULL`, netID).Scan(&n)
+		if n > 0 {
+			return fmt.Errorf("%d instance(s) are still on port group %s — removing it deletes the port group, so move or delete them first", n, segName)
+		}
 	}
-	if v.NetnsName != "" {
-		netdrv.NetnsDelLink(v.NetnsName, "eth"+strconv.Itoa(idx))
+	if b, err := vrouterBackend(v.Runtime); err == nil {
+		if err := b.RemoveLeg(v, *leg); err != nil {
+			log.Printf("vrouter %s: remove leg %s: %v", v.Name, leg.IfaceName, err)
+		}
 	}
 	if _, err := s.db.Exec(`DELETE FROM vrouter_legs WHERE vrouter_id=? AND network_id=? AND kind='internal'`, vrID, netID); err != nil {
 		return err
 	}
-	if pgID != 0 {
+	switch {
+	case owned:
+		if err := s.DeleteNetwork(p, netID, ip); err != nil {
+			log.Printf("vrouter %s: delete port group %s: %v", v.Name, segName, err)
+		}
+		if strings.HasPrefix(leg.Bridge, "vr"+strconv.FormatInt(vrID, 10)+"-") { // only a bridge this router created
+			netdrv.DeleteLink(leg.Bridge)
+		}
+	case pgID != 0:
 		s.db.Exec(`UPDATE tenant_portgroups SET vrouter_id=0 WHERE id=?`, pgID)
-	} else {
+	default:
 		s.db.Exec(`UPDATE tenant_networks SET vrouter_id=0 WHERE id=?`, tnetID)
 	}
-	s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, netID)
-	s.audit(p, p.OrgID, "vrouter.segment.detach", "vrouter", v.Name, ip, map[string]any{"segment": segName})
+	if !owned {
+		s.db.Exec(`UPDATE networks SET gateway='' WHERE id=?`, netID)
+	}
+	action := "vrouter.segment.detach"
+	if owned {
+		action = "vrouter.internal.delete"
+	}
+	s.audit(p, p.OrgID, action, "vrouter", v.Name, ip, map[string]any{"segment": segName})
 	return s.applyAndPush(vrID)
 }
 
@@ -641,37 +810,82 @@ func (s *Service) UpdateInternalDHCP(p *Principal, vrID int64, idx int, dhcp boo
 	if err != nil {
 		return err
 	}
-	if dhcp {
-		if err := validDHCPRange(dhcpRange); err != nil {
-			return err
-		}
+	var legCIDR string
+	if err := s.db.QueryRow(`SELECT cidr FROM vrouter_legs WHERE vrouter_id=? AND idx=? AND kind='internal'`, vrID, idx).Scan(&legCIDR); err != nil {
+		return fmt.Errorf("no downlink at index %d", idx)
 	}
-	res, err := s.db.Exec(`UPDATE vrouter_legs SET dhcp=?, dhcp_range=?, dhcp_dns=? WHERE vrouter_id=? AND idx=? AND kind='internal'`,
-		b2iDHCP(dhcp), strings.TrimSpace(dhcpRange), strings.TrimSpace(dns), vrID, idx)
+	dhcpRange, dns, err = legDHCP(dhcp, dhcpRange, dns, legCIDR)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("no internal port group at index %d", idx)
+	if _, err := s.db.Exec(`UPDATE vrouter_legs SET dhcp=?, dhcp_range=?, dhcp_dns=? WHERE vrouter_id=? AND idx=? AND kind='internal'`,
+		b2iDHCP(dhcp), dhcpRange, dns, vrID, idx); err != nil {
+		return err
 	}
 	s.audit(p, p.OrgID, "vrouter.internal.dhcp", "vrouter", v.Name, ip,
 		map[string]any{"idx": idx, "dhcp": dhcp, "range": dhcpRange, "dns": dns})
 	return s.applyDHCP(vrID, idx)
 }
 
-// validDHCPRange checks a DHCP range resolves to "start,end" with two IPs
-// (accepting the friendly "A.B.C.X-Y" shorthand).
+// validDHCPRange checks a DHCP range resolves to "start,end" with two IPv4
+// addresses, start ≤ end (accepting the friendly "A.B.C.X-Y" shorthand).
 func validDHCPRange(r string) error {
-	r = strings.TrimSpace(r)
-	if r == "" {
+	if strings.TrimSpace(r) == "" {
 		return fmt.Errorf("a DHCP range is required when DHCP is enabled (e.g. 10.60.0.100,10.60.0.200)")
 	}
-	norm := vrouter.NormalizeDHCPRange(r)
-	parts := strings.SplitN(norm, ",", 2)
-	if len(parts) != 2 || net.ParseIP(strings.TrimSpace(parts[0])) == nil || net.ParseIP(strings.TrimSpace(parts[1])) == nil {
-		return fmt.Errorf("DHCP range must be start,end (e.g. 10.60.0.100,10.60.0.200) — got %q", r)
+	_, _, err := vrouter.ParseDHCPRange(r)
+	return err
+}
+
+// legDHCP checks a router leg's DHCP settings against the leg address legCIDR
+// (IP/prefix) and returns them normalized for storage. With DHCP on, the range
+// must lie inside the leg's subnet and not cover the leg's own address; the DNS
+// list (optional) must be IPv4 addresses. With DHCP off, a range or DNS list
+// that is given is still checked (it is stored for later).
+func legDHCP(dhcp bool, dhcpRange, dns, legCIDR string) (string, string, error) {
+	dhcpRange = strings.TrimSpace(dhcpRange)
+	dns, err := vrouter.NormalizeDNS(dns)
+	if err != nil {
+		return "", "", err
 	}
-	return nil
+	if dhcpRange == "" {
+		if dhcp {
+			return "", "", validDHCPRange("")
+		}
+		return "", dns, nil
+	}
+	start, end, err := vrouter.ParseDHCPRange(dhcpRange)
+	if err != nil {
+		return "", "", err
+	}
+	own, sn, err := net.ParseCIDR(strings.TrimSpace(legCIDR))
+	if err != nil {
+		return "", "", fmt.Errorf("the leg has no valid address (%q) — set its gateway first", legCIDR)
+	}
+	if !sn.Contains(start) || !sn.Contains(end) {
+		return "", "", fmt.Errorf("DHCP range %s-%s must be inside the leg's subnet %s", start, end, sn)
+	}
+	if o := own.To4(); o != nil && bytesInRange(o, start, end) {
+		return "", "", fmt.Errorf("DHCP range %s-%s includes the gateway's own address %s — start the range after it", start, end, o)
+	}
+	return start.String() + "," + end.String(), dns, nil
+}
+
+// bytesInRange reports whether ip lies in [lo, hi] (all IPv4, 4-byte form).
+func bytesInRange(ip, lo, hi net.IP) bool {
+	return bytesCmp(ip, lo) >= 0 && bytesCmp(ip, hi) <= 0
+}
+
+func bytesCmp(a, b net.IP) int {
+	for i := range a {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 func b2iDHCP(b bool) int {
@@ -687,13 +901,16 @@ func (s *Service) legCount(vrID int64, kind string) int {
 	return n
 }
 
+// vrouterBackend resolves a runtime's backend (a seam for tests).
+var vrouterBackend = vrouter.For
+
 // applyAndPush rebuilds the runtime's legs and pushes the rendered FRR config.
 func (s *Service) applyAndPush(vrID int64) error {
 	v, err := scanVRouter(s.db.QueryRow(`SELECT `+vrouterCols+` FROM vrouters WHERE id=?`, vrID))
 	if err != nil {
 		return err
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err != nil {
 		return err
 	}
@@ -713,7 +930,7 @@ func (s *Service) applyAndPush(vrID int64) error {
 	}
 	// (Re)apply the zone firewall last — a fresh runtime (restart/hot-plug) has an
 	// empty netfilter instance, so the ruleset must be re-pushed after legs change.
-	if err := b.PushFirewall(v, vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON))); err != nil {
+	if err := pushVRouterFW(b, v, legs); err != nil {
 		return err
 	}
 	if ea, ok := b.(vrouter.EdgeApplier); ok {
@@ -725,6 +942,24 @@ func (s *Service) applyAndPush(vrID int64) error {
 	return nil
 }
 
+// pushVRouterFW renders and pushes a router's gateway firewall. A config that
+// can't be rendered pushes vrouter.DenyAllFirewall instead (the gateway fails
+// closed, never open) and returns the render error.
+func pushVRouterFW(b vrouter.Backend, v vrouter.VRouter, legs []vrouter.Leg) error {
+	rs, rerr := vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON))
+	if rerr != nil {
+		log.Printf("vrouter %s: %v — blocking forwarding until it is fixed", v.Name, rerr)
+		rs = vrouter.DenyAllFirewall()
+	}
+	if err := b.PushFirewall(v, rs); err != nil {
+		return err
+	}
+	if rerr != nil {
+		return fmt.Errorf("%v — forwarding through %s is blocked until the rule is fixed or removed", rerr, v.Name)
+	}
+	return nil
+}
+
 // applyFW re-renders and pushes just the zone firewall (used by the firewall
 // CRUD; leg/routing changes go through applyAndPush which also calls PushFirewall).
 func (s *Service) applyFW(vrID int64) error {
@@ -732,7 +967,7 @@ func (s *Service) applyFW(vrID int64) error {
 	if err != nil {
 		return err
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err != nil {
 		return err
 	}
@@ -740,7 +975,7 @@ func (s *Service) applyFW(vrID int64) error {
 	if err != nil {
 		return err
 	}
-	return b.PushFirewall(v, vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON)))
+	return pushVRouterFW(b, v, legs)
 }
 
 func (s *Service) applyDHCP(vrID int64, idx int) error {
@@ -748,7 +983,7 @@ func (s *Service) applyDHCP(vrID int64, idx int) error {
 	if err != nil {
 		return err
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err != nil {
 		return err
 	}
@@ -761,167 +996,398 @@ func (s *Service) applyDHCP(vrID int64, idx int) error {
 	return nil
 }
 
+// renderVRouterFRR renders a router's stored routing config.
 func (s *Service) renderVRouterFRR(v vrouter.VRouter, legs []vrouter.Leg) (string, error) {
-	var cfg routing.Config
-	if strings.TrimSpace(v.FRRJSON) != "" && v.FRRJSON != "{}" {
-		if err := json.Unmarshal([]byte(v.FRRJSON), &cfg); err != nil {
-			return "", fmt.Errorf("parse vrouter frr config: %w", err)
-		}
+	cfg, err := decodeFRRJSON(v.FRRJSON)
+	if err != nil {
+		return "", err
 	}
-	return vrouter.RenderForVRouter(v, legs, cfg)
+	return s.renderVRouterCfg(v, legs, cfg)
 }
 
-// mutateVRouterFRR loads the stored routing.Config, applies fn, persists, audits,
-// re-renders and pushes it into the runtime.
-func (s *Service) mutateVRouterFRR(p *Principal, vrID int64, ip, action string, fn func(*routing.Config)) error {
+// renderVRouterCfg renders what the router actually runs of cfg (see
+// vrouterRouting), logging any entry it leaves out.
+func (s *Service) renderVRouterCfg(v vrouter.VRouter, legs []vrouter.Leg, cfg routing.Config) (string, error) {
+	eff, ignored := s.vrouterRouting(v, legs, cfg)
+	if len(ignored) > 0 {
+		log.Printf("vrouter %s: not applying: %s", v.Name, strings.Join(ignored, "; "))
+	}
+	return vrouter.RenderForVRouter(v, legs, eff)
+}
+
+// vrouterMu serializes routing changes to vRouters: each one reads the stored
+// config, pushes the changed one, and only then saves it.
+var vrouterMu sync.Mutex
+
+// vrEdit is what a routing change on one router is checked against.
+type vrEdit struct {
+	v      vrouter.VRouter
+	legs   []vrouter.Leg
+	tenant bool // a tenant org's gateway: the tenant routing policy applies
+}
+
+// connected / export are the networks the tenant policy measures against.
+func (e vrEdit) connected() []*net.IPNet { return vrouter.ConnectedNets(e.legs) }
+func (e vrEdit) export() []*net.IPNet    { return vrouter.ExportNets(e.legs) }
+
+// netList formats networks for an error message.
+func netList(nets []*net.IPNet) string {
+	if len(nets) == 0 {
+		return "none yet — attach a segment or port group first"
+	}
+	s := make([]string, len(nets))
+	for i, n := range nets {
+		s[i] = n.String()
+	}
+	return strings.Join(s, ", ")
+}
+
+// mutateVRouterFRR loads the router's routing config, applies fn, pushes the
+// result into the runtime and only then saves and audits it. If the push
+// fails, the previous config is pushed back and nothing is saved — so the
+// stored config is always one the router took.
+func (s *Service) mutateVRouterFRR(p *Principal, vrID int64, ip, action string, detail map[string]any, fn func(e vrEdit, c *routing.Config) error) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
 	}
+	vrouterMu.Lock()
+	defer vrouterMu.Unlock()
 	v, err := s.getVRouter(p, vrID)
 	if err != nil {
 		return err
 	}
-	var cfg routing.Config
-	if strings.TrimSpace(v.FRRJSON) != "" && v.FRRJSON != "{}" {
-		if err := json.Unmarshal([]byte(v.FRRJSON), &cfg); err != nil {
-			return err
-		}
+	if v.Status == "creating" {
+		return fmt.Errorf("the router is still being created — wait a moment, then try again")
 	}
-	fn(&cfg)
-	blob, err := json.Marshal(cfg)
+	stored, err := decodeFRRJSON(v.FRRJSON)
+	if err != nil {
+		return err
+	}
+	prev, _ := routing.Sanitize(stored)
+	next, _ := routing.Sanitize(stored) // an independent copy: fn may edit slices in place
+	legs, err := s.loadLegs(vrID)
+	if err != nil {
+		return err
+	}
+	if err := fn(vrEdit{v: v, legs: legs, tenant: s.isTenantRouter(v)}, &next); err != nil {
+		return err
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	conf, err := s.renderVRouterCfg(v, legs, next)
+	if err != nil {
+		return err
+	}
+	b, err := vrouterBackend(v.Runtime)
+	if err != nil {
+		return err
+	}
+	if err := b.PushFRR(v, conf); err != nil {
+		old, rerr := s.renderVRouterCfg(v, legs, prev)
+		if rerr == nil {
+			rerr = b.PushFRR(v, old)
+		}
+		if rerr != nil {
+			return fmt.Errorf("apply routing on %s: %v — restoring the previous config also failed (%v); check the router's FRR", v.Name, err, rerr)
+		}
+		return fmt.Errorf("apply routing on %s: %v — the change was not saved and the previous config was restored", v.Name, err)
+	}
+	blob, err := json.Marshal(next)
 	if err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`UPDATE vrouters SET frr_json=? WHERE id=?`, string(blob), vrID); err != nil {
 		return err
 	}
-	s.audit(p, p.OrgID, action, "vrouter", v.Name, ip, nil)
-	v.FRRJSON = string(blob)
-	legs, _ := s.loadLegs(vrID)
-	conf, err := vrouter.RenderForVRouter(v, legs, cfg)
-	if err != nil {
-		return err
-	}
-	b, err := vrouter.For(v.Runtime)
-	if err != nil {
-		return err
-	}
-	return b.PushFRR(v, conf)
+	s.audit(p, p.OrgID, action, "vrouter", v.Name, ip, detail)
+	return nil
 }
 
 // ---- dynamic-routing CRUD (scoped to a vRouter) --------------------------
+//
+// Every value is checked here (friendly error) and again by the renderer. On a
+// tenant org's gateway the tenant routing policy is checked too: BGP only with
+// directly connected neighbors, only the gateway's own downlink networks
+// advertised, OSPF only on its own networks, no EIGRP. (The renderer applies
+// the same policy to whatever is stored — vrouter.ConstrainTenant.)
+
+func errNoVREntry(what string, i int) error {
+	return fmt.Errorf("there is no %s #%d on this gateway — reload the page", what, i+1)
+}
 
 func (s *Service) VRAddStaticRoute(p *Principal, vrID int64, dest, nextHop, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.add", func(c *routing.Config) {
-		c.Static = append(c.Static, routing.Route{Dest: dest, NextHop: nextHop})
-	})
+	r, err := staticRoute(dest, nextHop)
+	if err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.add", map[string]any{"dest": r.Dest, "next_hop": r.NextHop},
+		func(_ vrEdit, c *routing.Config) error {
+			c.Static = append(c.Static, r)
+			return nil
+		})
 }
 func (s *Service) VRDelStaticRoute(p *Principal, vrID int64, idx int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.delete", func(c *routing.Config) {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.delete", map[string]any{"index": idx}, func(_ vrEdit, c *routing.Config) error {
+		if idx < 0 || idx >= len(c.Static) {
+			return errNoVREntry("static route", idx)
+		}
 		c.Static = delRoute(c.Static, idx)
+		return nil
 	})
 }
 func (s *Service) VRSetOSPF(p *Principal, vrID int64, enabled bool, routerID, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.set", func(c *routing.Config) {
-		c.OSPF.Enabled = enabled
-		c.OSPF.RouterID = routerID
-	})
+	routerID = strings.TrimSpace(routerID)
+	if err := routing.ValidRouterID(routerID); err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.set", map[string]any{"enabled": enabled, "router_id": routerID},
+		func(_ vrEdit, c *routing.Config) error {
+			c.OSPF.Enabled = enabled
+			c.OSPF.RouterID = routerID
+			return nil
+		})
 }
-func (s *Service) VRAddOSPFNet(p *Principal, vrID int64, cidr, area, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.add", func(c *routing.Config) {
-		if area == "" {
-			area = "0"
+
+// vrOSPFNet checks an OSPF network for a router (tenant: one of its networks).
+func vrOSPFNet(e vrEdit, cidr, area string) (routing.OSPFNet, error) {
+	n, err := routing.CanonPrefix(cidr)
+	if err != nil {
+		return routing.OSPFNet{}, err
+	}
+	if area = strings.TrimSpace(area); area == "" {
+		area = "0"
+	}
+	if err := routing.ValidArea(area); err != nil {
+		return routing.OSPFNet{}, err
+	}
+	if e.tenant {
+		pn, _ := routing.ParsePrefix(n)
+		own := append(e.connected(), e.export()...)
+		if !vrouter.NetWithin(pn, own) {
+			return routing.OSPFNet{}, fmt.Errorf("%s isn't one of this gateway's networks (%s) — on a tenant gateway OSPF runs only on its own interfaces' networks", n, netList(own))
 		}
-		c.OSPF.Networks = append(c.OSPF.Networks, routing.OSPFNet{CIDR: cidr, Area: area})
+	}
+	return routing.OSPFNet{CIDR: n, Area: area}, nil
+}
+
+func (s *Service) VRAddOSPFNet(p *Principal, vrID int64, cidr, area, ip string) error {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.add", map[string]any{"cidr": cidr, "area": area}, func(e vrEdit, c *routing.Config) error {
+		on, err := vrOSPFNet(e, cidr, area)
+		if err != nil {
+			return err
+		}
+		c.OSPF.Networks = append(c.OSPF.Networks, on)
+		return nil
 	})
 }
 func (s *Service) VRDelOSPFNet(p *Principal, vrID int64, idx int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.delete", func(c *routing.Config) {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.delete", map[string]any{"index": idx}, func(_ vrEdit, c *routing.Config) error {
+		if idx < 0 || idx >= len(c.OSPF.Networks) {
+			return errNoVREntry("OSPF network", idx)
+		}
 		c.OSPF.Networks = delOSPFNet(c.OSPF.Networks, idx)
+		return nil
 	})
 }
 func (s *Service) VRSetBGP(p *Principal, vrID int64, enabled bool, asn int, routerID, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.set", func(c *routing.Config) {
-		c.BGP.Enabled = enabled
-		c.BGP.ASN = asn
-		c.BGP.RouterID = routerID
-	})
+	routerID = strings.TrimSpace(routerID)
+	if enabled {
+		if err := routing.ValidASN(asn); err != nil {
+			return fmt.Errorf("local %w", err)
+		}
+	}
+	if err := routing.ValidRouterID(routerID); err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.set", map[string]any{"enabled": enabled, "asn": asn, "router_id": routerID},
+		func(_ vrEdit, c *routing.Config) error {
+			c.BGP.Enabled = enabled
+			c.BGP.ASN = asn
+			c.BGP.RouterID = routerID
+			return nil
+		})
 }
+
+// vrNeighbor checks a BGP neighbor for a router (tenant: directly connected).
+func vrNeighbor(e vrEdit, addr string, remoteAS int) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if err := routing.ValidPeer(addr); err != nil {
+		return "", err
+	}
+	if err := routing.ValidASN(remoteAS); err != nil {
+		return "", fmt.Errorf("remote %w", err)
+	}
+	if e.tenant && !vrouter.OnConnected(e.legs, net.ParseIP(addr)) {
+		return "", fmt.Errorf("%s isn't on a network this gateway is connected to (%s) — a tenant gateway can only peer with a neighbor on one of its interfaces' subnets", addr, netList(e.connected()))
+	}
+	return addr, nil
+}
+
 func (s *Service) VRAddBGPNeighbor(p *Principal, vrID int64, addr string, remoteAS int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.add", func(c *routing.Config) {
-		c.BGP.Neighbors = append(c.BGP.Neighbors, routing.Neighbor{Addr: addr, RemoteAS: remoteAS})
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.add", map[string]any{"addr": addr, "remote_as": remoteAS}, func(e vrEdit, c *routing.Config) error {
+		a, err := vrNeighbor(e, addr, remoteAS)
+		if err != nil {
+			return err
+		}
+		c.BGP.Neighbors = append(c.BGP.Neighbors, routing.Neighbor{Addr: a, RemoteAS: remoteAS})
+		return nil
 	})
 }
 func (s *Service) VRDelBGPNeighbor(p *Principal, vrID int64, idx int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.delete", func(c *routing.Config) {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.delete", map[string]any{"index": idx}, func(_ vrEdit, c *routing.Config) error {
+		if idx < 0 || idx >= len(c.BGP.Neighbors) {
+			return errNoVREntry("BGP neighbor", idx)
+		}
 		c.BGP.Neighbors = delNeighbor(c.BGP.Neighbors, idx)
+		return nil
 	})
 }
+
+// vrBGPNetwork checks a BGP network for a router (tenant: one of its
+// downlink networks).
+func vrBGPNetwork(e vrEdit, cidr string) (string, error) {
+	n, err := routing.CanonPrefix(cidr)
+	if err != nil {
+		return "", err
+	}
+	if e.tenant {
+		pn, _ := routing.ParsePrefix(n)
+		if !vrouter.NetWithin(pn, e.export()) {
+			return "", fmt.Errorf("%s isn't one of this gateway's downlink networks (%s) — a tenant gateway can only advertise the networks attached to it", n, netList(e.export()))
+		}
+	}
+	return n, nil
+}
+
 func (s *Service) VRAddBGPNetwork(p *Principal, vrID int64, cidr, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.add", func(c *routing.Config) {
-		c.BGP.Networks = append(c.BGP.Networks, cidr)
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.add", map[string]any{"cidr": cidr}, func(e vrEdit, c *routing.Config) error {
+		n, err := vrBGPNetwork(e, cidr)
+		if err != nil {
+			return err
+		}
+		c.BGP.Networks = append(c.BGP.Networks, n)
+		return nil
 	})
 }
 func (s *Service) VRDelBGPNetwork(p *Principal, vrID int64, idx int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.delete", func(c *routing.Config) {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.delete", map[string]any{"index": idx}, func(_ vrEdit, c *routing.Config) error {
+		if idx < 0 || idx >= len(c.BGP.Networks) {
+			return errNoVREntry("BGP network", idx)
+		}
 		c.BGP.Networks = delStr(c.BGP.Networks, idx)
+		return nil
 	})
 }
+
+// errTenantEIGRP: FRR's eigrpd has no per-neighbor export filter here, so a
+// tenant gateway can't run it.
+var errTenantEIGRP = fmt.Errorf("EIGRP isn't available on a tenant gateway — use OSPF or BGP")
+
 func (s *Service) VRSetEIGRP(p *Principal, vrID int64, enabled bool, asn int, routerID, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.set", func(c *routing.Config) {
-		c.EIGRP.Enabled = enabled
-		c.EIGRP.ASN = asn
-		c.EIGRP.RouterID = routerID
-	})
+	routerID = strings.TrimSpace(routerID)
+	if enabled && (asn < 1 || asn > 65535) {
+		return fmt.Errorf("EIGRP AS number must be 1-65535")
+	}
+	if err := routing.ValidRouterID(routerID); err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.set", map[string]any{"enabled": enabled, "asn": asn, "router_id": routerID},
+		func(e vrEdit, c *routing.Config) error {
+			if e.tenant && enabled {
+				return errTenantEIGRP
+			}
+			c.EIGRP.Enabled = enabled
+			c.EIGRP.ASN = asn
+			c.EIGRP.RouterID = routerID
+			return nil
+		})
 }
 func (s *Service) VRAddEIGRPNet(p *Principal, vrID int64, cidr, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.net.add", func(c *routing.Config) {
-		c.EIGRP.Networks = append(c.EIGRP.Networks, cidr)
+	n, err := routing.CanonPrefix(cidr)
+	if err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.net.add", map[string]any{"cidr": n}, func(e vrEdit, c *routing.Config) error {
+		if e.tenant {
+			return errTenantEIGRP
+		}
+		c.EIGRP.Networks = append(c.EIGRP.Networks, n)
+		return nil
 	})
 }
 func (s *Service) VRDelEIGRPNet(p *Principal, vrID int64, idx int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.net.delete", func(c *routing.Config) {
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.eigrp.net.delete", map[string]any{"index": idx}, func(_ vrEdit, c *routing.Config) error {
+		if idx < 0 || idx >= len(c.EIGRP.Networks) {
+			return errNoVREntry("EIGRP network", idx)
+		}
 		c.EIGRP.Networks = delStr(c.EIGRP.Networks, idx)
+		return nil
 	})
 }
 
 // ---- edit existing entries (replace at index) ----------------------------
 
 func (s *Service) VRUpdateStaticRoute(p *Principal, vrID int64, idx int, dest, nextHop, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.update", func(c *routing.Config) {
-		if idx >= 0 && idx < len(c.Static) {
-			c.Static[idx] = routing.Route{Dest: dest, NextHop: nextHop}
-		}
-	})
+	r, err := staticRoute(dest, nextHop)
+	if err != nil {
+		return err
+	}
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.static.update", map[string]any{"index": idx, "dest": r.Dest, "next_hop": r.NextHop},
+		func(_ vrEdit, c *routing.Config) error {
+			if idx < 0 || idx >= len(c.Static) {
+				return errNoVREntry("static route", idx)
+			}
+			c.Static[idx] = r
+			return nil
+		})
 }
 func (s *Service) VRUpdateOSPFNet(p *Principal, vrID int64, idx int, cidr, area, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.update", func(c *routing.Config) {
-		if area == "" {
-			area = "0"
-		}
-		if idx >= 0 && idx < len(c.OSPF.Networks) {
-			c.OSPF.Networks[idx] = routing.OSPFNet{CIDR: cidr, Area: area}
-		}
-	})
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.ospf.net.update", map[string]any{"index": idx, "cidr": cidr, "area": area},
+		func(e vrEdit, c *routing.Config) error {
+			if idx < 0 || idx >= len(c.OSPF.Networks) {
+				return errNoVREntry("OSPF network", idx)
+			}
+			on, err := vrOSPFNet(e, cidr, area)
+			if err != nil {
+				return err
+			}
+			c.OSPF.Networks[idx] = on
+			return nil
+		})
 }
 func (s *Service) VRUpdateBGPNeighbor(p *Principal, vrID int64, idx int, addr string, remoteAS int, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.update", func(c *routing.Config) {
-		if idx >= 0 && idx < len(c.BGP.Neighbors) {
-			c.BGP.Neighbors[idx].Addr = addr
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.neighbor.update", map[string]any{"index": idx, "addr": addr, "remote_as": remoteAS},
+		func(e vrEdit, c *routing.Config) error {
+			if idx < 0 || idx >= len(c.BGP.Neighbors) {
+				return errNoVREntry("BGP neighbor", idx)
+			}
+			a, err := vrNeighbor(e, addr, remoteAS)
+			if err != nil {
+				return err
+			}
+			c.BGP.Neighbors[idx].Addr = a
 			c.BGP.Neighbors[idx].RemoteAS = remoteAS
-		}
-	})
+			return nil
+		})
 }
 func (s *Service) VRUpdateBGPNetwork(p *Principal, vrID int64, idx int, cidr, ip string) error {
-	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.update", func(c *routing.Config) {
-		if idx >= 0 && idx < len(c.BGP.Networks) {
-			c.BGP.Networks[idx] = cidr
-		}
-	})
+	return s.mutateVRouterFRR(p, vrID, ip, "vrouter.bgp.network.update", map[string]any{"index": idx, "cidr": cidr},
+		func(e vrEdit, c *routing.Config) error {
+			if idx < 0 || idx >= len(c.BGP.Networks) {
+				return errNoVREntry("BGP network", idx)
+			}
+			n, err := vrBGPNetwork(e, cidr)
+			if err != nil {
+				return err
+			}
+			c.BGP.Networks[idx] = n
+			return nil
+		})
 }
 
-// UpdateTransitLink changes the transit leg's IP/CIDR (eth0). The physical NIC
-// is unchanged; to change that, delete and re-add the transit link.
+// UpdateTransitLink changes the provider link's IP/CIDR (eth0). The physical
+// NIC is unchanged; to change that, remove the provider link and add a new one.
 func (s *Service) UpdateTransitLink(p *Principal, vrID int64, cidr, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
@@ -930,23 +1396,28 @@ func (s *Service) UpdateTransitLink(p *Principal, vrID int64, cidr, ip string) e
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(cidr) == "" {
-		return fmt.Errorf("a transit IP/CIDR is required")
+	if cidr = strings.TrimSpace(cidr); cidr == "" {
+		return fmt.Errorf("a provider-link IP/CIDR is required")
+	}
+	if err := validLegCIDR(cidr); err != nil {
+		return err
 	}
 	res, err := s.db.Exec(`UPDATE vrouter_legs SET cidr=? WHERE vrouter_id=? AND kind='transit'`, cidr, vrID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("this vRouter has no transit link yet")
+		return fmt.Errorf("this gateway has no provider link yet")
 	}
 	s.audit(p, p.OrgID, "vrouter.transit.update", "vrouter", v.Name, ip, map[string]any{"cidr": cidr})
 	return s.applyAndPush(vrID)
 }
 
-// UpdateInternalNetwork edits an internal port group's name, subnet and the
-// vRouter's gateway IP on it (idx = leg index). Re-renders FRR (zebra re-assigns
-// the leg IP) and re-applies DHCP if enabled.
+// UpdateInternalNetwork edits a downlink (idx = leg index): the gateway's
+// address on it and — for an internal port group the router created — the port
+// group's name and subnet. An attached tenant segment / port group keeps its
+// name and subnet (they belong to its vSwitch; edit them on the Networks page).
+// Re-renders FRR (zebra re-assigns the leg IP) and re-applies DHCP if enabled.
 func (s *Service) UpdateInternalNetwork(p *Principal, vrID int64, idx int, name, cidr, gatewayCIDR, ip string) error {
 	if !p.atLeast("admin") {
 		return ErrUnauthorized
@@ -955,18 +1426,42 @@ func (s *Service) UpdateInternalNetwork(p *Principal, vrID int64, idx int, name,
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(name) == "" || strings.TrimSpace(gatewayCIDR) == "" {
-		return fmt.Errorf("a name and the vRouter's gateway IP/CIDR are required")
-	}
 	var netID int64
-	if err := s.db.QueryRow(`SELECT network_id FROM vrouter_legs WHERE vrouter_id=? AND idx=? AND kind='internal'`, vrID, idx).Scan(&netID); err != nil {
-		return fmt.Errorf("no internal port group at index %d", idx)
+	var curName, curCIDR, dhcpRange, dns string
+	var dhcp int
+	if err := s.db.QueryRow(`SELECT l.network_id,COALESCE(n.name,''),COALESCE(n.cidr,''),l.dhcp,l.dhcp_range,l.dhcp_dns
+		FROM vrouter_legs l LEFT JOIN networks n ON n.id=l.network_id WHERE l.vrouter_id=? AND l.idx=? AND l.kind='internal'`, vrID, idx).
+		Scan(&netID, &curName, &curCIDR, &dhcp, &dhcpRange, &dns); err != nil {
+		return fmt.Errorf("no downlink at index %d", idx)
 	}
-	gwIP := gatewayCIDR
-	if i := strings.IndexByte(gwIP, '/'); i >= 0 {
-		gwIP = gwIP[:i]
+	name, cidr = strings.TrimSpace(name), strings.TrimSpace(cidr)
+	attached := s.isTenantSegment(netID)
+	if attached {
+		name, cidr = curName, curCIDR
 	}
-	if _, err := s.db.Exec(`UPDATE networks SET name=?, cidr=?, gateway=? WHERE id=? AND org_id=?`, name, cidr, gwIP, netID, p.OrgID); err != nil {
+	if name == "" || strings.TrimSpace(gatewayCIDR) == "" {
+		return fmt.Errorf("a name and the gateway's IP/CIDR on the downlink are required")
+	}
+	if cidr != "" {
+		if cidr, err = routing.CanonPrefix(cidr); err != nil {
+			return err
+		}
+	}
+	gwIP, gatewayCIDR, err := legAddr(gatewayCIDR, cidr)
+	if err != nil {
+		return err
+	}
+	if dhcp != 0 {
+		if _, _, err := legDHCP(true, dhcpRange, dns, gatewayCIDR); err != nil {
+			return fmt.Errorf("DHCP is on for this downlink: %v — change or turn off DHCP first", err)
+		}
+	}
+	if attached {
+		_, err = s.db.Exec(`UPDATE networks SET gateway=? WHERE id=? AND org_id=?`, gwIP, netID, p.OrgID)
+	} else {
+		_, err = s.db.Exec(`UPDATE networks SET name=?, cidr=?, gateway=? WHERE id=? AND org_id=?`, name, cidr, gwIP, netID, p.OrgID)
+	}
+	if err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(`UPDATE vrouter_legs SET cidr=? WHERE vrouter_id=? AND idx=?`, gatewayCIDR, vrID, idx); err != nil {
@@ -1001,7 +1496,7 @@ func (s *Service) StopVRouter(p *Principal, vrID int64, ip string) error {
 	if err != nil {
 		return err
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err != nil {
 		return err
 	}
@@ -1046,7 +1541,7 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 	if !p.IsAdmin {
 		for _, l := range legs {
 			if l.Kind == vrouter.LegTransit {
-				return fmt.Errorf("this router has an uplink (transit) link — an instance administrator must remove it first")
+				return fmt.Errorf("this gateway has a provider link (Tier-0 uplink) — an instance administrator must remove it first")
 			}
 		}
 	}
@@ -1062,7 +1557,7 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 			}
 		}
 	}
-	b, err := vrouter.For(v.Runtime)
+	b, err := vrouterBackend(v.Runtime)
 	if err == nil {
 		_ = b.Stop(v)
 		_ = b.Destroy(v)
@@ -1131,7 +1626,7 @@ func (s *Service) ReensureVRouters() {
 		if v.Status != "running" {
 			continue
 		}
-		b, err := vrouter.For(v.Runtime)
+		b, err := vrouterBackend(v.Runtime)
 		if err != nil {
 			continue
 		}
@@ -1139,17 +1634,33 @@ func (s *Service) ReensureVRouters() {
 		// On a plain vdxd restart the container/netns is still up — ApplyLegs would
 		// restart it and needlessly flap routing sessions (BGP/OSPF), so skip it.
 		if ls, e := b.Status(v); e == nil && ls.State == "running" {
+			// A tenant gateway's FRR is still re-pushed (frr-reload applies only the
+			// difference, so sessions don't flap): the stored config is rendered
+			// under the CURRENT tenant routing policy, so a config pushed by an
+			// older build is brought in line on upgrade.
+			if v.Runtime == vrouter.RuntimeNetns && s.isTenantRouter(v) {
+				if conf, err := s.renderVRouterFRR(v, legs); err != nil {
+					log.Printf("vrouter %s: render: %v", v.Name, err)
+				} else if err := b.PushFRR(v, conf); err != nil {
+					log.Printf("vrouter %s: re-push routing: %v", v.Name, err)
+				}
+			}
 			continue
 		}
 		if err := b.ApplyLegs(v, legs); err != nil {
+			log.Printf("vrouter %s: legs: %v", v.Name, err)
 			continue
 		}
-		if conf, err := s.renderVRouterFRR(v, legs); err == nil {
-			_ = b.PushFRR(v, conf)
+		if conf, err := s.renderVRouterFRR(v, legs); err != nil {
+			log.Printf("vrouter %s: render: %v", v.Name, err)
+		} else if err := b.PushFRR(v, conf); err != nil {
+			log.Printf("vrouter %s: push routing: %v", v.Name, err)
 		}
 		// Re-apply the zone firewall (the rebuilt runtime has an empty netfilter
 		// instance after a host reboot).
-		_ = b.PushFirewall(v, vrouter.RenderFirewall(v, legs, parseFW(v.FWJSON)))
+		if err := pushVRouterFW(b, v, legs); err != nil {
+			log.Printf("vrouter %s: firewall: %v", v.Name, err)
+		}
 		if ea, ok := b.(vrouter.EdgeApplier); ok {
 			if err := ea.ApplyEdge(v, legs); err != nil {
 				log.Printf("vrouter %s: edge: %v", v.Name, err)
@@ -1234,7 +1745,7 @@ func (s *Service) VRouterDiagram(p *Principal, id int64) (*VRDiagram, error) {
 			d.Transit = &VRDiagTransit{CIDR: l.CIDR, Phys: l.PhysIface, Switch: sw, Port: port, Mgmt: mgmt, Descr: descr}
 		case vrouter.LegUplink:
 			if d.Transit == nil {
-				d.Transit = &VRDiagTransit{CIDR: l.CIDR, Phys: "uplink · " + l.NetworkName}
+				d.Transit = &VRDiagTransit{CIDR: l.CIDR, Phys: "external interface · " + l.NetworkName}
 			}
 		}
 	}

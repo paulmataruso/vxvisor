@@ -76,8 +76,13 @@
   <div class="fw-note">
     Group your VMs, then write rules between the groups. A <b>VM Group</b> is a set of VMs (drag them in)
     and/or whole port groups; put each group in the <b>Internal</b> or <b>External</b> zone. Rules are split
-    by direction: <b>North-South</b> for traffic between different port groups or to and from External, and
-    <b>East-West</b> for traffic between VMs on the same port group. All membership is drag-and-drop.
+    by where they are enforced: the <b>gateway firewall</b> (North-South) for traffic a gateway routes — between
+    different port groups or to and from External — and the <b>distributed firewall</b> (East-West) for traffic
+    between VMs on the same port group. All membership is drag-and-drop.<br>
+    <b>Default policies:</b> the gateway firewall is <b>default deny</b> — a gateway no rule applies to forwards
+    everything, but as soon as any rule applies to it, only what a rule allows passes (replies to allowed traffic
+    always do). The distributed firewall is <b>default allow</b> — traffic within a port group passes until a deny
+    rule matches.
   </div>
 
   <div class="fw-board">
@@ -118,10 +123,10 @@
 </div>
 
 <!-- North-South rules -->
-{{template "fwrules" (dict "Dir" "ns" "Title" "North-South — between port groups or to External" "Sub" "For traffic that moves between different port groups, or to and from External. Example: allow Web to reach Database on 1433, or Internal out to the internet on 443. Stateful and port-aware; once a rule is added, anything not allowed is denied." "Groups" .FW.RulesNS "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
+{{template "fwrules" (dict "Dir" "ns" "Title" "Gateway firewall (North-South) — between port groups or to External" "Sub" "Enforced on each gateway for traffic it routes between different port groups, or to and from External. Example: allow Web to reach Database on 1433, or Internal out to the internet on 443. Stateful and port-aware. Default deny: once a rule applies to a gateway, anything not allowed through it is dropped (a gateway with no rules stays open)." "Groups" .FW.RulesNS "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
 
 <!-- East-West rules -->
-{{template "fwrules" (dict "Dir" "ew" "Title" "East-West — within one port group" "Sub" "For traffic between VMs on the same port group. Example: let App-1 reach App-2 on 5432 and block everything else between them. Starts fully open — add rules to carve out what you want to deny." "Groups" .FW.RulesEW "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
+{{template "fwrules" (dict "Dir" "ew" "Title" "Distributed firewall (East-West) — within one port group" "Sub" "Enforced on the vSwitch for traffic between VMs on the same port group. Example: let App-1 reach App-2 on 5432 and block everything else between them. Default allow: it starts fully open — add deny rules to carve out what you want blocked." "Groups" .FW.RulesEW "FW" .FW "Protos" .Protos "CSRF" $.CSRF)}}
 </div>
 
 <script>
@@ -274,7 +279,7 @@
 
   <!-- add-rule modal -->
   <div class="modal" id="m-rule-{{.Dir}}"><div class="modal-card lg">
-    <div class="modal-head"><h3>Add {{if eq .Dir "ns"}}North-South{{else}}East-West{{end}} rule</h3><button class="modal-x" data-close>&times;</button></div>
+    <div class="modal-head"><h3>Add {{if eq .Dir "ns"}}gateway firewall (North-South){{else}}distributed firewall (East-West){{end}} rule</h3><button class="modal-x" data-close>&times;</button></div>
     <form class="mform fw-rule-form" method="post" action="/firewall/rule">
       <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="dir" value="{{.Dir}}">
       <div class="fw-eps">

@@ -44,8 +44,8 @@ func run(timeout time.Duration, name string, args ...string) (string, error) {
 
 // Route is a static route.
 type Route struct {
-	Dest    string `json:"dest"`     // CIDR, e.g. 10.30.0.0/24, or "default"
-	NextHop string `json:"next_hop"` // gateway IP
+	Dest    string `json:"dest"`     // CIDR, e.g. 10.30.0.0/24, or "default" (= 0.0.0.0/0)
+	NextHop string `json:"next_hop"` // gateway IPv4 address, or an interface name
 }
 
 // OSPFNet attaches a network to an OSPF area.
@@ -59,6 +59,9 @@ type OSPF struct {
 	Enabled  bool      `json:"enabled"`
 	RouterID string    `json:"router_id"`
 	Networks []OSPFNet `json:"networks"`
+	// Passive interfaces are advertised but form no adjacency, so no LSA is
+	// accepted on them. Set by the vRouter tenant policy, not the UI.
+	Passive []string `json:"passive,omitempty"`
 }
 
 // Neighbor is a BGP peer.
@@ -67,6 +70,9 @@ type Neighbor struct {
 	RemoteAS    int    `json:"remote_as"`
 	RouteMapIn  string `json:"route_map_in"`  // optional inbound route-map name
 	RouteMapOut string `json:"route_map_out"` // optional outbound route-map name
+	// PrefixListOut filters what is advertised to this peer. Set by the vRouter
+	// tenant export policy (vrouter.ConstrainTenant), not the UI.
+	PrefixListOut string `json:"prefix_list_out,omitempty"`
 }
 
 // IfPrefix assigns an IP prefix (CIDR) to a host interface (managed by zebra).
@@ -91,8 +97,8 @@ type RouteMapClause struct {
 	Seq             int    `json:"seq"`
 	Action          string `json:"action"` // permit | deny
 	MatchPrefixList string `json:"match_prefix_list"`
-	SetMetric       int    `json:"set_metric"`      // 0 = unset
-	SetLocalPref    int    `json:"set_local_pref"`  // 0 = unset
+	SetMetric       int    `json:"set_metric"`     // 0 = unset
+	SetLocalPref    int    `json:"set_local_pref"` // 0 = unset
 }
 
 // BGP is the BGP config (opt-in).
@@ -161,6 +167,7 @@ log syslog informational
 !
 {{range .IfaceGroups}}interface {{.Iface}}
 {{range .CIDRs}} ip address {{.}}
+{{end}}{{if .Passive}} ip ospf passive
 {{end}}exit
 !
 {{end}}{{range .Static}}ip route {{.Dest}} {{.NextHop}}
@@ -185,6 +192,7 @@ log syslog informational
 {{range .BGP.Networks}}  network {{.}}
 {{end}}{{range .BGP.Neighbors}}{{if .RouteMapIn}}  neighbor {{.Addr}} route-map {{.RouteMapIn}} in
 {{end}}{{if .RouteMapOut}}  neighbor {{.Addr}} route-map {{.RouteMapOut}} out
+{{end}}{{if .PrefixListOut}}  neighbor {{.Addr}} prefix-list {{.PrefixListOut}} out
 {{end}}{{end}} exit-address-family
 exit
 !
@@ -198,8 +206,9 @@ exit
 `))
 
 type ifaceGroup struct {
-	Iface string
-	CIDRs []string
+	Iface   string
+	CIDRs   []string
+	Passive bool // OSPF passive (only set while OSPF is on)
 }
 
 // frrView is Config plus derived data for the template.
@@ -208,13 +217,34 @@ type frrView struct {
 	IfaceGroups []ifaceGroup
 }
 
-// RenderFRR produces the full frr.conf for the given config.
+// RenderFRR produces the full frr.conf for the given config. It renders nothing
+// if any value isn't a single token of the expected shape (Config.Validate).
 func RenderFRR(c Config) (string, error) {
 	if c.Hostname == "" {
 		c.Hostname = "vdxclone"
 	}
 	if c.FRRVersion == "" {
 		c.FRRVersion = "10.5" // host FRR default; preserves prior behaviour
+	}
+	if err := c.Validate(); err != nil {
+		return "", fmt.Errorf("refusing to render the routing config: %w", err)
+	}
+	// FRR has no "default" keyword for a static destination.
+	if len(c.Static) > 0 {
+		st := make([]Route, len(c.Static))
+		for i, r := range c.Static {
+			if r.Dest == "default" {
+				r.Dest = "0.0.0.0/0"
+			}
+			st[i] = r
+		}
+		c.Static = st
+	}
+	passive := map[string]bool{}
+	if c.OSPF.Enabled {
+		for _, ifc := range c.OSPF.Passive {
+			passive[ifc] = true
+		}
 	}
 	// Group interface prefixes so each interface gets a single stanza.
 	var groups []ifaceGroup
@@ -227,7 +257,7 @@ func RenderFRR(c Config) (string, error) {
 			groups[i].CIDRs = append(groups[i].CIDRs, p.CIDR)
 		} else {
 			idx[p.Iface] = len(groups)
-			groups = append(groups, ifaceGroup{Iface: p.Iface, CIDRs: []string{p.CIDR}})
+			groups = append(groups, ifaceGroup{Iface: p.Iface, CIDRs: []string{p.CIDR}, Passive: passive[p.Iface]})
 		}
 	}
 	var b bytes.Buffer
@@ -332,8 +362,26 @@ func FRRStatus() (string, error) {
 
 // RenderNAT builds the vdxclone nftables table: SNAT (masquerade) for the
 // internal CIDRs out the uplink, plus a forward chain applying the firewall
-// rules (default accept for established/related, then the operator rules).
-func RenderNAT(c Config) string {
+// rules (default accept for established/related, then the operator rules). Like
+// RenderFRR it renders nothing if any value isn't a single valid token.
+func RenderNAT(c Config) (string, error) {
+	if c.Uplink != "" {
+		if err := ValidIface(c.Uplink); err != nil {
+			return "", fmt.Errorf("refusing to render the NAT table: uplink %w", err)
+		}
+	}
+	for _, cidr := range c.InternalCIDRs {
+		if cidr != "" {
+			if err := validNetwork(cidr); err != nil {
+				return "", fmt.Errorf("refusing to render the NAT table: %w", err)
+			}
+		}
+	}
+	for i, r := range c.Firewall {
+		if err := ValidFirewallRule(r); err != nil {
+			return "", fmt.Errorf("refusing to render the NAT table: firewall rule %d: %w", i+1, err)
+		}
+	}
 	var b strings.Builder
 	b.WriteString("table inet vdxclone {\n")
 	// NAT postrouting: masquerade internal networks leaving via the uplink.
@@ -365,16 +413,12 @@ func RenderNAT(c Config) string {
 				line += "dport " + r.DPort + " "
 			}
 		}
-		action := r.Action
-		if action != "accept" && action != "drop" {
-			action = "accept"
-		}
-		line += action + "\n"
+		line += r.Action + "\n"
 		b.WriteString(line)
 	}
 	b.WriteString("  }\n")
 	b.WriteString("}\n")
-	return b.String()
+	return b.String(), nil
 }
 
 // ApplyNAT replaces the vdxclone nftables table with a freshly rendered ruleset.
@@ -382,9 +426,12 @@ func ApplyNAT(c Config) error {
 	if !NFTAvailable() {
 		return fmt.Errorf("nftables is not installed")
 	}
+	ruleset, err := RenderNAT(c)
+	if err != nil {
+		return err
+	}
 	// Flush our table first (ignore error if absent), then load the new ruleset.
 	_, _ = run(5*time.Second, "nft", "delete", "table", "inet", "vdxclone")
-	ruleset := RenderNAT(c)
 	cmd := exec.Command("nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(ruleset)
 	if out, err := cmd.CombinedOutput(); err != nil {
