@@ -62,10 +62,10 @@ func TestHostL3Guard(t *testing.T) {
 		ok       bool
 	}{
 		{"0.0.0.0/0", "192.168.0.1", true},     // default via the management gateway
-		{"0.0.0.0/0", "10.50.0.2", false},     // default moved off the management interface
-		{"0.0.0.0/0", "192.0.2.1", false},     // next hop not on a connected subnet
-		{"0.0.0.0/0", "eno2", false},          // interface default route
-		{"10.60.0.0/24", "10.50.0.2", true},   // ordinary route via the routed port
+		{"0.0.0.0/0", "10.50.0.2", false},      // default moved off the management interface
+		{"0.0.0.0/0", "192.0.2.1", false},      // next hop not on a connected subnet
+		{"0.0.0.0/0", "eno2", false},           // interface default route
+		{"10.60.0.0/24", "10.50.0.2", true},    // ordinary route via the routed port
 		{"192.168.0.0/25", "10.50.0.2", false}, // inside the management subnet
 		{"192.168.5.0/24", "10.50.0.2", false}, // covers the admin's own address
 		{"192.168.5.0/24", "192.168.0.254", true},
