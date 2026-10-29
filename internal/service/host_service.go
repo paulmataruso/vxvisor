@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -755,12 +756,68 @@ type TopoPortGroup struct {
 // carries its link-aggregation members so the diagram can draw it as a LAG.
 type TopoUplink struct {
 	Name      string          `json:"name"`
-	Kind      string          `json:"kind"`      // nic | bond
+	Kind      string          `json:"kind"`      // nic | bond | nat (no port: NATed out Name, the default-route interface)
 	Mode      string          `json:"mode"`      // bond mode (lacp/etherchannel/active-backup) when kind=bond
 	Members   []string        `json:"members"`   // bond member NICs
 	State     string          `json:"state"`     // up | down
 	Speed     int             `json:"speed"`     // Mbps (0 = unknown)
 	Neighbors []lldp.Neighbor `json:"neighbors"` // upstream switch(es) learned via LLDP/CDP on this port (or its members)
+}
+
+// masqueradeSources lists the source networks the host NATs: every nft
+// masquerade rule's "ip saddr X" / "ip6 saddr X". Swapped in tests.
+var masqueradeSources = func() []*net.IPNet {
+	out, err := exec.Command("nft", "list", "ruleset").Output()
+	if err != nil {
+		return nil
+	}
+	return parseMasqueradeSources(string(out))
+}
+
+func parseMasqueradeSources(ruleset string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, ln := range strings.Split(ruleset, "\n") {
+		if !strings.Contains(ln, "masquerade") {
+			continue
+		}
+		f := strings.Fields(ln)
+		for i := 0; i+2 < len(f); i++ {
+			if (f[i] == "ip" || f[i] == "ip6") && f[i+1] == "saddr" {
+				if _, n, err := net.ParseCIDR(f[i+2]); err == nil {
+					nets = append(nets, n)
+				}
+			}
+		}
+	}
+	return nets
+}
+
+// natUplink is the egress of a portless bridge whose address sits in a
+// masqueraded network: the interface carrying the host's default route, with
+// that interface's own physical adapters / NIC teams as the members shown.
+func natUplink(br hostinfo.Iface, ifaces []hostinfo.Iface, natNets []*net.IPNet) (TopoUplink, bool) {
+	nat := false
+	for _, a := range br.Addrs {
+		if ip, _, err := net.ParseCIDR(a); err == nil {
+			for _, n := range natNets {
+				nat = nat || n.Contains(ip)
+			}
+		}
+	}
+	out := defaultRouteIfaces()
+	if !nat || len(out) == 0 || out[0] == br.Name {
+		return TopoUplink{}, false
+	}
+	u := TopoUplink{Name: out[0], Kind: "nat", State: "up"}
+	for _, it := range ifaces {
+		if it.Name == out[0] && it.State != "" {
+			u.State = it.State
+		}
+		if it.Master == out[0] && (it.Type == "physical" || it.Type == "bond") {
+			u.Members = append(u.Members, it.Name)
+		}
+	}
+	return u, true
 }
 
 // TopoVMK is a host IP endpoint on a vSwitch — a host-adapter box (e.g. the
@@ -1012,6 +1069,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	// NAT block only picks up VMs that aren't on a standard vSwitch.
 	topo := &Topology{}
 	placed := map[string]bool{}
+	natNets := masqueradeSources()
 	for _, br := range ifaces {
 		if br.Type != "bridge" {
 			continue
@@ -1041,6 +1099,14 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 				// render it as an uplink (that mislabels a container cable as a NIC).
 			default:
 				sw.Uplinks = append(sw.Uplinks, mkUplink(m.Name))
+			}
+		}
+		// A bridge with no port of its own whose subnet the host masquerades (e.g.
+		// LXC's lxcbr0) isn't internal-only: its traffic is NATed out the host's
+		// default route. Draw that path as its uplink.
+		if len(sw.Uplinks) == 0 {
+			if u, ok := natUplink(br, ifaces, natNets); ok {
+				sw.Uplinks = append(sw.Uplinks, u)
 			}
 		}
 		// Port groups = networks bound to this bridge. Each port group lists the
