@@ -140,6 +140,11 @@ type Manager struct {
 	// stop. In-memory (best-effort); lost on daemon restart, re-applied on next start.
 	pinMu  sync.Mutex
 	pinned map[string][]int
+	// snapLocks: vm id -> *sync.Mutex serializing snapshot/revert/clone/purge of
+	// that VM (snapshots.go lockVMs); purgeMu serializes purges, which may touch a
+	// dependent clone's storage while detaching it.
+	snapLocks sync.Map
+	purgeMu   sync.Mutex
 }
 
 func NewManager(cfg *config.Config, d *db.DB) *Manager {
@@ -1328,56 +1333,7 @@ func (m *Manager) Delete(id string) error {
 	return err
 }
 
-// ---- snapshots -----------------------------------------------------------
-
-// Snapshot takes a qcow2 internal snapshot. If the VM is running it is a live
-// snapshot (RAM+disk via QMP savevm); otherwise an offline disk snapshot. It
-// returns the snapshot tag and whether it was taken online.
-func (m *Manager) Snapshot(id, name string) (tag string, online bool, err error) {
-	if m.MigrationBusy(id) {
-		return "", false, fmt.Errorf("instance is migrating its storage; try again when the move finishes")
-	}
-	s, err := m.Get(id)
-	if err != nil {
-		return "", false, err
-	}
-	tag = "snap-" + randHex(4)
-	if m.Running(s) {
-		if err := qemu.QMPSnapshotSave(s.QMPSocket, tag); err != nil {
-			return "", false, err
-		}
-		return tag, true, nil
-	}
-	if err := qemu.SnapshotCreate(s.DiskPath, tag); err != nil {
-		return "", false, err
-	}
-	return tag, false, nil
-}
-
-// RevertSnapshot restores a disk to a snapshot. The VM must be stopped so the
-// filesystem is quiescent.
-func (m *Manager) RevertSnapshot(id, tag string) error {
-	s, err := m.Get(id)
-	if err != nil {
-		return err
-	}
-	if m.Running(s) {
-		return errors.New("stop the instance before reverting a snapshot")
-	}
-	return qemu.SnapshotApply(s.DiskPath, tag)
-}
-
-// DeleteSnapshot removes a snapshot from the disk (online or offline).
-func (m *Manager) DeleteSnapshot(id, tag string, online bool) error {
-	s, err := m.Get(id)
-	if err != nil {
-		return err
-	}
-	if m.Running(s) && online {
-		return qemu.QMPSnapshotDelete(s.QMPSocket, tag)
-	}
-	return qemu.SnapshotDelete(s.DiskPath, tag)
-}
+// Snapshots, instant clones and Purge live in snapshots.go / snaprecords.go.
 
 // ListTrash returns an org's soft-deleted (trashed) sessions.
 func (m *Manager) ListTrash(orgID int64) ([]*Session, error) {
@@ -1402,53 +1358,6 @@ func (m *Manager) ListTrash(orgID int64) ([]*Session, error) {
 func (m *Manager) Restore(id string) error {
 	_, err := m.db.Exec(`UPDATE sessions SET deleted_at=NULL, retention_at=NULL WHERE id=?`, id)
 	return err
-}
-
-// Purge permanently deletes a trashed session and its on-disk artifacts.
-func (m *Manager) Purge(id string) error {
-	s, err := m.db.Query(`SELECT disk_path,ovmf_vars_path,seed_path,COALESCE(disk_backend,'qcow2') FROM sessions WHERE id=?`, id)
-	if err != nil {
-		return err
-	}
-	var disk, vars, seed, backend string
-	if s.Next() {
-		_ = s.Scan(&disk, &vars, &seed, &backend)
-	}
-	s.Close()
-	if _, err := m.db.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
-		return err
-	}
-	m.releaseLeases(id) // give its static address back to the port group pool
-	// A zvol-backed disk is a ZFS volume, not a file — destroy it via zfs.
-	if backend == "zvol" && strings.HasPrefix(disk, "/dev/zvol/") {
-		_ = zfs.DestroyDataset(strings.TrimPrefix(disk, "/dev/zvol/"))
-		disk = "" // don't os.Remove a device node
-	}
-	// An lvm-backed disk is a raw thin LV — remove it via lvremove, not os.Remove.
-	if backend == "lvm" && strings.HasPrefix(disk, "/dev/") {
-		_ = lvm.RemoveLV(disk)
-		disk = "" // don't os.Remove a device node
-	}
-	// An rbd-backed disk is a Ceph RBD image — remove it via rbd rm, not os.Remove.
-	if backend == "rbd" {
-		if pool, image, ok := ceph.ParseRBD(disk); ok {
-			_ = ceph.RemoveImage(pool, image)
-		}
-		disk = "" // not a local path
-	}
-	for _, f := range []string{disk, vars, seed,
-		filepath.Join(m.cfg.Paths.DiskDir, id+".vncpw"),
-		filepath.Join(m.cfg.Paths.DiskDir, id+".log"),
-		filepath.Join(m.cfg.Paths.DiskDir, id+".qga"),
-		filepath.Join(m.cfg.Paths.DiskDir, id+".qmp")} {
-		if f != "" {
-			_ = os.Remove(f)
-		}
-	}
-	// Remove the per-VM swtpm NVRAM state directory (purge only).
-	m.stopSwtpm(id)
-	_ = os.RemoveAll(m.tpmStateDir(id))
-	return nil
 }
 
 // AdoptRunningVMs rediscovers QEMU VMs already running on this host WITHOUT

@@ -134,6 +134,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 	go s.loop(ctx, "session-gc", 1*time.Hour, s.gcWebSessions)
 	go s.loop(ctx, "retention", 10*time.Minute, s.retention)
 	go s.loop(ctx, "backup-scheduler", 5*time.Minute, s.runDueBackups)
+	go s.loop(ctx, "snapshot-policies", time.Minute, s.runSnapshotPolicies)
 	go s.loop(ctx, "db-backup", 6*time.Hour, s.backupControlPlane)
 	go s.loop(ctx, "metrics", 10*time.Second, s.collectMetrics)
 	go s.loop(ctx, "alerts", 30*time.Second, s.evalAlerts)
@@ -281,6 +282,20 @@ func (s *Supervisor) retention() {
 			}
 		}
 	}
+}
+
+// snapshotSettle delays scheduled snapshots after boot, so autostarted guests
+// have their agents up (a missed run then catches up once).
+const snapshotSettle = 2 * time.Minute
+
+// runSnapshotPolicies runs every due snapshot policy (docs/SNAPSHOTS.md).
+// Pruning — the only destructive part — waits out the same boot grace as
+// auto-retention, so a stale/restored DB can't delete snapshots right at start.
+func (s *Supervisor) runSnapshotPolicies() {
+	if s.svc == nil || time.Since(s.startedAt) < snapshotSettle {
+		return
+	}
+	s.svc.RunDueSnapshotPolicies(time.Now(), time.Since(s.startedAt) >= retentionGrace)
 }
 
 // runDueBackups runs any backup schedule whose next_run_at has passed, backing up

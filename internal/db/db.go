@@ -1129,6 +1129,78 @@ ALTER TABLE net_vswitches ADD COLUMN mtu INTEGER NOT NULL DEFAULT 0;
 -- ignores it (its containers queries use explicit column lists).
 ALTER TABLE containers ADD COLUMN network_id INTEGER NOT NULL DEFAULT 0;
 `},
+	{55, "snapshot-policies", `
+-- Scheduled snapshot policies (docs/SNAPSHOTS.md). A policy snapshots one VM,
+-- every VM in a folder (sub-folders included), or every VM of an org at once (a
+-- best-effort consistency group), on an hourly / daily / weekly schedule, and
+-- prunes by "keep the last N" and/or "keep for D days". immutable locks each
+-- snapshot it takes until created + keep_days, so it requires keep_days (CHECK).
+-- org_id scopes every query; an org admin sees and manages only their own org.
+CREATE TABLE IF NOT EXISTS snapshot_policies (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id        INTEGER NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    target_kind   TEXT NOT NULL CHECK (target_kind IN ('vm','folder','org')),
+    target_vm     TEXT NOT NULL DEFAULT '',     -- sessions.id when target_kind='vm'
+    target_folder INTEGER NOT NULL DEFAULT 0,   -- vm_folders.id when target_kind='folder'
+    schedule      TEXT NOT NULL CHECK (schedule IN ('hourly','daily','weekly')),
+    at_minute     INTEGER NOT NULL DEFAULT 0,   -- minute past the hour / of HH:MM
+    at_hour       INTEGER NOT NULL DEFAULT 0,   -- daily/weekly HH (host local time)
+    weekday       INTEGER NOT NULL DEFAULT 0,   -- weekly: 0=Sunday … 6=Saturday
+    keep_last     INTEGER NOT NULL DEFAULT 0,   -- 0 = no count rule
+    keep_days     INTEGER NOT NULL DEFAULT 0,   -- 0 = no age rule
+    immutable     INTEGER NOT NULL DEFAULT 0,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_run_at   TEXT,
+    next_run_at   TEXT,
+    last_status   TEXT NOT NULL DEFAULT '',
+    created_by    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK (immutable = 0 OR keep_days > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_snappol_org_name ON snapshot_policies(org_id, name);
+CREATE INDEX IF NOT EXISTS idx_snappol_due ON snapshot_policies(enabled, next_run_at);
+`},
+	{56, "snapshots-v2", `
+-- Snapshots for every disk backend, not just qcow2 internal tags. backend is the
+-- disk's backend when the snapshot was taken; ref is the backend locator
+-- (zvol: pool/ds@tag, lvm: vg/lv, rbd: pool/image@tag; '' = the qcow2 internal
+-- tag). consistency records how it was taken: offline (VM stopped), app (guest
+-- filesystems frozen via the guest agent) or crash. locked_until is the
+-- immutability lock (absolute; never shortened by later policy edits/deletes).
+-- STRICTLY ADDITIVE: an older binary keeps using id/session_id/name/tag/online.
+ALTER TABLE snapshots ADD COLUMN backend      TEXT NOT NULL DEFAULT 'qcow2';
+ALTER TABLE snapshots ADD COLUMN ref          TEXT NOT NULL DEFAULT '';
+ALTER TABLE snapshots ADD COLUMN consistency  TEXT NOT NULL DEFAULT '';
+ALTER TABLE snapshots ADD COLUMN vars_path    TEXT NOT NULL DEFAULT '';  -- UEFI NVRAM copy taken with the snapshot
+ALTER TABLE snapshots ADD COLUMN policy_id    INTEGER REFERENCES snapshot_policies(id) ON DELETE SET NULL;
+ALTER TABLE snapshots ADD COLUMN group_id     TEXT NOT NULL DEFAULT '';  -- one policy run = one group
+ALTER TABLE snapshots ADD COLUMN locked_until TEXT;                      -- RFC3339 UTC; NULL = not immutable
+ALTER TABLE snapshots ADD COLUMN expires_at   TEXT;                      -- RFC3339 UTC age cutoff (policy keep_days)
+ALTER TABLE snapshots ADD COLUMN transient    INTEGER NOT NULL DEFAULT 0; -- taken only as an instant clone's base
+UPDATE snapshots SET consistency = CASE WHEN online = 1 THEN 'crash' ELSE 'offline' END WHERE consistency = '';
+CREATE INDEX IF NOT EXISTS idx_snapshots_policy ON snapshots(policy_id);
+`},
+	{57, "snapshot-clones", `
+-- Instant clones: which VM a clone came from, and — ONLY while the clone's disk
+-- still shares blocks with it (a zfs clone / rbd child) — the snapshot it depends
+-- on. snapshot_id is RESTRICT: the DB refuses to drop a snapshot (directly, or by
+-- cascade when its VM is purged) while a clone still depends on it; the purge path
+-- detaches dependents first (zfs promote / rbd flatten) and NULLs the column.
+-- origin_id has no FK on purpose: an independent clone outlives its origin.
+CREATE TABLE IF NOT EXISTS snapshot_clones (
+    clone_id      TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    origin_id     TEXT NOT NULL,
+    origin_name   TEXT NOT NULL DEFAULT '',
+    snapshot_id   INTEGER REFERENCES snapshots(id) ON DELETE RESTRICT,
+    snapshot_name TEXT NOT NULL DEFAULT '',
+    backend       TEXT NOT NULL DEFAULT 'qcow2',
+    method        TEXT NOT NULL DEFAULT '',     -- zfs-clone|rbd-clone|lvm-thin|reflink|convert
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_snapclones_snapshot ON snapshot_clones(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_snapclones_origin ON snapshot_clones(origin_id);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

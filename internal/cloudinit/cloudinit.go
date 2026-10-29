@@ -46,6 +46,13 @@ type Config struct {
 	// control plane can read the guest's IPs/OS/filesystem usage. Small package;
 	// needs guest package access (repo mirror reachable).
 	InstallGuestAgent bool
+
+	// Clone marks the seed of an instant clone: the disk already holds the
+	// origin's installed OS, so on its first boot (a new instance-id) the guest
+	// also gets a fresh systemd machine-id (once per instance) and leases DHCP by
+	// MAC rather than by the machine-id-derived DUID, so a clone never collides
+	// with its origin's lease or identity.
+	Clone bool
 }
 
 // userData renders a minimal, broadly-compatible cloud-config. It enables
@@ -64,6 +71,10 @@ func (c Config) userData() string {
 	// wall clock stays correct even without the hypervisor clock (and for logs /
 	// TLS / Kerberos). UTC matches the -rtc base=utc we give Linux guests.
 	b.WriteString("timezone: UTC\n")
+	if c.Clone {
+		b.WriteString("bootcmd:\n")
+		b.WriteString("  - [ cloud-init-per, instance, vdx-clone-machine-id, sh, -c, \"rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup\" ]\n")
+	}
 	b.WriteString("users:\n")
 	fmt.Fprintf(&b, "  - name: %s\n", yamlStr(c.Username))
 	b.WriteString("    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n")
@@ -142,6 +153,9 @@ func (c Config) networkConfig() string {
 	if c.StaticIP == "" {
 		// DHCP: the LAN's own server provides address, gateway and DNS.
 		b.WriteString("    dhcp4: true\n")
+		if c.Clone {
+			b.WriteString("    dhcp-identifier: mac\n")
+		}
 		return b.String()
 	}
 	b.WriteString("    dhcp4: false\n")

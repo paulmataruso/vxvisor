@@ -132,6 +132,9 @@ func (s *Service) MoveSessionStorage(p *Principal, sessionID string, targetPoolI
 	if err != nil {
 		return err
 	}
+	if err := s.snapshotMoveGuard(sessionID); err != nil {
+		return err
+	}
 	dstLabel := "default disk dir"
 	if targetPoolID > 0 {
 		if pools, err := s.stg.ListPools(); err == nil {
@@ -167,6 +170,9 @@ func (s *Service) MigrateSession(p *Principal, sessionID string, dstNodeID int64
 	}
 	sess, err := s.sessionInOrg(p, sessionID)
 	if err != nil {
+		return err
+	}
+	if err := s.snapshotMoveGuard(sessionID); err != nil {
 		return err
 	}
 	// Resolve the source (this node) and destination nodes up front — both the

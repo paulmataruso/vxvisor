@@ -208,25 +208,38 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Snapshots <span class="muted" style="font-weight:400;font-size:12px">— {{if .Running}}live (RAM + disk){{else}}offline (disk){{end}}</span></h2>
-    <button class="btn primary" data-modal="m-snap">+ Take snapshot</button>
+    <h2>Snapshots <span class="muted" style="font-weight:400;font-size:12px">— {{if .Running}}live: guest-frozen when its agent answers, else crash-consistent{{else}}offline (disk at rest){{end}}</span></h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" data-modal="m-clone" data-snap="0">Instant clone</button>
+      <button class="btn primary" data-modal="m-snap">+ Take snapshot</button>
+    </div>
   </div>
+  {{if .IsClone}}{{with .CloneLink}}<p class="muted" style="margin:0 0 10px">Instant clone of {{if .OriginExists}}<a href="/instances/{{.OriginID}}">{{.OriginName}}</a>{{else}}{{.OriginName}} (purged){{end}} from snapshot <strong>{{.SnapshotName}}</strong> <span class="mono" style="font-size:11px">{{.Backend}} · {{.Method}}</span>{{if .SnapshotID}} — still shares storage with that snapshot{{else}} — independent{{end}}.</p>{{end}}{{end}}
   {{if .Snapshots}}
   <table>
-    <tr><th>Name</th><th>Type</th><th>Taken</th><th></th></tr>
+    <tr><th>Name</th><th>Consistency</th><th>Source</th><th>Taken</th><th></th></tr>
     {{range .Snapshots}}
     <tr>
-      <td>{{.Name}} <span class="muted mono" style="font-size:11px">{{.Tag}}</span></td>
-      <td>{{if .Online}}<span class="pill running">live</span>{{else}}<span class="pill">disk</span>{{end}}</td>
+      <td>{{.Name}} <span class="muted mono" style="font-size:11px">{{.Tag}}</span>
+        {{if .Immutable}}<br><span class="pill error" title="Immutable: it can't be deleted, and the instance can't be purged, before then">immutable until {{.LockedUntil}}</span>{{end}}
+        {{if .Clones}}<br><span class="muted" style="font-size:12px">Clones depending on it: {{range $i, $c := .Clones}}{{if $i}}, {{end}}<a href="/instances/{{$c.ID}}">{{$c.Name}}</a>{{end}}</span>{{end}}
+      </td>
+      <td>{{if eq .Consistency "app"}}<span class="pill running" title="Guest filesystems were frozen by the guest agent">app-consistent</span>{{else if eq .Consistency "crash"}}<span class="pill" title="Taken live without a guest freeze: like a power cut at that instant">crash-consistent</span>{{else}}<span class="pill stopped" title="The instance was stopped">offline</span>{{end}}</td>
+      <td>{{if .PolicyName}}policy <a href="/snapshot-policies?policy={{.PolicyID}}">{{.PolicyName}}</a>{{else if .Transient}}<span class="muted">clone base</span>{{else if .GroupID}}<span class="muted">policy (deleted)</span>{{else}}manual{{end}}</td>
       <td class="muted">{{.CreatedAt}}</td>
       <td style="text-align:right;white-space:nowrap">
-        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/revert" style="display:inline" onsubmit="return confirm('Revert disk to this snapshot? Instance must be stopped.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Revert</button></form>
-        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+        {{if and (eq .Backend "zvol") (gt .Newer 0)}}
+        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/revert" style="display:inline" onsubmit="return confirm('ZFS can only roll back to its newest snapshot: reverting here DESTROYS the newer snapshot(s) (refused if any is immutable or has clones). The instance must be stopped and its current state is lost. Continue?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="discard_newer" value="1"><button class="btn sm"{{if $.Running}} disabled title="Stop the instance to revert"{{end}}>Revert</button></form>
+        {{else}}
+        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/revert" style="display:inline" onsubmit="return confirm('Revert the disk (and UEFI settings) to this snapshot? The instance must be stopped; its current state is lost.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm"{{if $.Running}} disabled title="Stop the instance to revert"{{end}}>Revert</button></form>
+        {{end}}
+        <button class="btn sm" data-modal="m-clone" data-snap="{{.ID}}">Clone</button>
+        <form method="post" action="/sessions/{{$s.ID}}/snapshots/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this snapshot?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger"{{if .Immutable}} disabled title="Immutable until {{.LockedUntil}}"{{else if .Clones}} disabled title="Instant clones depend on it: delete them first"{{end}}>Delete</button></form>
       </td>
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No snapshots.</div>{{end}}
+  {{else}}<div class="empty">No snapshots. Take one by hand, or protect this instance with a <a href="/snapshot-policies">snapshot policy</a>.</div>{{end}}
 </div>
 
 <div class="card">
@@ -343,11 +356,32 @@
   <div class="modal-head"><h3>Take snapshot</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform" method="post" action="/sessions/{{$s.ID}}/snapshots">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label class="fld">Name<input type="text" name="name" placeholder="before-upgrade" required></label>
-    <p class="muted" style="margin:0">{{if .Running}}Live snapshot captures RAM + disk.{{else}}Offline snapshot captures the disk.{{end}}</p>
+    <label class="fld">Name<input type="text" name="name" placeholder="before-upgrade" maxlength="80" required></label>
+    <p class="muted" style="margin:0">{{if .Running}}A live, disk-only snapshot (no pause). {{if $s.GuestAgent}}The guest agent freezes the guest's filesystems for the instant it takes (app-consistent); if the agent doesn't answer it is crash-consistent.{{else}}Without the guest agent it is crash-consistent.{{end}}{{else}}An offline snapshot of the disk.{{end}} {{if eq $s.Firmware "uefi"}}The UEFI boot settings are saved with it.{{end}}</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Take snapshot</button></div>
   </form>
 </div></div>
+
+<div class="modal" id="m-clone"><div class="modal-card">
+  <div class="modal-head"><h3>Instant clone</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/sessions/{{$s.ID}}/clone">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" value="{{$s.Name}}-clone" maxlength="100" required></label>
+    <label class="fld">From
+      <select name="snapshot_id" id="clone-snap">
+        <option value="0">Now (its current state, via a transient snapshot)</option>
+        {{range .Snapshots}}<option value="{{.ID}}">{{.Name}} · {{.CreatedAt}}</option>{{end}}
+      </select>
+    </label>
+    <p class="muted" style="margin:0;font-size:12px">The clone is a new, stopped instance with its own identity: new MAC, NVRAM, console ports and address lease{{if $s.CloudInit}}, and a new cloud-init instance-id and hostname (the guest regenerates its SSH host keys and machine-id on first boot){{end}}.{{if $s.TPM}} It gets a new, empty TPM: BitLocker / measured-boot guests will ask for their recovery key.{{end}}</p>
+    <p class="muted" style="margin:0;font-size:12px">{{if eq $s.DiskBackend "zvol"}}ZFS clone: instant and space-sharing. The snapshot can't be deleted while the clone exists; purging this instance promotes the clone instead.{{else if eq $s.DiskBackend "lvm"}}LVM thin snapshot: instant, space-sharing and fully independent of this instance.{{else if eq $s.DiskBackend "rbd"}}RBD clone of a protected snapshot: instant and space-sharing. The snapshot can't be deleted while the clone exists; purging this instance flattens the clone first.{{else}}A reflink copy where the filesystem supports it (instant), otherwise a copy of only this instance's own changes over the shared base image. The clone is independent.{{end}}</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create clone</button></div>
+  </form>
+</div></div>
+<script>
+// Pre-select the snapshot of the row whose Clone button opened the modal.
+document.addEventListener('click',function(e){var b=e.target.closest('[data-modal="m-clone"]');if(!b)return;var s=document.getElementById('clone-snap');if(s)s.value=b.getAttribute('data-snap')||'0';},true);
+</script>
 
 <div class="modal" id="m-backup"><div class="modal-card">
   <div class="modal-head"><h3>Back up now</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
