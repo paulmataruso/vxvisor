@@ -178,6 +178,138 @@ func qgaCall(conn net.Conn, r *bufio.Reader, cmd string, args map[string]any) (j
 	}
 }
 
+// ---- filesystem freeze (snapshot consistency) ----------------------------
+//
+// guest-fsfreeze-freeze / -thaw are the ONLY state-changing guest-agent commands
+// the control plane issues: a snapshot of a running VM freezes the guest's
+// filesystems (flushing them to disk; on Windows the agent drives VSS) for the
+// instant the snapshot takes, then thaws. Callers MUST thaw on every path —
+// including after a failed or timed-out freeze, which may still complete inside
+// the guest after we gave up — so GuestFsThaw is idempotent and verifies.
+
+// qgaConn is a short-lived guest-agent connection resynchronised with
+// guest-sync-delimited, so a reply queued for an earlier client (e.g. a freeze
+// that outlived its caller's deadline) can never be read as ours.
+type qgaConn struct {
+	c net.Conn
+	r *bufio.Reader
+}
+
+func dialQGA(socketPath string, deadline time.Time) (*qgaConn, error) {
+	c, err := net.DialTimeout("unix", socketPath, time.Until(deadline))
+	if err != nil {
+		return nil, err
+	}
+	_ = c.SetDeadline(deadline)
+	q := &qgaConn{c: c, r: bufio.NewReader(c)}
+	if err := q.sync(); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return q, nil
+}
+
+func (q *qgaConn) Close() error { return q.c.Close() }
+
+// sync sends 0xFF (resets the agent's JSON parser, dropping any half-written
+// command) + guest-sync-delimited, skips everything up to the 0xFF the agent puts
+// before its reply, then reads until the reply echoing our id.
+func (q *qgaConn) sync() error {
+	id := time.Now().UnixNano() & 0x7fffffffffff
+	req, _ := json.Marshal(map[string]any{"execute": "guest-sync-delimited", "arguments": map[string]any{"id": id}})
+	if _, err := q.c.Write(append(append([]byte{0xFF}, req...), '\n')); err != nil {
+		return err
+	}
+	for {
+		b, err := q.r.ReadByte()
+		if err != nil {
+			return err
+		}
+		if b == 0xFF {
+			break
+		}
+	}
+	for {
+		line, err := q.r.ReadBytes('\n')
+		if err != nil {
+			return err
+		}
+		var resp struct {
+			Return *int64 `json:"return"`
+		}
+		if json.Unmarshal(line, &resp) == nil && resp.Return != nil && *resp.Return == id {
+			return nil
+		}
+	}
+}
+
+func (q *qgaConn) call(cmd string) (json.RawMessage, error) { return qgaCall(q.c, q.r, cmd, nil) }
+
+// GuestFsFreeze freezes every guest filesystem through the agent and returns how
+// many were frozen. A non-responsive agent fails within ~3s; a responsive one
+// gets up to timeout to finish freezing (Windows VSS can take a while). On ANY
+// return the caller must call GuestFsThaw.
+func GuestFsFreeze(socketPath string, timeout time.Duration) (int, error) {
+	if socketPath == "" {
+		return 0, fmt.Errorf("no guest agent socket")
+	}
+	q, err := dialQGA(socketPath, time.Now().Add(3*time.Second))
+	if err != nil {
+		return 0, fmt.Errorf("guest agent not responding: %w", err)
+	}
+	defer q.Close()
+	_ = q.c.SetDeadline(time.Now().Add(timeout))
+	raw, err := q.call("guest-fsfreeze-freeze")
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	_ = json.Unmarshal(raw, &n)
+	return n, nil
+}
+
+// GuestFsThaw thaws the guest's filesystems and confirms guest-fsfreeze-status
+// reads "thawed", retrying (fresh connection each time) until timeout. Safe to
+// call when nothing is frozen.
+func GuestFsThaw(socketPath string, timeout time.Duration) error {
+	if socketPath == "" {
+		return nil
+	}
+	end := time.Now().Add(timeout)
+	var last error
+	for attempt := 0; time.Now().Before(end); attempt++ {
+		if attempt > 0 {
+			time.Sleep(500 * time.Millisecond)
+		}
+		step := time.Now().Add(10 * time.Second)
+		if step.After(end) {
+			step = end
+		}
+		q, err := dialQGA(socketPath, step)
+		if err != nil {
+			last = err
+			continue
+		}
+		_, terr := q.call("guest-fsfreeze-thaw")
+		raw, serr := q.call("guest-fsfreeze-status")
+		q.Close()
+		if serr != nil {
+			last = serr
+			continue
+		}
+		var status string
+		_ = json.Unmarshal(raw, &status)
+		if status == "thawed" {
+			return terr // thawed; still report a thaw error (e.g. an expired VSS freeze)
+		}
+		last = fmt.Errorf("guest filesystems still %q", status)
+	}
+	if last == nil {
+		last = fmt.Errorf("timed out")
+	}
+	return fmt.Errorf("thaw guest filesystems: %w", last)
+}
+
 func joinNonEmpty(parts ...string) string {
 	out := ""
 	for _, p := range parts {

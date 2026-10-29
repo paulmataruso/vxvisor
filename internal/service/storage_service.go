@@ -251,71 +251,7 @@ func (s *Service) LaunchFromTemplate(p *Principal, templateID int64, name, ip st
 	return sess.ID, nil
 }
 
-// ---- snapshots -----------------------------------------------------------
-
-func (s *Service) ListSnapshots(p *Principal, sessionID string) ([]storage.Snapshot, error) {
-	if _, err := s.sessionInOrg(p, sessionID); err != nil {
-		return nil, err
-	}
-	return s.stg.ListSnapshots(sessionID)
-}
-
-func (s *Service) CreateSnapshot(p *Principal, sessionID, name, ip string) error {
-	if !p.atLeast("member") {
-		return ErrUnauthorized
-	}
-	if _, err := s.sessionInOrg(p, sessionID); err != nil {
-		return err
-	}
-	tag, online, err := s.mgr.Snapshot(sessionID, name)
-	if err != nil {
-		return err
-	}
-	if _, err := s.stg.RecordSnapshot(sessionID, name, tag, online); err != nil {
-		return err
-	}
-	s.audit(p, p.OrgID, "snapshot.create", "session", sessionID, ip, map[string]any{"name": name, "online": online})
-	return nil
-}
-
-func (s *Service) RevertSnapshot(p *Principal, sessionID string, snapID int64, ip string) error {
-	if !p.atLeast("member") {
-		return ErrUnauthorized
-	}
-	if _, err := s.sessionInOrg(p, sessionID); err != nil {
-		return err
-	}
-	sn, err := s.stg.GetSnapshot(sessionID, snapID)
-	if err != nil {
-		return ErrNotFound
-	}
-	if err := s.mgr.RevertSnapshot(sessionID, sn.Tag); err != nil {
-		return err
-	}
-	s.audit(p, p.OrgID, "snapshot.revert", "session", sessionID, ip, map[string]any{"snapshot": sn.Name})
-	return nil
-}
-
-func (s *Service) DeleteSnapshot(p *Principal, sessionID string, snapID int64, ip string) error {
-	if !p.atLeast("member") {
-		return ErrUnauthorized
-	}
-	if _, err := s.sessionInOrg(p, sessionID); err != nil {
-		return err
-	}
-	sn, err := s.stg.GetSnapshot(sessionID, snapID)
-	if err != nil {
-		return ErrNotFound
-	}
-	if err := s.mgr.DeleteSnapshot(sessionID, sn.Tag, sn.Online); err != nil {
-		return err
-	}
-	if err := s.stg.DeleteSnapshotRow(snapID); err != nil {
-		return err
-	}
-	s.audit(p, p.OrgID, "snapshot.delete", "session", sessionID, ip, map[string]any{"snapshot": sn.Name})
-	return nil
-}
+// Snapshots and instant clones: snapshot_service.go.
 
 // ---- backups -------------------------------------------------------------
 

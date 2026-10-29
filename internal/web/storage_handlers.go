@@ -199,46 +199,7 @@ func (s *Server) launchTemplate(w http.ResponseWriter, r *http.Request, p *servi
 	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
 }
 
-// ---- snapshots (on the instance detail page) -----------------------------
-
-func (s *Server) createSnapshot(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	if !s.checkCSRF(p, r) {
-		s.badCSRF(w)
-		return
-	}
-	id := r.PathValue("id")
-	if err := s.svc.CreateSnapshot(p, id, r.FormValue("name"), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
-	}
-	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
-}
-
-func (s *Server) revertSnapshot(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	if !s.checkCSRF(p, r) {
-		s.badCSRF(w)
-		return
-	}
-	id := r.PathValue("id")
-	if err := s.svc.RevertSnapshot(p, id, atoi(r.PathValue("sid")), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
-	}
-	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
-}
-
-func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request, p *service.Principal) {
-	if !s.checkCSRF(p, r) {
-		s.badCSRF(w)
-		return
-	}
-	id := r.PathValue("id")
-	if err := s.svc.DeleteSnapshot(p, id, atoi(r.PathValue("sid")), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
-	}
-	http.Redirect(w, r, "/instances/"+id, http.StatusSeeOther)
-}
+// Snapshot / instant-clone handlers: snapshot_handlers.go.
 
 // ---- backups + schedules -------------------------------------------------
 

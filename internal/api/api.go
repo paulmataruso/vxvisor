@@ -40,6 +40,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/delete", a.auth("write", a.deleteSession))
 	mux.HandleFunc("GET /api/v1/images", a.auth("read", a.listImages))
 	mux.HandleFunc("GET /api/v1/usage", a.auth("read", a.usage))
+	a.snapshotRoutes(mux)
 }
 
 // auth resolves the principal, enforces the API-key scope the route needs, and

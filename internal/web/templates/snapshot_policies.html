@@ -1,0 +1,135 @@
+{{define "snapshot_policies.html"}}{{template "head" .}}
+<div class="card">
+  <div class="card-head">
+    <h2>Snapshot policies</h2>
+    <button class="btn primary" data-modal="m-pol">+ Add policy</button>
+  </div>
+  {{if .Policies}}
+  <table>
+    <tr><th>Name</th>{{if .P.IsAdmin}}<th>Organization</th>{{end}}<th>Target</th><th>Schedule</th><th>Retention</th><th>Last run</th><th>Next run</th><th>Snapshots</th><th></th></tr>
+    {{range .Policies}}
+    <tr>
+      <td><strong>{{.Name}}</strong>
+        {{if .Immutable}} <span class="pill error" title="Each snapshot is locked for its keep-days: no one can delete it or purge its instance before then">immutable</span>{{end}}
+        {{if not .Enabled}} <span class="pill stopped">paused</span>{{end}}
+      </td>
+      {{if $.P.IsAdmin}}<td>{{.OrgName}}</td>{{end}}
+      <td>{{.TargetLabel}}</td>
+      <td>{{.ScheduleLabel}}</td>
+      <td>{{.RetentionLabel}}</td>
+      <td class="muted">{{if .LastRunLocal}}{{.LastRunLocal}}{{if .LastStatus}}<br><span style="font-size:11px">{{.LastStatus}}</span>{{end}}{{else}}—{{end}}</td>
+      <td class="muted">{{if .Enabled}}{{.NextRunLocal}}{{else}}—{{end}}</td>
+      <td><a href="/snapshot-policies?policy={{.ID}}">{{.Snapshots}}</a></td>
+      <td style="text-align:right;white-space:nowrap">
+        <form method="post" action="/snapshot-policies/{{.ID}}/run" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Run now</button></form>
+        <form method="post" action="/snapshot-policies/{{.ID}}/toggle" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="enabled" value="{{if .Enabled}}0{{else}}1{{end}}"><button class="btn sm">{{if .Enabled}}Pause{{else}}Resume{{end}}</button></form>
+        <form method="post" action="/snapshot-policies/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this policy? Its snapshots are kept (and stay locked until they expire if it is immutable), but are no longer pruned automatically.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No snapshot policies. Click <strong>+ Add policy</strong> to snapshot an instance, a folder or a whole organization on a schedule.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">Each run snapshots every instance in the target as one group: running guests with the guest agent are frozen together (app-consistent), others are crash-consistent, stopped ones offline. Retention keeps a snapshot while it is among the last N of its instance <em>or</em> younger than D days; snapshots instant clones depend on are never pruned. Times are the host's local time.</p>
+</div>
+
+{{if .SelectedID}}
+<div class="card">
+  <div class="card-head"><h2>Snapshots taken by {{.SelectedName}}</h2></div>
+  {{if .PolicySnaps}}
+  <table>
+    <tr><th>Instance</th><th>Snapshot</th><th>Consistency</th><th>Expires</th><th>Taken</th></tr>
+    {{range .PolicySnaps}}
+    <tr>
+      <td><a href="/instances/{{.SessionID}}">{{.SessionName}}</a></td>
+      <td>{{.Name}}{{if .Locked}} <span class="pill error" title="Immutable until {{.LockedUntil}}">locked</span>{{end}}</td>
+      <td>{{if eq .Consistency "app"}}<span class="pill running">app-consistent</span>{{else if eq .Consistency "crash"}}<span class="pill">crash-consistent</span>{{else}}<span class="pill stopped">offline</span>{{end}}</td>
+      <td class="muted">{{if .ExpiresAt}}{{.ExpiresAt}}{{else}}—{{end}}</td>
+      <td class="muted">{{.CreatedAt}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">This policy hasn't taken any snapshots yet.</div>{{end}}
+</div>
+{{end}}
+
+<div class="modal" id="m-pol"><div class="modal-card">
+  <div class="modal-head"><h3>Add snapshot policy</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/snapshot-policies">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="nightly" maxlength="64" required></label>
+    {{if .P.IsAdmin}}
+    <label class="fld">Organization
+      <select name="org_id" id="pol-org">
+        {{range .Form.Orgs}}<option value="{{.ID}}"{{if eq .ID $.P.OrgID}} selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+    </label>
+    {{end}}
+    <label class="fld">Target
+      <select name="target_kind" id="pol-kind">
+        <option value="vm">One instance</option>
+        <option value="folder">A folder (and its sub-folders)</option>
+        <option value="org">Every instance in the organization</option>
+      </select>
+    </label>
+    <label class="fld pol-t pol-t-vm">Instance
+      <select name="target_vm">
+        {{range .Form.VMs}}<option value="{{.ID}}" data-org="{{.OrgID}}">{{.Name}}{{if $.P.IsAdmin}} · {{.OrgName}}{{end}}</option>{{end}}
+      </select>
+    </label>
+    <label class="fld pol-t pol-t-folder" style="display:none">Folder
+      <select name="target_folder">
+        {{range .Form.Folders}}<option value="{{.ID}}" data-org="{{.OrgID}}">{{.Name}}{{if $.P.IsAdmin}} · {{.OrgName}}{{end}}</option>{{end}}
+      </select>
+    </label>
+    <div class="row">
+      <label class="fld">Schedule
+        <select name="schedule" id="pol-sched">
+          <option value="hourly">Hourly</option>
+          <option value="daily" selected>Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+      </label>
+      <label class="fld pol-s pol-s-weekly" style="display:none">Day
+        <select name="weekday">
+          <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+          <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option>
+          <option value="6">Saturday</option>
+        </select>
+      </label>
+      <label class="fld pol-s pol-s-daily pol-s-weekly">At (host time)<input type="time" name="at" value="01:00"></label>
+      <label class="fld pol-s pol-s-hourly" style="display:none">Minute past the hour<input type="number" name="minute" value="0" min="0" max="59"></label>
+    </div>
+    <div class="row">
+      <label class="fld">Keep last<input type="number" name="keep_last" value="7" min="0" max="10000"></label>
+      <label class="fld">Keep days<input type="number" name="keep_days" value="0" min="0" max="3650"></label>
+    </div>
+    <label class="fld" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="immutable" value="1"> Immutable: lock each snapshot for its keep-days</label>
+    <p class="muted" style="margin:0;font-size:12px">Set keep last and/or keep days (0 = rule off). An immutable snapshot can't be deleted by anyone, and its instance can't be purged, until its keep-days have passed; immutable needs keep days.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add policy</button></div>
+  </form>
+</div></div>
+<script>
+(function(){
+  var kind=document.getElementById('pol-kind'), sched=document.getElementById('pol-sched'), org=document.getElementById('pol-org');
+  if(!kind||!sched) return;
+  function syncKind(){
+    document.querySelectorAll('#m-pol .pol-t').forEach(function(el){ el.style.display=el.classList.contains('pol-t-'+kind.value)?'':'none'; });
+  }
+  function syncSched(){
+    document.querySelectorAll('#m-pol .pol-s').forEach(function(el){ el.style.display=el.classList.contains('pol-s-'+sched.value)?'':'none'; });
+  }
+  // An instance admin picks the org first; only that org's instances/folders are offered.
+  function syncOrg(){
+    if(!org) return;
+    document.querySelectorAll('#m-pol select[name=target_vm], #m-pol select[name=target_folder]').forEach(function(sel){
+      var first=null;
+      Array.prototype.forEach.call(sel.options,function(o){ var ok=o.getAttribute('data-org')===org.value; o.hidden=!ok; o.disabled=!ok; if(ok&&!first) first=o; });
+      if(sel.selectedOptions.length===0||sel.selectedOptions[0].disabled){ sel.value=first?first.value:''; }
+    });
+  }
+  kind.addEventListener('change',syncKind); sched.addEventListener('change',syncSched);
+  if(org) org.addEventListener('change',syncOrg);
+  syncKind(); syncSched(); syncOrg();
+})();
+</script>
+{{template "foot" .}}{{end}}

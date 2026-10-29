@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"runtime"
@@ -200,6 +201,7 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 	}
 	events, _ := s.svc.SessionEvents(p, sess.ID)
 	snapshots, _ := s.svc.ListSnapshots(p, sess.ID)
+	cloneLink, isClone := s.svc.CloneLink(p, sess.ID)
 	forwards, _ := s.svc.ListPortForwards(p, sess.ID)
 	nodes, _ := s.svc.ListNodes(p)
 	pools, _ := s.svc.ListPools(p)
@@ -212,6 +214,8 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 		"Running":     s.svc.Manager().Running(sess),
 		"Events":      events,
 		"Snapshots":   snapshots,
+		"CloneLink":   cloneLink,
+		"IsClone":     isClone,
 		"Forwards":    forwards,
 		"ForwardHost": s.svc.ForwardHost(),
 		"Nodes":       nodes,
@@ -665,11 +669,13 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request, p *service.Princi
 }
 
 func statusFor(err error) int {
-	switch err {
-	case service.ErrUnauthorized:
+	switch {
+	case errors.Is(err, service.ErrUnauthorized):
 		return http.StatusForbidden
-	case service.ErrNotFound:
+	case errors.Is(err, service.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, service.ErrImmutable), errors.Is(err, service.ErrHasClones):
+		return http.StatusConflict
 	default:
 		return http.StatusBadRequest
 	}

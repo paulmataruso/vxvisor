@@ -110,6 +110,11 @@ apt-get install -y -qq \
 #                                   — the nodes BECOME the Ceph cluster; VM disks on RBD.
 #                                   No ceph unit is enabled here; the cluster is created on
 #                                   demand from the UI (which enables ceph-mon@/ceph-mgr@/OSDs).
+# Snapshots / instant clones / snapshot policies (docs/SNAPSHOTS.md) use only these
+# same tools: qemu-img (qemu-utils), zfs, lvcreate/lvrename/lvremove (lvm2), rbd
+# (ceph-common), cp --reflink + udevadm (base system) — nothing extra to install.
+# App-consistent snapshots need qemu-guest-agent INSIDE the guest (cloud-init
+# installs it when the instance has the guest agent enabled), not on the host.
 say "Storage backend tools (LVM / ZFS / NFS / CIFS / Ceph / iSCSI / Ceph HCI)"
 apt_opt mdadm xfsprogs e2fsprogs
 apt_opt lvm2 thin-provisioning-tools zfsutils-linux \

@@ -250,61 +250,7 @@ func (s *Store) DeleteTemplate(orgID, id int64) error {
 	return err
 }
 
-// ---- snapshots -----------------------------------------------------------
-
-type Snapshot struct {
-	ID        int64
-	SessionID string
-	Name      string
-	Tag       string
-	Online    bool
-	CreatedAt string
-}
-
-func (s *Store) RecordSnapshot(sessionID, name, tag string, online bool) (int64, error) {
-	on := 0
-	if online {
-		on = 1
-	}
-	res, err := s.db.Exec(`INSERT INTO snapshots(session_id,name,tag,online) VALUES(?,?,?,?)`, sessionID, name, tag, on)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-func (s *Store) ListSnapshots(sessionID string) ([]Snapshot, error) {
-	rows, err := s.db.Query(`SELECT id,session_id,name,tag,online,created_at FROM snapshots WHERE session_id=? ORDER BY id DESC`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Snapshot
-	for rows.Next() {
-		var sn Snapshot
-		var on int
-		if err := rows.Scan(&sn.ID, &sn.SessionID, &sn.Name, &sn.Tag, &on, &sn.CreatedAt); err != nil {
-			return nil, err
-		}
-		sn.Online = on != 0
-		out = append(out, sn)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) GetSnapshot(sessionID string, id int64) (Snapshot, error) {
-	var sn Snapshot
-	var on int
-	err := s.db.QueryRow(`SELECT id,session_id,name,tag,online,created_at FROM snapshots WHERE id=? AND session_id=?`, id, sessionID).
-		Scan(&sn.ID, &sn.SessionID, &sn.Name, &sn.Tag, &on, &sn.CreatedAt)
-	sn.Online = on != 0
-	return sn, err
-}
-
-func (s *Store) DeleteSnapshotRow(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM snapshots WHERE id=?`, id)
-	return err
-}
+// Snapshot rows are owned by the session package (session/snaprecords.go).
 
 // ---- backups -------------------------------------------------------------
 
