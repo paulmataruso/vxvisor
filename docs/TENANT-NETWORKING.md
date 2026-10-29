@@ -718,3 +718,116 @@ wizard and edit modals driven in headless Chromium, and a live E2E on the test h
 trunk `enp4s0f0`): wizard → bound subinterface in the new bridge, live retag 501→502, refused clash
 keeps the live wiring, admin disconnect, trunk MTU edit, wizard rollback, and the DB/devices back
 to their exact starting state. The trunk had no carrier, so wire behaviour is untested.
+
+## 32. Networking audit hardening (v1.108, 2026-10-29)
+
+A full audit of host switching, L3 and tenant networking (after the management bond was deleted by
+accident from the Networks page) produced these fixes. They are listed by subsystem, with the
+invariants later code must keep.
+
+**Input reaches config files only after validation, twice.** The service layer gives a friendly
+error. The sink, the function that writes the file or runs the command, refuses anything that
+isn't one clean token. Sinks covered:
+- the tenant dnsmasq conf (`netdrv.RenderTenantDHCPConf`) and the vRouter dnsmasq conf (`vrouter.DnsmasqConf`);
+- FRR and NAT renderers (`internal/routing/validate.go`);
+- the vRouter firewall renderer: it fails closed with `DenyAllFirewall`;
+- LXC config values (`internal/lxc/validate.go`);
+- VXLAN systemd units and `ip` commands.
+
+**Management can't be cut from the UI.**
+- `guardIfaceInUse` covers bond delete, team create/edit, vSwitch create and add teaming. It refuses
+  management devices, vSwitch uplinks, trunks, dedicated uplinks, vRouter transits, the storage
+  NIC, the routing uplink, interfaces with addresses, and stacked devices.
+- vSwitch and port-group deletes refuse while anything is on them, including instances in Trash.
+- Management detection (`service/mgmt.go`) falls back to the default-route interfaces when the
+  listener binds a wildcard address. If still unknown it **fails closed**: set `[server] addr`.
+- Host routing refuses a default route off the management NIC or one whose next hop isn't
+  connected. It also refuses routes or OSPF networks that would take over the management subnet
+  or the admin's own session.
+- Routing and vRouter FRR changes are applied first and saved only if the apply succeeds. On
+  failure the previous config is re-applied.
+- The management netplan file is edited in place (yaml.v3). The admin IP and default route are
+  verified before and after, with restore on failure.
+
+**Every vSwitch runs `vlan_filtering=1`**, the netplan-owned management bridge included.
+- Every port defaults to VID 1 PVID untagged, so untagged and management traffic is unchanged.
+- Guest-tagged frames on a VLAN-0 port group are dropped, as in vSphere.
+- The management uplink carries only the VIDs its port groups use.
+- Netplan can't persist the setting, so `ReensureVSwitches` re-applies it at boot. It also
+  re-creates the NIC teams and `vds*` vSwitches vdxd made, and re-applies a set MTU.
+- Boot link-up still brings every non-netplan NIC up so the UI shows carrier. Ports vdxd doesn't
+  manage get RA/SLAAC off first.
+
+**Guests and containers.**
+- A VM bound to a bridged port group always gets a tap, even when the global mode is `user`.
+- A tenant-org VM (org slug ≠ `default`) can never run without a port group or fall back to the
+  shared bridge or SLIRP. This is checked at create, rebind and start.
+- Containers attach to a port group the org owns (`containers.network_id`, migration 52). They no
+  longer take a raw bridge name.
+- Static IPs come from the VM's own port group. Uniqueness is per bridge+VLAN.
+- Taps follow the bridge MTU, and virtio `host_mtu` advertises it (1450 on VXLAN).
+- nft table `inet vdxslirp` drops new QEMU connections to host loopback, except DNS, so a
+  user-mode guest can't reach VNC, SPICE, guacd or rustguac via 10.0.2.2. QEMU is matched by its
+  `run_as` uid, or by the `vdxqemu` group that vdxd creates when QEMU runs as root.
+- VNC passwords are 8 characters from 62 symbols, and now survive live migration.
+
+**Tenants.**
+- Subnets are IPv4 only. They must not overlap any host interface subnet or route; tenant-vs-tenant
+  overlap is still allowed.
+- DHCP needs a gateway. The range must be inside the subnet and exclude the gateway; DNS takes up
+  to 4 IPs.
+- The default vSwitch can't be deleted, and there is a "Make default" action.
+- vSwitches and port groups can be edited. Subnet and gateway are locked while something is attached.
+- Migration 49 persists the untagged port group's DHCP settings. Migration 50 adds unique indexes
+  for one uplink per vSwitch and one default per org.
+- The trunk VLAN allocator skips VIDs the host uses: admin port groups on that uplink, and
+  subinterfaces no tenant owns. Admin port groups refuse a VID a tenant holds.
+- Trunk names are capped at 10 characters so `<trunk>.<vid>` fits IFNAMSIZ.
+- Connect order is: suspend the host gateway, enslave the port down, set VLANs, bring it up.
+  Router external interfaces pin what they ride on.
+- "Disable tenant egress" is resumable (`teardown_pending`).
+- nft bridge table `vdxtenantl2` drops DHCP server replies, IPv6 RAs and BPDUs from untrusted ports
+  on tenant bridges. Uplink ports and router-leg veths are trusted.
+- Tenant interfaces get `arp_ignore=1` and `arp_announce=2`. The host guard no longer depends on
+  br_netfilter.
+
+**Tenant gateways (vRouters outside the default org).**
+- BGP neighbors must be on a connected network.
+- Every neighbor gets `prefix-list VDX-TENANT-EXPORT out`, limited to the router's downlinks.
+- BGP and OSPF networks are limited to the downlinks. EIGRP is off.
+- The external interface IP must be inside the carried port group. It must not be the network or
+  broadcast address, the upstream gateway, or another leg's address.
+- netns FRR logs to syslog, so the AppArmor grant is unchanged.
+- `AttachInternalNetwork` is instance-admin only. There is a `DeleteTransitLink` action.
+- Removing a downlink the gateway created deletes its port group.
+- `ApplyLegs` re-links legs to their bridge and VLAN on every apply.
+- Firewall lease maps are scoped to the compiled org.
+
+**VXLAN.**
+- Inputs are validated: VNI, port, MTU, names, and peers in one IP family.
+- VNIs must be unique host-wide. The local IP must be this host's.
+- nft table `inet vdxvxlan` accepts each VNI only from its peers.
+- VXLAN port groups get the tenant host isolation unless set to "Host access: routed".
+
+**NIC teams.**
+- `EditBond` changes members, mode and hash. Netplan-owned teams are refused, with a pointer to
+  the netplan file.
+- Mode labels give the vSphere equivalent and say whether the switch needs configuring.
+- Per-vSwitch MTU is settable (migration 51).
+
+**Naming (VMware/NSX).**
+- Sidebar: Switching, Gateways (Tier-0/Tier-1), Firewall (gateway N-S / distributed E-W), External
+  Connectivity (was Tenant Egress), Host Routing.
+- Bonds are "NIC teams" and a vSwitch's NIC is its "physical adapter".
+- A tenant uplink is an "external network", and a VLAN pool is a "VLAN range".
+- A transit link is a "provider link (Tier-0 uplink)", an internal leg is a "downlink", and a
+  router's uplink leg is its "external interface".
+- DB, Go and kernel names are unchanged.
+
+**vdxd-owned host state added:**
+- nft tables `inet vdxslirp`, `inet vdxvxlan` and `bridge vdxtenantl2`;
+- system group `vdxqemu`;
+- `/etc/vdxclone/vxlan-guard.nft`.
+
+A restart of `nftables.service` flushes these tables. `vdxslirp` self-heals within 30s; the
+others come back on the next tenant or routing apply, or a vdxd restart.

@@ -65,8 +65,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **48**
-  (`tenant-portgroups`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **52**
+  (`container-portgroup`). Add `{N, "name", "SQL"}`.
 - **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
   inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
   quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
@@ -209,7 +209,7 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   reviews + the deferred v3 (cluster-wide allocator + segment replication + vxlan materialization +
   UDP:4789 ingress filter) in `docs/TENANT-NETWORKING.md` §14–24.
 - **Tenant networking v3** (migration 46): per-tenant **virtual uplinks** + an instance-admin
-  **egress-mapping console** (`/trunks`, "Tenant Egress" nav). A tenant builds isolated networks
+  **egress-mapping console** (`/trunks`, "External Connectivity" nav, was "Tenant Egress"). A tenant builds isolated networks
   normally and connects one to a named **uplink**; the admin decides what that uplink really is on
   the wire. Model: an **external trunk** (`ext_trunks`) is a role-dedicated NIC/bond (NOT a raw
   vSwitch uplink — `guardTrunk` enforces this in CreateVSwitch/CreateBond/UpgradeVSwitchToBond/
@@ -271,6 +271,21 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   abstraction (owner-approved 2026-10-28; profiles stay in enforce mode). In-app updates replace only the
   binary — an existing host needs install.sh re-run (or the file + reload) once. FRR ≥9 also needs
   `mgmtd` for static routes; the netns launcher starts it after zebra.
+
+- **Networking audit hardening** (v1.108, migrations 49–52; full list in TENANT-NETWORKING.md §32).
+  Invariants:
+  - Validate at the service layer AND at every config/command sink.
+  - `guardIfaceInUse` / `VSwitchesInUse` / `PortGroupsInUse` before anything claims or deletes a NIC,
+    team, vSwitch or port group (instances in Trash count).
+  - Management detection fails closed on a wildcard listener with no default route.
+  - Every vSwitch has `vlan_filtering=1` (re-applied at boot by `ReensureVSwitches`, which also
+    rebuilds vdxd-made teams and vSwitches).
+  - Tenant-org VMs never run without a port group.
+  - Containers attach to port groups, never raw bridges.
+  - vdxd owns nft `inet vdxslirp` (QEMU → host loopback), `inet vdxvxlan` (VNI peer filter) and
+    `bridge vdxtenantl2` (rogue DHCP/RA/BPDU), plus the system group `vdxqemu`.
+  - Routing and FRR changes are applied first and saved only on success.
+  - Tenant gateways export only their downlinks.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous
