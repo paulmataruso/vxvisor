@@ -39,6 +39,7 @@ func (s *Server) networks(w http.ResponseWriter, r *http.Request, p *service.Pri
 		"TenantNetworks": tnets,
 		"Uplinks":        uplinks,
 		"Bonds":          bonds,
+		"BondInUse":      s.svc.BondsInUse(p),
 		"VSwitches":      vswitches,
 		"MgmtBridge":     s.svc.MgmtInterface(),
 		"ClusterPeers":   s.svc.ClusterPeerUnderlayIPs(p),
@@ -140,7 +141,11 @@ func (s *Server) createTenantPortGroup(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	vlan, _ := strconv.Atoi(r.FormValue("vlan_id"))
-	if _, err := s.svc.CreateTenantPortGroup(p, atoi(r.PathValue("id")), r.FormValue("name"), vlan,
+	tnetID := atoi(r.PathValue("id"))
+	if tnetID == 0 { // the Port Groups card's modal picks the vSwitch
+		tnetID = atoi(r.FormValue("tnet_id"))
+	}
+	if _, err := s.svc.CreateTenantPortGroup(p, tnetID, r.FormValue("name"), vlan,
 		r.FormValue("cidr"), r.FormValue("gateway"), r.FormValue("dhcp") == "1", r.FormValue("dhcp_range"),
 		r.FormValue("dhcp_dns"), clientIP(r)); err != nil {
 		setFlash(w, err.Error())

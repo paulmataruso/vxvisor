@@ -3,6 +3,7 @@ package netdrv
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -176,6 +177,15 @@ func AddTrunkVlan(uplink string, vlan int) error {
 
 // IfaceExists reports whether a network interface is present on the host.
 func IfaceExists(name string) bool { return ifaceExists(name) }
+
+// IsBond reports whether name is a kernel bond device.
+func IsBond(name string) bool {
+	if name == "" {
+		return false
+	}
+	_, err := os.Stat("/sys/class/net/" + name + "/bonding")
+	return err == nil
+}
 
 // RebindTap live-moves an EXISTING VM tap to a different vSwitch (bridge) and
 // VLAN without touching QEMU — the guest NIC stays up, only the host-side bridge

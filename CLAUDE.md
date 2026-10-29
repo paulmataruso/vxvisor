@@ -256,6 +256,13 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   `ip_forward=1` via `vrouter.EdgeApplier`). Uplink disconnect **keeps** its outer VID (only delete /
   global teardown frees it). `DeleteVRouter` never deletes a tenant vSwitch bridge (PG + uplink legs
   just release). Live E2E verified all of it, incl. netns leg addresses + default route (needs the next bullet).
+  The admin `/trunks` (Tenant Egress) page edits everything in place (trunk MTU/QinQ, pool range, uplink
+  name/wiring/tag/connected vSwitch — a connected uplink is re-wired live with restore-on-failure,
+  `service/trunk_edit.go`) and has a `+ Add tenant egress` wizard (Tenant → Trunk → Pool → Uplink →
+  vSwitch → Review, undo-on-failure, `service/egress_wizard.go`); TENANT-NETWORKING.md §31.
+  The tenant `/networks` page mirrors the admin layout (vSwitches + Port Groups tables + the Topology map);
+  `/api/topology` serves non-admins `tenantTopology` (`service/topology_tenant.go`, org-only, no host
+  devices). vRouter legs merge into the diagram per port group (`mergeVRouters`) for both maps.
 - **netns vRouter FRR vs AppArmor (Ubuntu 26.04)** — the old "netns runtime broken" root cause:
   the stock `abstractions/frr` allows only flat `/run/frr/<daemon>.pid`; a `-N <id>` pathspace puts it in
   `/run/frr/<id>/`, so confined staticd/bgpd/ospfd died at start → no leg addresses / routes. Fixed by the

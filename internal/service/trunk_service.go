@@ -48,12 +48,15 @@ type UplinkView struct {
 	Status    string
 	Error     string
 	InUseBy   string // tenant network name using this uplink, if any
+	InUseByID int64  // ... and its id (0 = not connected)
 }
 
 type VlanPoolView struct {
 	ID        int64
 	OrgID     int64
+	OrgName   string
 	TrunkID   int64
+	TrunkName string
 	VidMin    int
 	VidMax    int
 	Used      int
@@ -385,6 +388,9 @@ func (s *Service) SetVlanPool(p *Principal, orgID, trunkID int64, vidMin, vidMax
 	if vidMin < vidAllocMin || vidMax > vidAllocMax || vidMin > vidMax {
 		return fmt.Errorf("invalid VLAN pool range %d-%d (must be within %d-%d)", vidMin, vidMax, vidAllocMin, vidAllocMax)
 	}
+	if err := s.checkPoolRange(orgID, trunkID, vidMin, vidMax); err != nil {
+		return err
+	}
 	if _, err := s.db.Exec(`INSERT INTO tenant_vlan_pools(org_id,trunk_id,vid_min,vid_max) VALUES(?,?,?,?)
 		ON CONFLICT(org_id,trunk_id) DO UPDATE SET vid_min=excluded.vid_min, vid_max=excluded.vid_max`,
 		orgID, trunkID, vidMin, vidMax); err != nil {
@@ -425,41 +431,23 @@ func (s *Service) DeleteVlanPool(p *Principal, id int64, ip string) error {
 // free, guarded physical NIC is assigned instead of a tag. The device isn't wired
 // until a tenant network connects to the uplink (realizeUplink).
 func (s *Service) CreateUplink(p *Principal, orgID int64, name, mode string, trunkID int64, vid int, dedIface, ip string) (int64, error) {
+	return s.createUplink(p, orgID, name, mode, trunkID, vid, dedIface, ip, true)
+}
+
+// createUplink is CreateUplink; autoConnect connects the org's unconnected
+// default vSwitch to it (the egress wizard connects the vSwitch it was told to).
+func (s *Service) createUplink(p *Principal, orgID int64, name, mode string, trunkID int64, vid int, dedIface, ip string, autoConnect bool) (int64, error) {
 	if !p.IsAdmin {
 		return 0, ErrUnauthorized
 	}
-	if name == "" {
+	if name = strings.TrimSpace(name); name == "" {
 		return 0, fmt.Errorf("uplink name required")
 	}
-	switch mode {
-	case "access", "qinq":
-		if trunkID == 0 {
-			return 0, fmt.Errorf("a trunk is required for %s mode", mode)
-		}
-		if mode == "qinq" {
-			var qc int
-			if err := s.db.QueryRow(`SELECT qinq_capable FROM ext_trunks WHERE id=?`, trunkID).Scan(&qc); err != nil {
-				return 0, fmt.Errorf("trunk not found: %w", err)
-			}
-			if qc == 0 {
-				return 0, fmt.Errorf("this trunk isn't QinQ-capable (it may be a management-shared trunk, which is access-only) — redesignate a dedicated trunk with QinQ enabled, or use access mode")
-			}
-		}
-	case "dedicated":
-		if dedIface == "" {
-			return 0, fmt.Errorf("a dedicated interface is required")
-		}
-		if err := s.guardMgmt(dedIface); err != nil {
-			return 0, err
-		}
-		if err := s.guardTrunk(dedIface); err != nil {
-			return 0, err
-		}
-		if st := s.StorageIface(); st != "" && dedIface == st {
-			return 0, fmt.Errorf("refusing to assign the storage interface")
-		}
-	default:
-		return 0, fmt.Errorf("unknown uplink mode %q", mode)
+	if mode == "dedicated" {
+		trunkID = 0
+	}
+	if err := s.validateUplinkWiring(mode, trunkID, dedIface, 0); err != nil {
+		return 0, err
 	}
 	res, err := s.db.Exec(`INSERT INTO tenant_uplinks(org_id,name,trunk_id,mode,dedicated_iface) VALUES(?,?,?,?,?)`,
 		orgID, name, nullIf(trunkID), mode, dedIface)
@@ -481,7 +469,9 @@ func (s *Service) CreateUplink(p *Principal, orgID int64, name, mode string, tru
 		}
 	}
 	s.audit(p, orgID, "uplink.create", "uplink", name, ip, map[string]any{"mode": mode})
-	s.autoConnectDefault(orgID, id)
+	if autoConnect {
+		s.autoConnectDefault(orgID, id)
+	}
 	return id, nil
 }
 
@@ -784,7 +774,8 @@ func (s *Service) ListAllUplinks(p *Principal) ([]UplinkView, error) {
 	}
 	rows, err := s.db.Query(`SELECT u.id,u.org_id,COALESCE(o.name,''),u.name,u.trunk_id,COALESCE(t.iface,''),
 		u.mode,u.outer_vid,u.dedicated_iface,u.egress_bridge,u.status,u.error,
-		COALESCE((SELECT tn.name FROM tenant_networks tn WHERE tn.uplink_id=u.id LIMIT 1),'')
+		COALESCE((SELECT tn.name FROM tenant_networks tn WHERE tn.uplink_id=u.id LIMIT 1),''),
+		COALESCE((SELECT tn.id FROM tenant_networks tn WHERE tn.uplink_id=u.id LIMIT 1),0)
 		FROM tenant_uplinks u
 		LEFT JOIN orgs o ON o.id=u.org_id
 		LEFT JOIN ext_trunks t ON t.id=u.trunk_id
@@ -797,7 +788,7 @@ func (s *Service) ListAllUplinks(p *Principal) ([]UplinkView, error) {
 	for rows.Next() {
 		var u UplinkView
 		if err := rows.Scan(&u.ID, &u.OrgID, &u.OrgName, &u.Name, &u.TrunkID, &u.TrunkName,
-			&u.Mode, &u.OuterVID, &u.DedIface, &u.Bridge, &u.Status, &u.Error, &u.InUseBy); err != nil {
+			&u.Mode, &u.OuterVID, &u.DedIface, &u.Bridge, &u.Status, &u.Error, &u.InUseBy, &u.InUseByID); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -810,14 +801,16 @@ func (s *Service) ListVlanPools(p *Principal) ([]VlanPoolView, error) {
 	if !p.IsAdmin {
 		return nil, ErrUnauthorized
 	}
-	rows, err := s.db.Query(`SELECT id,org_id,trunk_id,vid_min,vid_max FROM tenant_vlan_pools ORDER BY org_id,trunk_id`)
+	rows, err := s.db.Query(`SELECT p.id,p.org_id,COALESCE(o.name,''),p.trunk_id,COALESCE(t.iface,''),p.vid_min,p.vid_max
+		FROM tenant_vlan_pools p LEFT JOIN orgs o ON o.id=p.org_id LEFT JOIN ext_trunks t ON t.id=p.trunk_id
+		ORDER BY o.name, t.iface`)
 	if err != nil {
 		return nil, err
 	}
 	var out []VlanPoolView
 	for rows.Next() {
 		var v VlanPoolView
-		if err := rows.Scan(&v.ID, &v.OrgID, &v.TrunkID, &v.VidMin, &v.VidMax); err != nil {
+		if err := rows.Scan(&v.ID, &v.OrgID, &v.OrgName, &v.TrunkID, &v.TrunkName, &v.VidMin, &v.VidMax); err != nil {
 			rows.Close()
 			return nil, err
 		}

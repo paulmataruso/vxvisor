@@ -123,6 +123,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, p *service.Pr
 		"HasLVMPool": hasLVM,
 		"HasRBDPool": hasRBD,
 		"LocalNode":  localNode,
+		"GuacEnabled": s.svc.GuacEnabled(),
 	}
 	// Unified cluster view (VIP, admin): list every node's VMs — the single pane.
 	// Actions route to the owning node; the local table is used otherwise.
@@ -204,6 +205,7 @@ func (s *Server) instanceDetail(w http.ResponseWriter, r *http.Request, p *servi
 	targets, _ := s.svc.ListBackupTargets(p)
 	s.render(w, p, "instance.html", "compute", map[string]any{
 		"Session":     sess,
+		"GuacEnabled": s.svc.GuacEnabled(),
 		"Running":     s.svc.Manager().Running(sess),
 		"Events":      events,
 		"Snapshots":   snapshots,

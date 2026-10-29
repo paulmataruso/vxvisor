@@ -32,6 +32,7 @@
     <div class="spacer" style="flex:1"></div>
     {{if .Running}}
       <a class="btn sm primary" href="/console/{{$s.ID}}" target="_blank" rel="noopener" title="Graphical console for the VM's screen. Best for desktop/GUI guests; text-only servers use the serial console instead.">VNC console</a>
+      {{if .GuacEnabled}}<a class="btn sm" href="/console/{{$s.ID}}/advanced" target="_blank" rel="noopener" title="Open this VM's console through the RustGuac gateway (browser VNC/SPICE) in a new tab">⚡ RustGuac</a>{{end}}
       <a class="btn sm" href="/console/{{$s.ID}}/serial" target="_blank" rel="noopener" title="Text console for command-line and server guests. If it's blank, restart the VM so the serial console is enabled.">Serial console</a>
       <form method="post" action="/sessions/{{$s.ID}}/restart" style="display:inline" onsubmit="return confirm('Restart {{$s.Name}}? The VM will shut down and start again.')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm" title="Shut the VM down and start it again">Restart</button></form>
       <form method="post" action="/sessions/{{$s.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>

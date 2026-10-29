@@ -21,7 +21,7 @@ func TestTenantNetworkPagesRender(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	tnets := []service.TenantNetwork{
-		{ID: 1, Name: "default", NetworkID: 7, Bridge: "vdxt7", CIDR: "10.3.0.0/24", Gateway: "10.3.0.1", IsDefault: true,
+		{ID: 1, Name: "default", NetName: "default", NetworkID: 7, Bridge: "vdxt7", CIDR: "10.3.0.0/24", Gateway: "10.3.0.1", IsDefault: true,
 			State: "applied", UplinkID: 4, UplinkName: "wan", UplinkMode: "qinq", DefaultCarried: true, VMs: 2,
 			PortGroups: []service.TenantPortGroup{
 				{ID: 1, TnetID: 1, Name: "web", VLAN: 10, NetworkID: 8, CIDR: "10.60.0.0/24", Gateway: "10.60.0.1", DHCP: true, Carried: true},
@@ -59,10 +59,14 @@ func TestTenantNetworkPagesRender(t *testing.T) {
 			t.Fatalf("networks.html (admin=%v): %v", p.IsAdmin, err)
 		}
 		out := b.String()
-		for _, want := range []string{`id="m-tpg-1"`, `action="/networks/tenant/1/native"`, `↗ uplink`, `routed`, `class="susp"`, "</html>"} {
+		for _, want := range []string{`id="m-tpg"`, `data-modal="m-tpg"`, `action="/networks/tenant/portgroups"`, `action="/networks/tenant/1/native"`,
+			`↗ uplink`, `routed`, `class="susp"`, `id="topo"`, `/api/topology`, "</html>"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("networks.html (admin=%v) missing %q", p.IsAdmin, want)
 			}
+		}
+		if hostOnly := strings.Contains(out, `id="iftable"`) || strings.Contains(out, `data-modal="m-bond"`); hostOnly != p.IsAdmin {
+			t.Fatalf("networks.html (admin=%v): host interfaces / uplinks shown=%v", p.IsAdmin, hostOnly)
 		}
 		b.Reset()
 		if err := tm.ExecuteTemplate(&b, "vrouters.html", with(map[string]any{

@@ -14,8 +14,6 @@ import (
 	"vdxclone/internal/lxc"
 	"vdxclone/internal/netdrv"
 	"vdxclone/internal/raidctl"
-	"vdxclone/internal/session"
-	"vdxclone/internal/vrouter"
 )
 
 // bgpDownStates are the FRR "State/PfxRcd" values that mean a BGP peer is NOT
@@ -54,11 +52,11 @@ func netAddr(cidr string) string {
 }
 
 // vrouterLeases returns the MAC→IP map from a vRouter's dnsmasq lease file(s).
-func (s *Service) vrouterLeases(name string) map[string]string {
+// By id: names are only unique per org.
+func (s *Service) vrouterLeases(id int64) map[string]string {
 	out := map[string]string{}
-	var id int64
 	var runtime, container, lxcpath string
-	if s.db.QueryRow(`SELECT id,runtime,container_name,lxcpath FROM vrouters WHERE name=?`, name).Scan(&id, &runtime, &container, &lxcpath) != nil {
+	if s.db.QueryRow(`SELECT runtime,container_name,lxcpath FROM vrouters WHERE id=?`, id).Scan(&runtime, &container, &lxcpath) != nil {
 		return out
 	}
 	var files []string
@@ -124,6 +122,11 @@ func (s *Service) HostInterfaces(p *Principal) ([]hostinfo.Iface, error) {
 			continue // per-VM tap — hidden from the admin interface lists
 		}
 		i.Group = ifaceGroup(i, vswBridge, vrBridge)
+		if (i.Type == "physical" || i.Type == "bond") && i.Master == "" {
+			if err := s.guardIfaceInUse(i.Name, "interface"); err != nil {
+				i.InUse = err.Error() // the bond / vSwitch pickers leave it out
+			}
+		}
 		out = append(out, i)
 	}
 	return out, nil
@@ -693,6 +696,8 @@ type TopoPortGroup struct {
 	VLAN int      `json:"vlan"`
 	CIDR string   `json:"cidr"`
 	VMs  []TopoVM `json:"vms"`
+
+	netID int64 // the networks row (vRouter merge key; not sent to the browser)
 }
 
 // TopoUplink is a physical adapter attached to a vSwitch. When it is a bond it
@@ -730,6 +735,8 @@ type TopoSwitch struct {
 	// the diagram labels it as a vRouter component rather than a plain vSwitch.
 	VRouter     string `json:"vrouter,omitempty"`
 	VRouterRole string `json:"vrouter_role,omitempty"`
+
+	bridge string // host bridge device (vRouter merge key; not sent to the browser)
 }
 
 // TopoVRInternal is one internal port group served by a vRouter (diagram).
@@ -791,10 +798,14 @@ type netRow struct {
 // NetworkTopology derives a VMware-style topology (vSwitch → port groups → VMs,
 // plus uplinks). Real host bridges become standard vSwitches; when the host runs
 // user-mode networking (no bridges), it synthesizes a single user-mode vSwitch so
-// the diagram is never empty.
+// the diagram is never empty. Anyone but an instance admin (incl. an admin in
+// tenant view) gets only their own org's networks — see tenantTopology.
 func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	if !p.IsAdmin {
-		return nil, ErrUnauthorized
+		if p.OrgID == 0 || !p.atLeast("viewer") {
+			return nil, ErrUnauthorized
+		}
+		return s.tenantTopology(p)
 	}
 	ifaces, err := hostinfo.Interfaces()
 	if err != nil {
@@ -846,16 +857,6 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			}
 		}
 		rows.Close()
-	}
-	// vmIP resolves an internal VM's address: the vRouter's DHCP lease first, else
-	// the guest agent / ARP (for statically-addressed or non-DHCP guests).
-	vmIP := func(leases map[string]string, id, mac string) string {
-		if mac != "" {
-			if ip := leases[strings.ToLower(mac)]; ip != "" {
-				return ip
-			}
-		}
-		return s.guestPrimaryIP(&session.Session{ID: id, MAC: mac})
 	}
 
 	// LXC containers attach to a host bridge by name (containers.bridge), via a
@@ -964,7 +965,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		if br.Type != "bridge" {
 			continue
 		}
-		sw := TopoSwitch{Name: br.Name, Kind: "standard", Addrs: br.Addrs, VMKs: mkVMKs(br.Name, br.Addrs)}
+		sw := TopoSwitch{Name: br.Name, Kind: "standard", Addrs: br.Addrs, VMKs: mkVMKs(br.Name, br.Addrs), bridge: br.Name}
 		var looseVMs []TopoVM // taps on the bridge not bound to a specific port group
 		for _, m := range ifaces {
 			if m.Master != br.Name {
@@ -999,7 +1000,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			if n.bridge != br.Name {
 				continue
 			}
-			pg := TopoPortGroup{Name: n.name, VLAN: n.vlan, CIDR: n.cidr, VMs: netToVMs[n.id]}
+			pg := TopoPortGroup{Name: n.name, VLAN: n.vlan, CIDR: n.cidr, VMs: netToVMs[n.id], netID: n.id}
 			for _, vm := range pg.VMs {
 				boundTaps[vm.Tap] = true
 				placed[vm.ID] = true
@@ -1071,7 +1072,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		for _, vm := range vms {
 			placed[vm.ID] = true
 		}
-		natPGs = append(natPGs, TopoPortGroup{Name: n.name, VLAN: n.vlan, CIDR: n.cidr, VMs: vms})
+		natPGs = append(natPGs, TopoPortGroup{Name: n.name, VLAN: n.vlan, CIDR: n.cidr, VMs: vms, netID: n.id})
 	}
 	var natDefault []TopoVM
 	for _, vm := range allVMs {
@@ -1119,180 +1120,10 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 			topo.FreeNICs = append(topo.FreeNICs, it)
 		}
 	}
-	// Merge each vRouter's bridges into ONE vRouter node: its internal-bridge
-	// switch(es) (carrying the VM port groups) and its transit-bridge switch
-	// (carrying the uplink NIC) collapse into a single kind="vrouter" block so the
-	// diagram shows one vRouter — port groups on the left, transit NIC as the
-	// uplink — not two separate "vRouter" boxes.
-	type vrLeg struct{ name, role, bridge, cidr, iface string }
-	var legs []vrLeg
-	if rows, err := s.db.Query(`SELECT v.name, l.kind, l.bridge, COALESCE(l.cidr,''), COALESCE(l.iface_name,'') FROM vrouter_legs l JOIN vrouters v ON v.id=l.vrouter_id ORDER BY v.name, l.idx`); err == nil {
-		for rows.Next() {
-			var l vrLeg
-			if rows.Scan(&l.name, &l.role, &l.bridge, &l.cidr, &l.iface) == nil && l.bridge != "" {
-				legs = append(legs, l)
-			}
-		}
-		rows.Close()
-	}
-	if len(legs) > 0 {
-		bridgeVR := map[string]string{}      // bridge -> vRouter name
-		gwByBridge := map[string]string{}    // internal bridge -> gateway CIDR
-		ifaceByBridge := map[string]string{} // bridge -> vRouter interface (eth0/eth1..)
-		transitCIDR := map[string]string{}
-		var order []string
-		seen := map[string]bool{}
-		for _, l := range legs {
-			bridgeVR[l.bridge] = l.name
-			ifaceByBridge[l.bridge] = l.iface
-			if l.role == "internal" {
-				gwByBridge[l.bridge] = l.cidr
-			} else if l.role == "transit" {
-				transitCIDR[l.name] = netAddr(l.cidr) // show the subnet, not the vRouter's leg IP
-			}
-			if !seen[l.name] {
-				seen[l.name] = true
-				order = append(order, l.name)
-			}
-		}
-		// Per-vRouter routing protocols + health, for the box's routing tag + light.
-		type vrMeta struct {
-			routing  []string
-			health   string
-			runtime  string
-			firewall bool
-		}
-		metaByVR := map[string]vrMeta{}
-		var vrows []vrouter.VRouter
-		if rs, err := s.db.Query(`SELECT `+vrouterCols+` FROM vrouters WHERE org_id=?`, p.OrgID); err == nil {
-			for rs.Next() { // read all rows before any backend call (single-conn pool)
-				if v, e := scanVRouter(rs); e == nil {
-					vrows = append(vrows, v)
-				}
-			}
-			rs.Close()
-		}
-		for _, v := range vrows {
-			cfg := parseFRRJSON(v.FRRJSON)
-			var protos []string
-			if cfg.BGP.Enabled {
-				protos = append(protos, "BGP")
-			}
-			if cfg.OSPF.Enabled {
-				protos = append(protos, "OSPF")
-			}
-			if cfg.EIGRP.Enabled {
-				protos = append(protos, "EIGRP")
-			}
-			if len(cfg.Static) > 0 {
-				protos = append(protos, "Static")
-			}
-			health := ""
-			if len(protos) > 0 {
-				health = "up"
-				if v.Status == "creating" || v.Status == "error" {
-					health = "down"
-				} else if b, err := vrouter.For(v.Runtime); err == nil {
-					if ls, e := b.Status(v); e != nil || (ls.State != "" && ls.State != "running") {
-						health = "down"
-					} else if cfg.BGP.Enabled && bgpAnyDown(ls.BGPSummary) {
-						health = "down"
-					}
-				}
-			}
-			fw := parseFW(v.FWJSON)
-			metaByVR[v.Name] = vrMeta{routing: protos, health: health, runtime: v.Runtime, firewall: fw.Enabled}
-		}
-		// Port-group firewall badge: which VM Group (unified NSX-style model) a port
-		// group belongs to. Map bridge → network id → group name; the compiler's
-		// internal per-leg zone keys (leg1…) must never surface on the diagram.
-		zoneByBridge := map[string]string{}
-		{
-			f := s.loadOrgFW(p.OrgID)
-			namesByNet := map[int64][]string{}
-			for _, g := range f.Groups {
-				for _, nid := range g.Networks {
-					namesByNet[nid] = append(namesByNet[nid], g.Name)
-				}
-			}
-			if len(namesByNet) > 0 {
-				if nets, err := s.net.ListNetworks(p.OrgID); err == nil {
-					for _, n := range nets {
-						if n.Bridge == "" {
-							continue
-						}
-						switch names := namesByNet[n.ID]; len(names) {
-						case 0:
-						case 1:
-							zoneByBridge[n.Bridge] = names[0]
-						default:
-							zoneByBridge[n.Bridge] = itoa(len(names)) + " groups"
-						}
-					}
-				}
-			}
-		}
-		vrs := map[string]*TopoVRouter{}
-		leasesByVR := map[string]map[string]string{}
-		for _, nm := range order {
-			vrs[nm] = &TopoVRouter{Name: nm, Transit: &TopoVRTransit{CIDR: transitCIDR[nm]},
-				Routing: metaByVR[nm].routing, Health: metaByVR[nm].health, Runtime: metaByVR[nm].runtime,
-				Firewall: metaByVR[nm].firewall}
-			leasesByVR[nm] = s.vrouterLeases(nm)
-		}
-		// Pull the vRouter's port groups + transit uplink out of the raw switches,
-		// then drop those switches so the vRouter draws as ONE chain, not vSwitches.
-		var kept []TopoSwitch
-		for _, sw := range topo.Switches {
-			vr, ok := bridgeVR[sw.Name]
-			if !ok {
-				kept = append(kept, sw)
-				continue
-			}
-			v := vrs[vr]
-			if _, isInternal := gwByBridge[sw.Name]; isInternal {
-				// internal bridge → its port groups are the vRouter's segments
-				for _, pg := range sw.PortGroups {
-					vms := make([]TopoVM, len(pg.VMs))
-					copy(vms, pg.VMs)
-					for j := range vms {
-						vms[j].IP = vmIP(leasesByVR[vr], vms[j].ID, vmMAC[vms[j].ID])
-					}
-					v.Internal = append(v.Internal, TopoVRInternal{Name: pg.Name, GW: gwByBridge[sw.Name], Subnet: pg.CIDR, Bridge: sw.Name, Iface: ifaceByBridge[sw.Name], Zone: zoneByBridge[sw.Name], VMs: vms})
-				}
-			} else {
-				// transit bridge → its uplink is the external port (never a port group)
-				v.Transit.Bridge = sw.Name
-				v.Transit.Iface = ifaceByBridge[sw.Name]
-				for _, up := range sw.Uplinks {
-					v.Transit.Phys = up.Name
-					if len(up.Neighbors) > 0 {
-						n := up.Neighbors[0]
-						v.Transit.Switch, v.Transit.Port, v.Transit.Mgmt, v.Transit.Descr = n.SwitchName, n.PortID, n.MgmtIP, n.SwitchDescr
-					}
-				}
-			}
-		}
-		topo.Switches = kept
-		for _, nm := range order {
-			if vrs[nm].Transit != nil && vrs[nm].Transit.CIDR == "" && vrs[nm].Transit.Phys == "" {
-				vrs[nm].Transit = nil
-			}
-			topo.VRouters = append(topo.VRouters, *vrs[nm])
-		}
-	}
-	// A port group shows the same per-VM info no matter where it's connected: resolve
-	// every drawn VM's IP (guest-agent / ARP / DHCP lease) just like the vRouter
-	// segments do. (The vSwitch BOX itself shows no IP — that's the host-adapter box.)
-	for si := range topo.Switches {
-		for pi := range topo.Switches[si].PortGroups {
-			vms := topo.Switches[si].PortGroups[pi].VMs
-			for j := range vms {
-				if vms[j].IP == "" && vms[j].ID != "" {
-					vms[j].IP = vmIP(nil, vms[j].ID, vmMAC[vms[j].ID])
-				}
-			}
-		}
-	}
+	// One node per vRouter (its legs pull their port groups / uplinks off the
+	// switches), then every drawn VM's IP so a port group shows the same per-VM
+	// info wherever it's connected.
+	s.mergeVRouters(topo, s.topoLegs(0), p.OrgID, vmMAC, false)
+	s.topoFillVMIPs(topo, vmMAC)
 	return topo, nil
 }

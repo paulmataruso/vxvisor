@@ -77,6 +77,7 @@ type Iface struct {
 	Master    string   `json:"master"`    // bridge/bond this iface is enslaved to, if any
 	Carrier   bool     `json:"carrier"`   // link detected
 	Group     string   `json:"group"`     // UI grouping label, filled by the service layer (DB-aware); empty here
+	InUse     string   `json:"in_use,omitempty"` // why a free-looking NIC/bond can't be claimed, filled by the service layer
 }
 
 // ipLink mirrors the fields we read from `ip -j -d link`.

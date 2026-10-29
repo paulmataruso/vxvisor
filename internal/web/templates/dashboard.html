@@ -34,6 +34,7 @@
         <a class="btn sm" href="/instances/{{.ID}}">Details</a>
         {{if eq .State "running"}}
           <a class="btn sm" href="/console/{{.ID}}" target="_blank" rel="noopener">VNC</a>
+          {{if and $.GuacEnabled (eq .Node $.SelfNode)}}<a class="btn sm" href="/console/{{.ID}}/advanced" target="_blank" rel="noopener" title="Open this VM's console through the RustGuac gateway (browser VNC/SPICE) in a new tab">⚡ RustGuac</a>{{end}}
           <a class="btn sm" href="/console/{{.ID}}/serial" target="_blank" rel="noopener">Serial</a>
           <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
           <form method="post" action="/cluster/vms/{{.Node}}/{{.ID}}/restart" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Restart</button></form>
@@ -69,6 +70,7 @@
         <a class="btn sm" href="/instances/{{.ID}}">Details</a>
         {{if eq .State "running"}}
           <a class="btn sm" href="/console/{{.ID}}" target="_blank" rel="noopener">Console</a>
+          {{if $.GuacEnabled}}<a class="btn sm" href="/console/{{.ID}}/advanced" target="_blank" rel="noopener" title="Open this VM's console through the RustGuac gateway (browser VNC/SPICE) in a new tab">⚡ RustGuac</a>{{end}}
           <form method="post" action="/sessions/{{.ID}}/restart" style="display:inline" onsubmit="return confirm('Restart {{.Name}}? The VM will shut down and start again.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm" title="Shut the VM down and start it again">Restart</button></form>
           <form method="post" action="/sessions/{{.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Stop</button></form>
         {{else}}
@@ -89,11 +91,11 @@
     </div>
     {{if .Sessions}}
     <div class="ftree">
-      {{range .FolderRoots}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+      {{range .FolderRoots}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders "Guac" $.GuacEnabled)}}{{end}}
       <div class="ftfolder ftroot" data-folder="0" ondragover="fallow(event)" ondrop="fdrop(event,0)">
         <div class="ftsum"><span class="ftname muted">Ungrouped</span><span class="ftcount">{{len .RootVMs}}</span></div>
         <div class="ftbody">
-          {{range .RootVMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+          {{range .RootVMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders "Guac" $.GuacEnabled)}}{{end}}
         </div>
       </div>
     </div>
@@ -252,8 +254,8 @@
     </span>
   </summary>
   <div class="ftbody">
-    {{range .Node.VMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
-    {{range .Node.Children}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders)}}{{end}}
+    {{range .Node.VMs}}{{template "ftvmrow" (dict "VM" . "CSRF" $.CSRF "Folders" $.Folders "Guac" $.Guac)}}{{end}}
+    {{range .Node.Children}}{{template "ftnode" (dict "Node" . "CSRF" $.CSRF "Folders" $.Folders "Guac" $.Guac)}}{{end}}
   </div>
 </details>
 {{end}}
@@ -267,6 +269,7 @@
   <span class="ftvm-act">
     {{if eq .VM.State "running"}}
       <a class="btn sm" href="/console/{{.VM.ID}}" target="_blank" rel="noopener">Console</a>
+      {{if .Guac}}<a class="btn sm" href="/console/{{.VM.ID}}/advanced" target="_blank" rel="noopener" title="Open this VM's console through the RustGuac gateway (browser VNC/SPICE) in a new tab">⚡ RustGuac</a>{{end}}
       <form method="post" action="/sessions/{{.VM.ID}}/stop" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm">Stop</button></form>
     {{else}}
       <form method="post" action="/sessions/{{.VM.ID}}/start" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn sm primary">Start</button></form>

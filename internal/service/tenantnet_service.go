@@ -29,6 +29,7 @@ type TenantNetwork struct {
 	IsDefault bool
 	CreatedAt string
 	// Joined from the backing networks row (for display).
+	NetName string // the untagged default port group's name
 	Bridge  string
 	CIDR    string
 	Gateway string
@@ -66,7 +67,7 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(`SELECT t.id,t.org_id,t.name,t.network_id,t.ext_mode,t.state,t.error,t.is_default,t.created_at,
-		COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,''),
+		COALESCE(n.name,''),COALESCE(n.bridge,''),COALESCE(n.cidr,''),COALESCE(n.gateway,''),
 		COALESCE(t.uplink_id,0),COALESCE((SELECT u.name FROM tenant_uplinks u WHERE u.id=t.uplink_id),''),
 		COALESCE((SELECT u.mode FROM tenant_uplinks u WHERE u.id=t.uplink_id),''),t.native_vlan,
 		(SELECT COUNT(*) FROM sessions s WHERE s.network_id=t.network_id AND s.deleted_at IS NULL),t.vrouter_id
@@ -81,7 +82,7 @@ func (s *Service) ListTenantNetworks(p *Principal) ([]TenantNetwork, error) {
 		var t TenantNetwork
 		var def int
 		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.NetworkID, &t.ExtMode, &t.State, &t.Error, &def,
-			&t.CreatedAt, &t.Bridge, &t.CIDR, &t.Gateway, &t.UplinkID, &t.UplinkName, &t.UplinkMode, &t.NativeVLAN, &t.VMs, &t.VRouterID); err != nil {
+			&t.CreatedAt, &t.NetName, &t.Bridge, &t.CIDR, &t.Gateway, &t.UplinkID, &t.UplinkName, &t.UplinkMode, &t.NativeVLAN, &t.VMs, &t.VRouterID); err != nil {
 			return nil, err
 		}
 		t.IsDefault = def == 1
@@ -228,13 +229,8 @@ func (s *Service) DisconnectNetworkUplink(p *Principal, tnetID int64, ip string)
 	if !uplinkID.Valid {
 		return nil // already disconnected
 	}
-	if err := s.unrealizeUplink(uplinkID.Int64, true, false); err != nil {
+	if err := s.disconnectUplink(tnetID, uplinkID.Int64); err != nil {
 		return err
-	}
-	_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE id=?`, tnetID)
-	// Port groups the uplink carried get their host gateway/DHCP back.
-	if err := s.resyncVSwitch(tnetID); err != nil {
-		log.Printf("tenant-net: resync vSwitch %d after disconnect: %v", tnetID, err)
 	}
 	s.audit(p, p.OrgID, "uplink.disconnect", "tenant_network", fmt.Sprint(tnetID), ip, nil)
 	return nil

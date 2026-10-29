@@ -4,103 +4,80 @@
   .topo-legend i{width:11px;height:11px;border-radius:3px;display:inline-block}
   #topo{overflow:auto;text-align:center}
   #topo svg{display:inline-block;margin:0 auto}
-</style>
-{{if .P.IsAdmin}}
-<div class="card">
-  <p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
-</div>
-{{end}}
-
-{{if or .P.OrgAdmin .TenantNetworks}}
-<!-- ===================== tenant vSwitches (tenant networks) ===================== -->
-<style>
-  .tvs{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:12px}
-  .tvs-h{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px}
-  .tvs-h .acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  .tvs table td,.tvs table th{font-size:12px}
   .susp{color:var(--muted);text-decoration:line-through}
 </style>
 <div class="card">
+  {{if .P.IsAdmin}}<p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (one network port, or several teamed together) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Teaming can balance traffic automatically (no switch setup), use link aggregation, or act as active/standby failover. The management port is protected and can't be used as an uplink.</p>
+  {{else}}<p class="muted" style="margin:0">Build your network from the bottom up — <b>Uplink</b> (provisioned by your provider) → <b>vSwitch</b> → <b>Port Group</b> (a VLAN) → VMs. Every vSwitch belongs to this organization alone. Connect one to an uplink to carry it out to the physical network: an <em>access</em> uplink carries one port group (the native one), a <em>QinQ</em> or <em>dedicated</em> uplink carries them all, each on its own VLAN. To route instead, leave a port group's gateway blank and attach it to a router on the <a href="/vrouters">vRouters</a> page.</p>{{end}}
+</div>
+
+<!-- ===================== vSwitches (this organization's tenant networks) ===================== -->
+<div class="card">
   <div class="card-head">
-    <h2>{{if .P.IsAdmin}}Tenant vSwitches <span class="muted" style="font-weight:400;font-size:12px">— this organization's private networks</span>{{else}}vSwitches{{end}}</h2>
+    <h2>{{if .P.IsAdmin}}Tenant vSwitches{{else}}vSwitches{{end}}</h2>
     {{if .P.OrgAdmin}}<button class="btn primary" data-modal="m-tnet">+ Add vSwitch</button>{{end}}
   </div>
-  <p class="muted" style="margin:0">Each <strong>vSwitch</strong> is a private network that belongs to this organization alone — no other tenant can ever share it. Its <strong>untagged</strong> port group is where new VMs land; add <strong>VLAN port groups</strong> to split it into more networks. Connect a vSwitch to an <strong>uplink</strong> (provisioned by your provider) to carry it out to the physical network: an <em>access</em> uplink carries one port group (the one marked native), a <em>QinQ</em> or <em>dedicated</em> uplink carries all of them, each on its own VLAN. A port group carried out an uplink gets its gateway and DHCP from the upstream network. To route instead, leave a port group's gateway blank and attach it to a router on the <a href="/vrouters">vRouters</a> page; give that router a leg on the uplink for internet access with NAT.</p>
-  {{range .TenantNetworks}}{{$t := .}}
-  <div class="tvs">
-    <div class="tvs-h">
-      <div><strong>{{.Name}}</strong>{{if .IsDefault}} <span class="pill">default</span>{{end}} <span class="mono muted" style="font-size:11px">{{.Bridge}}</span>
-        {{if eq .State "error"}}<span class="pill" style="color:var(--danger)" title="{{.Error}}">● error</span>{{end}}</div>
-      <div class="acts">
-        {{if .UplinkName}}<span class="pill running" title="Carried out uplink {{.UplinkName}} ({{.UplinkMode}})">↗ {{.UplinkName}} · {{.UplinkMode}}</span>
-          {{if $.P.OrgAdmin}}<form method="post" action="/networks/tenant/{{.ID}}/uplink/disconnect" style="display:inline" onsubmit="return confirm('Disconnect {{.Name}} from uplink {{.UplinkName}}? Refused if a VM is live on it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm" title="Disconnect uplink">Disconnect</button></form>{{end}}
-        {{else if and $.P.OrgAdmin $.Uplinks}}
-          <form method="post" action="/networks/tenant/{{.ID}}/uplink" style="display:inline-flex;gap:6px;align-items:center">
-            <input type="hidden" name="csrf" value="{{$.CSRF}}">
-            <select name="uplink_id" style="font-size:12px" required><option value="">— uplink —</option>{{range $.Uplinks}}<option value="{{.ID}}">{{.Name}} ({{.Mode}})</option>{{end}}</select>
-            <button class="btn sm">Connect</button>
-          </form>
-        {{else}}<span class="muted" style="font-size:12px">internal only</span>{{end}}
-        {{if $.P.OrgAdmin}}<button class="btn sm" data-modal="m-tpg-{{.ID}}">+ Port group</button>
-        <form method="post" action="/networks/tenant/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}? Refused while it has port groups or VMs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}
-      </div>
-    </div>
-    <table>
-      <tr><th>Port group</th><th>VLAN</th><th>Subnet</th><th>Gateway</th><th>Role</th><th>VMs</th><th></th></tr>
-      <tr>
-        <td><strong>untagged</strong>{{if and .UplinkName (eq .NativeVLAN 0)}} <span class="pill" title="Carried untagged on the uplink">native</span>{{end}}</td>
-        <td class="muted">—</td>
-        <td class="mono">{{.CIDR}}</td>
-        <td class="mono">{{if .Gateway}}<span{{if and .DefaultCarried (not .VRouterID)}} class="susp" title="Suspended — the upstream network provides this port group's gateway while the uplink carries it"{{end}}>{{.Gateway}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
-        <td>{{template "tpg-role" .DefaultKind}}</td>
-        <td>{{.VMs}}</td>
-        <td></td>
-      </tr>
-      {{range .PortGroups}}
-      <tr>
-        <td><strong>{{.Name}}</strong>{{if .Native}} <span class="pill" title="Carried untagged on the uplink">native</span>{{end}}</td>
-        <td class="mono">{{.VLAN}}</td>
-        <td class="mono">{{.CIDR}}</td>
-        <td class="mono">{{if .Gateway}}<span{{if and .Carried (not .VRouterID)}} class="susp" title="Suspended — the upstream network provides this port group's gateway while the uplink carries it"{{end}}>{{.Gateway}}</span>{{if and .DHCP (not .Carried)}} <span class="pill">DHCP</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
-        <td>{{template "tpg-role" .Kind}}{{if .VRouterName}} <span class="muted">via {{.VRouterName}}</span>{{end}}</td>
-        <td>{{.VMs}}</td>
-        <td style="text-align:right">{{if $.P.OrgAdmin}}<form method="post" action="/networks/portgroups/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group {{.Name}} (VLAN {{.VLAN}})? Refused while VMs or a router are attached.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
-      </tr>
-      {{end}}
-    </table>
-    {{if and .UplinkName .PortGroups $.P.OrgAdmin}}
-    <form method="post" action="/networks/tenant/{{.ID}}/native" style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
-      <input type="hidden" name="csrf" value="{{$.CSRF}}">
-      <span class="muted" style="font-size:12px">Untagged on the uplink:</span>
-      <select name="vlan" style="font-size:12px">
-        <option value="0"{{if eq .NativeVLAN 0}} selected{{end}}>untagged port group</option>
-        {{range .PortGroups}}<option value="{{.VLAN}}"{{if .Native}} selected{{end}}>{{.Name}} (VLAN {{.VLAN}})</option>{{end}}
-      </select>
-      <button class="btn sm">Set native</button>
-      <span class="muted" style="font-size:11px">{{if eq .UplinkMode "access"}}An access uplink carries only this one port group.{{else}}The other port groups leave tagged with their own VLAN.{{end}}</span>
-    </form>
+  {{if .TenantNetworks}}
+  <table>
+    <tr><th>vSwitch</th><th>Bridge</th><th>Uplink</th><th>VLANs</th><th></th></tr>
+    {{range .TenantNetworks}}
+    <tr><td><strong>{{.Name}}</strong>{{if .IsDefault}} <span class="pill">default</span>{{end}}{{if eq .State "error"}} <span class="pill error" title="{{.Error}}">error</span>{{end}}</td>
+      <td class="mono muted">{{.Bridge}}</td>
+      <td>{{if .UplinkName}}<span class="mono">{{.UplinkName}}</span> <span class="pill">{{.UplinkMode}}</span>{{else}}<span class="muted">none (internal only)</span>{{end}}</td>
+      <td class="mono muted">untagged{{range .PortGroups}} · {{.VLAN}}{{end}}</td>
+      <td style="text-align:right;white-space:nowrap">{{if $.P.OrgAdmin}}
+        {{if .UplinkName}}<form method="post" action="/networks/tenant/{{.ID}}/uplink/disconnect" style="display:inline" onsubmit="return confirm('Disconnect {{.Name}} from uplink {{.UplinkName}}? Refused if a VM is live on it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">Disconnect</button></form>
+        {{else if $.Uplinks}}<form method="post" action="/networks/tenant/{{.ID}}/uplink" style="display:inline-flex;gap:6px;align-items:center"><input type="hidden" name="csrf" value="{{$.CSRF}}"><select name="uplink_id" style="font-size:12px" required><option value="">— uplink —</option>{{range $.Uplinks}}<option value="{{.ID}}">{{.Name}} ({{.Mode}})</option>{{end}}</select><button class="btn sm">Connect</button></form>{{end}}
+        <form method="post" action="/networks/tenant/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}? Refused while it has port groups or VMs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      {{end}}</td></tr>
     {{end}}
-  </div>
-  {{if $.P.OrgAdmin}}
-  <div class="modal" id="m-tpg-{{.ID}}"><div class="modal-card lg">
-    <div class="modal-head"><h3>Add port group — {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
-    <form class="mform row2" method="post" action="/networks/tenant/{{.ID}}/portgroups">
-      <input type="hidden" name="csrf" value="{{$.CSRF}}">
-      <label class="fld">Name<input type="text" name="name" placeholder="web" required></label>
-      <label class="fld">VLAN ID<input type="number" name="vlan_id" min="2" max="4094" placeholder="10" required title="2–4094. This is your own VLAN numbering — it never collides with another tenant's."></label>
-      <label class="fld">Subnet (CIDR)<input type="text" name="cidr" placeholder="10.60.0.0/24"></label>
-      <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.60.0.1 — blank for routed / uplink"></label>
-      <label class="fld">DHCP<select name="dhcp"><option value="0">no DHCP</option><option value="1">serve DHCP (needs a gateway)</option></select></label>
-      <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.60.0.100-200"></label>
-      <label class="fld full">DHCP DNS<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
-      <p class="muted full" style="margin:0;font-size:12px">With a <strong>gateway</strong> the port group is <em>standalone</em>: a private network with its own gateway address and DHCP, reachable only by its own VMs. Leave it <strong>blank</strong> to route it (attach it to a router on the vRouters page) or to carry it out the uplink, where the upstream network routes it.</p>
-      <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add port group</button></div>
-    </form>
-  </div></div>
-  {{end}}
-  {{else}}<div class="empty" style="margin-top:10px">No vSwitches yet. Add one to give this organization a private network.</div>{{end}}
+  </table>
+  {{else}}<div class="empty">No vSwitches yet. Add one to give this organization a private network.</div>{{end}}
 </div>
-{{end}}
+
+<!-- ===================== Port groups (on this organization's vSwitches) ===================== -->
+<div class="card">
+  <div class="card-head">
+    <h2>{{if .P.IsAdmin}}Tenant port groups{{else}}Port Groups{{end}}</h2>
+    {{if and .P.OrgAdmin .TenantNetworks}}<button class="btn primary" data-modal="m-tpg">+ Add port group</button>{{end}}
+  </div>
+  {{if or .TenantNetworks (and (not .P.IsAdmin) .Networks)}}
+  <table>
+    <tr><th>Name</th><th>vSwitch</th><th>VLAN</th><th>Subnet</th><th>Gateway</th><th>Role</th><th>VMs</th><th></th></tr>
+    {{range .TenantNetworks}}{{$t := .}}
+    <tr>
+      <td><strong>{{.NetName}}</strong>{{if and .UplinkName (eq .NativeVLAN 0)}} <span class="pill" title="Carried untagged on the uplink">native</span>{{end}}</td>
+      <td>{{.Name}}</td>
+      <td class="muted">untagged</td>
+      <td class="mono">{{.CIDR}}</td>
+      <td class="mono">{{if .Gateway}}<span{{if and .DefaultCarried (not .VRouterID)}} class="susp" title="Suspended — the upstream network provides this port group's gateway while the uplink carries it"{{end}}>{{.Gateway}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{template "tpg-role" .DefaultKind}}</td>
+      <td>{{.VMs}}</td>
+      <td style="text-align:right;white-space:nowrap">{{if and $.P.OrgAdmin .UplinkName (ne .NativeVLAN 0) (not .VRouterID)}}<form method="post" action="/networks/tenant/{{.ID}}/native" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="vlan" value="0"><button class="btn sm" title="Carry this port group untagged on the uplink">Make native</button></form>{{end}}</td>
+    </tr>
+    {{range .PortGroups}}
+    <tr>
+      <td><strong>{{.Name}}</strong>{{if .Native}} <span class="pill" title="Carried untagged on the uplink">native</span>{{end}}</td>
+      <td>{{$t.Name}}</td>
+      <td class="mono">{{.VLAN}}</td>
+      <td class="mono">{{.CIDR}}</td>
+      <td class="mono">{{if .Gateway}}<span{{if and .Carried (not .VRouterID)}} class="susp" title="Suspended — the upstream network provides this port group's gateway while the uplink carries it"{{end}}>{{.Gateway}}</span>{{if and .DHCP (not .Carried)}} <span class="pill">DHCP</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{template "tpg-role" .Kind}}{{if .VRouterName}} <span class="muted">via {{.VRouterName}}</span>{{end}}</td>
+      <td>{{.VMs}}</td>
+      <td style="text-align:right;white-space:nowrap">{{if $.P.OrgAdmin}}
+        {{if and $t.UplinkName (not .Native) (not .VRouterID)}}<form method="post" action="/networks/tenant/{{$t.ID}}/native" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="vlan" value="{{.VLAN}}"><button class="btn sm" title="Carry this port group untagged on the uplink">Make native</button></form>{{end}}
+        <form method="post" action="/networks/portgroups/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group {{.Name}} (VLAN {{.VLAN}})? Refused while VMs or a router are attached.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>
+      {{end}}</td>
+    </tr>
+    {{end}}
+    {{end}}
+    {{if not .P.IsAdmin}}{{range .Networks}}
+    <tr><td><strong>{{.Name}}</strong></td><td class="muted">provider</td><td class="mono">{{if .VLANID}}{{.VLANID}}{{else}}<span class="muted">—</span>{{end}}</td><td class="mono">{{.CIDR}}</td><td class="mono">{{if .Gateway}}{{.Gateway}}{{else}}<span class="muted">—</span>{{end}}</td><td><span class="pill">{{if eq .Mode "user"}}NAT{{else}}provider{{end}}</span></td><td class="muted">—</td><td></td></tr>
+    {{end}}{{end}}
+  </table>
+  {{else}}<div class="empty">No port groups yet.</div>{{end}}
+  <p class="muted" style="margin:12px 0 0">A <strong>Port Group</strong> is a VLAN on a vSwitch that VMs connect to. With a <strong>gateway</strong> it's <em>standalone</em>: its own gateway and DHCP, reachable only by its own VMs. Leave the gateway blank to route it with a router, or to carry it out the uplink (the upstream network routes it). The <strong>native</strong> port group is the one the uplink carries untagged.</p>
+</div>
 
 {{if .P.IsAdmin}}
 <!-- ===================== Uplinks / Link Aggregation ===================== -->
@@ -112,10 +89,10 @@
   {{if .Bonds}}
   <table>
     <tr><th>Bond</th><th>Mode</th><th>Members</th><th></th></tr>
-    {{range .Bonds}}
-    <tr><td class="mono"><strong>{{.Name}}</strong></td><td><span class="pill">{{.Mode}}</span></td>
+    {{range $b := .Bonds}}
+    <tr><td class="mono"><strong>{{.Name}}</strong>{{if $.MgmtBridge}}{{range $.VSwitches}}{{if and (eq .Bridge $.MgmtBridge) (eq .Uplink $b.Name)}} <span class="pill">management</span>{{end}}{{end}}{{end}}</td><td><span class="pill">{{.Mode}}</span></td>
       <td class="mono muted">{{range .Members}}{{.}} {{end}}</td>
-      <td style="text-align:right"><form method="post" action="/networks/bonds/{{.Name}}/delete" onsubmit="return confirm('Delete bond {{.Name}}? Frees its member NICs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>
+      <td style="text-align:right">{{with index $.BondInUse .Name}}<span class="muted" style="font-size:11px" title="{{.}}">in use</span>{{else}}<form method="post" action="/networks/bonds/{{.Name}}/delete" onsubmit="return confirm('Delete bond {{.Name}}? Frees its member NICs.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
     {{end}}
   </table>
   {{else}}<div class="empty">No link-aggregation groups yet. A single NIC can also be a vSwitch uplink directly.</div>{{end}}
@@ -133,7 +110,8 @@
     {{range .VSwitches}}
     <tr><td><strong>{{.Name}}</strong>{{if eq .Bridge $.MgmtBridge}} <span class="pill">management</span>{{end}}</td><td class="mono muted">{{.Bridge}}</td><td class="mono">{{if .Uplink}}{{.Uplink}}{{else}}<span class="muted">none</span>{{end}}</td>
       <td style="text-align:right;white-space:nowrap">
-        {{if .Uplink}}<button type="button" class="btn sm" data-vsbond="{{.Name}}" data-vsuplink="{{.Uplink}}" title="Team the uplink with more NICs (load balancing / failover)">Add teaming</button>{{end}}
+        {{$vs := .}}{{$team := false}}{{range $.Bonds}}{{if eq .Name $vs.Uplink}}{{$team = true}}{{end}}{{end}}
+        {{if and .Uplink (not $team)}}<button type="button" class="btn sm" data-vsbond="{{.Name}}" data-vsuplink="{{.Uplink}}" title="Team the uplink with more NICs (load balancing / failover)">Add teaming</button>{{end}}
         {{if eq .Bridge $.MgmtBridge}}<span class="muted" style="font-size:11px" title="Carries the admin IP — protected">protected</span>{{else}}<form method="post" action="/networks/vswitches/{{.Name}}/delete" style="display:inline" onsubmit="return confirm('Delete vSwitch {{.Name}}?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td></tr>
     {{end}}
   </table>
@@ -142,7 +120,7 @@
 {{end}}
 
 <!-- ===================== Port Groups ===================== -->
-{{if or .P.IsAdmin .Networks}}
+{{if .P.IsAdmin}}
 <div class="card">
   <div class="card-head">
     <h2>Port Groups &amp; VXLAN networks</h2>
@@ -175,6 +153,7 @@
   <h2>Host interfaces</h2>
   <div id="iftable"><div class="muted">loading…</div></div>
 </div>
+{{end}}
 
 <div class="card">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
@@ -182,14 +161,14 @@
     <div style="display:flex;align-items:center;gap:14px">
       <span class="topo-legend"><i style="background:var(--primary)"></i>Port Group</span>
       <span class="topo-legend"><i style="background:var(--muted)"></i>vSwitch</span>
-      <span class="topo-legend"><i style="background:var(--accent)"></i>Uplink / LAG</span>
+      <span class="topo-legend"><i style="background:var(--accent)"></i>{{if .P.IsAdmin}}Uplink / LAG{{else}}Uplink{{end}}</span>
       <span id="topots" class="muted" style="font-size:11px"></span>
     </div>
   </div>
-  <p class="muted" style="margin:6px 0 10px">VMware-style view — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, <strong>Physical Adapters</strong> and link-aggregation groups on the right. Updates automatically as you create VMs, port groups, vSwitches and uplinks.</p>
+  {{if .P.IsAdmin}}<p class="muted" style="margin:6px 0 10px">VMware-style view — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, <strong>Physical Adapters</strong> and link-aggregation groups on the right. Updates automatically as you create VMs, port groups, vSwitches and uplinks.</p>
+  {{else}}<p class="muted" style="margin:6px 0 10px">This organization's network — <strong>Port Groups</strong> (with their VMs) on the left, the <strong>vSwitch</strong> in the middle, its <strong>uplink</strong> on the right. A routed port group is drawn on its <strong>router</strong>, with the router's uplink as its way out. Updates automatically.</p>{{end}}
   <div id="topo" style="overflow:auto"><div class="muted">loading…</div></div>
 </div>
-{{end}}
 
 <!-- ===================== create modals ===================== -->
 {{if .P.IsAdmin}}
@@ -252,7 +231,7 @@
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">vSwitch name<input name="name" placeholder="vSwitch1" required></label>
     <label class="fld">Uplink
-      <select name="uplink" id="uplinksel"><option value="">— none (internal only) —</option>{{range .Bonds}}<option value="{{.Name}}">{{.Name}} (bond · {{.Mode}})</option>{{end}}</select>
+      <select name="uplink" id="uplinksel"><option value="">— none (internal only) —</option>{{range .Bonds}}{{if not (index $.BondInUse .Name)}}<option value="{{.Name}}">{{.Name}} (bond · {{.Mode}})</option>{{end}}{{end}}</select>
     </label>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create vSwitch</button></div>
   </form>
@@ -325,6 +304,25 @@
   </form>
 </div></div>
 
+{{if and .P.OrgAdmin .TenantNetworks}}
+<div class="modal" id="m-tpg"><div class="modal-card lg">
+  <div class="modal-head"><h3>Add port group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/networks/tenant/portgroups">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="fld">vSwitch<select name="tnet_id" required>{{range .TenantNetworks}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+    <label class="fld">Name<input type="text" name="name" placeholder="web" required></label>
+    <label class="fld">VLAN ID<input type="number" name="vlan_id" min="2" max="4094" placeholder="10" required title="2–4094. This is your own VLAN numbering — it never collides with another tenant's."></label>
+    <label class="fld">Subnet (CIDR)<input type="text" name="cidr" placeholder="10.60.0.0/24"></label>
+    <label class="fld">Gateway<input type="text" name="gateway" placeholder="10.60.0.1 — blank for routed / uplink"></label>
+    <label class="fld">DHCP<select name="dhcp"><option value="0">no DHCP</option><option value="1">serve DHCP (needs a gateway)</option></select></label>
+    <label class="fld">DHCP range<input type="text" name="dhcp_range" placeholder="10.60.0.100-200"></label>
+    <label class="fld">DHCP DNS<input type="text" name="dhcp_dns" placeholder="1.1.1.1,8.8.8.8"></label>
+    <p class="muted full" style="margin:0;font-size:12px">With a <strong>gateway</strong> the port group is <em>standalone</em>: a private network with its own gateway address and DHCP, reachable only by its own VMs. Leave it <strong>blank</strong> to route it (attach it to a router on the vRouters page) or to carry it out the uplink, where the upstream network routes it.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add port group</button></div>
+  </form>
+</div></div>
+{{end}}
+
 <div class="modal" id="m-pg"><div class="modal-card lg">
   <div class="modal-head"><h3>Add port group</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/networks">
@@ -373,8 +371,22 @@
   </form>
 </div></div>
 
-{{if .P.IsAdmin}}
 {{template "topochart" .}}
+<script>
+(function(){
+  function refreshTopo(){
+    fetch('/api/topology').then(function(r){return r.json();})
+      .then(function(t){ window.VXChart.drawTopo(t, document.getElementById('topo')); })
+      .catch(function(){ var h=document.getElementById('topo'); if(h&&!h.querySelector('svg')) h.innerHTML='<div class="empty">topology unavailable</div>'; });
+  }
+  refreshTopo();
+  var topoTimer=setInterval(function(){ if(!document.hidden) refreshTopo(); }, 5000);
+  window.addEventListener('beforeunload', function(){ clearInterval(topoTimer); });
+  // Rich LLDP/CDP tooltip (shared renderer): hovering a switch hostname pops the full info.
+  window.VXChart.installTooltip(document.getElementById('topo'));
+})();
+</script>
+{{if .P.IsAdmin}}
 <script>
 (function(){
   // Fill a bond-member checkbox list: every FREE physical NIC (selectable) PLUS
@@ -395,7 +407,7 @@
       }
     }
     // Free NICs the user can add.
-    phys.filter(function(it){ return !it.master; }).forEach(function(it){
+    phys.filter(function(it){ return !it.master && !it.in_use; }).forEach(function(it){
       if(it.name===currentUplink) return;
       var lab=document.createElement('label'); lab.style.cssText='display:inline-flex;gap:5px;align-items:center;font-size:12px';
       lab.innerHTML='<input type="checkbox" name="members" value="'+it.name+'" style="width:auto"> '+it.name+' <span class="muted">('+it.state+')</span>';
@@ -413,7 +425,7 @@
 
     // Uplink picker: free physical NICs (not already enslaved).
     ifs.forEach(function(it){
-      if(ulsel && it.type==='physical' && !it.master){
+      if(ulsel && it.type==='physical' && !it.master && !it.in_use){
         var o=document.createElement('option'); o.value=it.name;
         o.textContent=it.name+' (NIC · '+it.state+(it.speed_mbps?', '+it.speed_mbps+'Mb/s':'')+')';
         ulsel.appendChild(o);
@@ -521,18 +533,6 @@
     // Fill the member pickers now that we know the NICs.
     window.fillBondMembers(document.getElementById('bondmembers'), '');
   }).catch(function(){});
-
-
-  function refreshTopo(){
-    fetch('/api/topology').then(function(r){return r.json();})
-      .then(function(t){ window.VXChart.drawTopo(t, document.getElementById('topo')); })
-      .catch(function(){ var h=document.getElementById('topo'); if(h&&!h.querySelector('svg')) h.innerHTML='<div class="empty">topology unavailable</div>'; });
-  }
-  refreshTopo();
-  var topoTimer=setInterval(function(){ if(!document.hidden) refreshTopo(); }, 5000);
-  window.addEventListener('beforeunload', function(){ clearInterval(topoTimer); });
-  // Rich LLDP/CDP tooltip (shared renderer): hovering a switch hostname pops the full info.
-  window.VXChart.installTooltip(document.getElementById('topo'));
 })();
 </script>
 {{end}}

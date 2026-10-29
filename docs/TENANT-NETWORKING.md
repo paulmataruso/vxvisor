@@ -667,3 +667,54 @@ address + default route via the upstream inside the netns, no AppArmor FRR denia
 its initial set. The netns FRR daemons need `deploy/apparmor/frr.d-vxvisor` on Ubuntu 26.04 (stock
 AppArmor only allows the flat `/run/frr/` paths; installed by `install.sh` — see CLAUDE.md).
 
+
+## 30. UI (v1.107)
+A tenant's `/networks` is the admin page's layout, scoped to the org: a **vSwitches** table (bridge,
+uplink, VLANs; connect/disconnect, delete), a **Port Groups** table (every port group of every
+vSwitch, its role, "Make native", delete; "+ Add port group" picks the vSwitch) and the same
+**Topology** map. `/api/topology` returns `tenantTopology` for anyone but an instance admin (an admin
+in tenant view included): only the org's vSwitches (by name), port groups, VMs, containers, routers
+and uplinks (by the tenant-facing uplink name; link up only when the provider port is) — no host
+NICs, bridges, taps, management IPs or LLDP. vRouter legs are merged **per port group**
+(`mergeVRouters`, by the leg's `network_id`): a routed port group moves onto its router, the
+vSwitch and its other port groups stay; an uplink leg's way out is the vSwitch uplink. The host
+map uses the same merge, so a router leg on a tenant port group no longer swallows the whole
+vSwitch; legacy dedicated segment / transit bridges still collapse into the router.
+
+## 31. Tenant Egress console: edit in place + the "Add tenant egress" wizard (v1.107)
+Everything on `/trunks` is editable (instance admin; `service/trunk_edit.go`):
+- **Trunk** (`UpdateTrunk`, `POST /trunks/{id}/edit`): MTU and QinQ capability of a *dedicated* trunk,
+  applied live via `EnsureTrunk`. Turning QinQ off first puts the NIC's VLAN offload back to its
+  pre-designation state (`RestoreTrunk` with MTU 0) and is refused while a QinQ uplink uses the trunk.
+  A shared (management) trunk is never modified — no Edit button.
+- **VLAN pool** (`SetVlanPool` upsert, now guarded by `checkPoolRange`): refuses overlap with another
+  tenant's pool or in-use tag on the same trunk, and a shrink that leaves out a tag one of the
+  tenant's uplinks holds from its current pool.
+- **Uplink** (`UpdateUplink` + `SetUplinkConnection`, `POST /trunks/uplink/{id}/edit`): rename, mode,
+  trunk, tag (0 = next free from the pool) or dedicated NIC, and which of its tenant's vSwitches it
+  connects to (or none). A connected uplink is re-wired live: unrealize → `wireUplink` (tag released
+  and re-assigned, realize, `resyncVSwitch`); if the new wiring fails the old one is put back. The
+  carry rules (`checkCarry`) are re-checked for the new mode. The page asks before re-wiring a
+  connected uplink; a rename alone is instant.
+
+`+ Add tenant egress` (`service/egress_wizard.go` `ProvisionTenantEgress`, `POST /trunks/wizard`) runs
+**Tenant → Trunk → VLAN pool → Uplink → vSwitch → Review**. Pools and uplinks belong to a tenant *on a
+trunk*, so those come first; the vSwitch is last because it connects to the uplink. Each step reuses
+the single-item path (`DesignateTrunk`, `SetVlanPool`, `createUplink` without auto-connect,
+`createTenantNetwork` + `connectUplink`), and each completed step pushes an undo (undesignate / old
+pool range or delete / delete uplink / delete vSwitch), so a failure at any step leaves the tenant as
+it was ("… (the earlier steps were undone)"). Choices: existing trunk or designate one (dedicated or
+the shared mgmt uplink); the pool is prefilled from the tenant's existing pool or the first free block
+of ten from VLAN 100; a new uplink (auto or explicit tag; QinQ only on a QinQ-capable trunk) or one of
+the tenant's unconnected uplinks on that trunk; connect an existing unconnected vSwitch (its default
+is preselected), create one (named `default` and made the default when the tenant has none), or
+none. A wizard-created vSwitch has no host gateway/DHCP — its untagged port group is carried, so the
+provider network serves the subnet (the optional CIDR is shown on the tenant's map). The page checks
+each step client-side; the service re-checks everything.
+
+Verified: unit (`egress_edit_test.go`: pool guards, unbound rename/retag + restore on clash, org guard
+on connect, wizard success + rollback of pool and uplink), page render (`trunks_render_test.go`), the
+wizard and edit modals driven in headless Chromium, and a live E2E on the test host (org "test",
+trunk `enp4s0f0`): wizard → bound subinterface in the new bridge, live retag 501→502, refused clash
+keeps the live wiring, admin disconnect, trunk MTU edit, wizard rollback, and the DB/devices back
+to their exact starting state. The trunk had no carrier, so wire behaviour is untested.
