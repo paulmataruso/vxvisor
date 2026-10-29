@@ -97,7 +97,7 @@ func (s *Server) setVlanPool(w http.ResponseWriter, r *http.Request, p *service.
 		int(atoi(r.FormValue("vid_min"))), int(atoi(r.FormValue("vid_max"))), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "VLAN pool saved.")
+		setFlashOK(w, "VLAN range saved.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }
@@ -110,7 +110,7 @@ func (s *Server) deleteVlanPool(w http.ResponseWriter, r *http.Request, p *servi
 	if err := s.svc.DeleteVlanPool(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "VLAN pool removed.")
+		setFlashOK(w, "VLAN range removed.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }
@@ -125,7 +125,7 @@ func (s *Server) createUplink(w http.ResponseWriter, r *http.Request, p *service
 	if err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Uplink created. The tenant can now connect a network to it from their Networks page.")
+		setFlashOK(w, "External network created. The tenant can now connect a vSwitch to it from their Networks page.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }
@@ -146,7 +146,7 @@ func (s *Server) editUplink(w http.ResponseWriter, r *http.Request, p *service.P
 	if err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Uplink updated.")
+		setFlashOK(w, "External network updated.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }
@@ -183,11 +183,11 @@ func (s *Server) egressWizard(w http.ResponseWriter, r *http.Request, p *service
 	if err != nil {
 		setFlash(w, err.Error())
 	} else {
-		msg := []string{fmt.Sprintf("Tenant egress set up for %s: trunk %s", res.Org, res.Trunk)}
+		msg := []string{fmt.Sprintf("External connectivity set up for %s: trunk %s", res.Org, res.Trunk)}
 		if res.Pool != "" {
-			msg = append(msg, "VLAN pool "+res.Pool)
+			msg = append(msg, "VLAN range "+res.Pool)
 		}
-		msg = append(msg, "uplink "+res.Uplink)
+		msg = append(msg, "external network "+res.Uplink)
 		if res.VSwitch != "" {
 			msg = append(msg, "connected to vSwitch "+res.VSwitch)
 		}
@@ -204,7 +204,7 @@ func (s *Server) deleteUplink(w http.ResponseWriter, r *http.Request, p *service
 	if err := s.svc.DeleteUplink(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Uplink removed.")
+		setFlashOK(w, "External network removed.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }
@@ -217,7 +217,7 @@ func (s *Server) disableTenantEgress(w http.ResponseWriter, r *http.Request, p *
 	if err := s.svc.DisableTenantEgress(p, clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Tenant egress disabled — all subinterfaces torn down and trunks restored to their original state.")
+		setFlashOK(w, "External connectivity disabled — all subinterfaces torn down and trunks restored to their original state.")
 	}
 	http.Redirect(w, r, "/trunks", http.StatusSeeOther)
 }

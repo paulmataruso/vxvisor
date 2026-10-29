@@ -14,6 +14,7 @@ func allocTestService(t *testing.T) (*Service, int64, int64) {
 		t.Fatalf("open: %v", err)
 	}
 	s := &Service{db: d}
+	stubTenantHost(t, nil)
 	if _, err := d.Exec(`INSERT INTO orgs(name,slug) VALUES('t','t')`); err != nil {
 		t.Fatalf("org: %v", err)
 	}

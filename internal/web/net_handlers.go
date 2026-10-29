@@ -156,9 +156,9 @@ func (s *Server) createTenantNetwork(w http.ResponseWriter, r *http.Request, p *
 		setFlash(w, err.Error())
 	case atoi(r.FormValue("uplink_id")) > 0:
 		if err := s.svc.ConnectNetworkUplink(p, id, atoi(r.FormValue("uplink_id")), clientIP(r)); err != nil {
-			setFlash(w, "vSwitch created, but connecting the uplink failed: "+err.Error())
+			setFlash(w, "vSwitch created, but connecting the external network failed: "+err.Error())
 		} else {
-			setFlashOK(w, "vSwitch created and connected to its uplink.")
+			setFlashOK(w, "vSwitch created and connected to its external network.")
 		}
 	default:
 		setFlashOK(w, "vSwitch created.")
@@ -173,6 +173,59 @@ func (s *Server) deleteTenantNetwork(w http.ResponseWriter, r *http.Request, p *
 	}
 	if err := s.svc.DeleteTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// portGroupEdit reads the edit modal shared by vSwitches and port groups. The
+// addressing fields only count when the form carried them (l3=1): a routed port
+// group's form has none.
+func portGroupEdit(r *http.Request) service.PortGroupEdit {
+	return service.PortGroupEdit{
+		Name: r.FormValue("name"), L3: r.FormValue("l3") == "1",
+		CIDR: r.FormValue("cidr"), Gateway: r.FormValue("gateway"), DHCP: r.FormValue("dhcp") == "1",
+		DHCPRange: r.FormValue("dhcp_range"), DNS: r.FormValue("dhcp_dns"),
+	}
+}
+
+// editTenantNetwork edits a vSwitch: its name and its untagged port group.
+func (s *Server) editTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.UpdateTenantNetwork(p, atoi(r.PathValue("id")), portGroupEdit(r), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "vSwitch updated.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// setDefaultTenantNetwork makes a vSwitch the org's default.
+func (s *Server) setDefaultTenantNetwork(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.SetDefaultTenantNetwork(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Default vSwitch changed — new instances attach to it.")
+	}
+	http.Redirect(w, r, "/networks", http.StatusSeeOther)
+}
+
+// editTenantPortGroup edits a VLAN port group.
+func (s *Server) editTenantPortGroup(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	if err := s.svc.UpdateTenantPortGroup(p, atoi(r.PathValue("id")), portGroupEdit(r), clientIP(r)); err != nil {
+		setFlash(w, err.Error())
+	} else {
+		setFlashOK(w, "Port group updated.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }
@@ -234,7 +287,7 @@ func (s *Server) connectUplink(w http.ResponseWriter, r *http.Request, p *servic
 	if err := s.svc.ConnectNetworkUplink(p, atoi(r.PathValue("id")), atoi(r.FormValue("uplink_id")), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Network connected to the uplink — it now has external egress.")
+		setFlashOK(w, "vSwitch connected to the external network.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }
@@ -247,7 +300,7 @@ func (s *Server) disconnectUplink(w http.ResponseWriter, r *http.Request, p *ser
 	if err := s.svc.DisconnectNetworkUplink(p, atoi(r.PathValue("id")), clientIP(r)); err != nil {
 		setFlash(w, err.Error())
 	} else {
-		setFlashOK(w, "Network disconnected from its uplink.")
+		setFlashOK(w, "vSwitch disconnected from its external network.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

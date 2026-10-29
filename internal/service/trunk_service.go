@@ -143,12 +143,26 @@ func (s *Service) isMgmtBridgeUplink(iface string) bool {
 		}
 	}
 	for _, it := range ifs {
-		if it.Name == iface && mgmtBridge[it.Master] &&
-			it.Type != "tap" && it.Type != "vxlan" && it.Type != "bridge" {
-			return true
+		if it.Name == iface && mgmtBridge[it.Master] {
+			return sharedTrunkCandidate(it, it.Master, s.StorageIface())
 		}
 	}
 	return false
+}
+
+// sharedTrunkCandidate reports whether a host interface can be the management
+// vSwitch's shared trunk: a physical NIC or bond enslaved to the management
+// bridge — never a VM tap, a router or container veth, a VLAN or VXLAN device
+// that merely sits on that bridge, nor the storage interface — whose name leaves
+// room for a ".<vid>" subinterface.
+func sharedTrunkCandidate(it hostinfo.Iface, mgmt, storage string) bool {
+	if mgmt == "" || it.Master != mgmt || (storage != "" && it.Name == storage) {
+		return false
+	}
+	if it.Type != "physical" && it.Type != "bond" {
+		return false
+	}
+	return netdrv.CheckTrunkName(it.Name) == nil
 }
 
 // SharedTrunkCandidates lists the management vSwitch's uplink device(s) that are
@@ -188,12 +202,10 @@ func (s *Service) SharedTrunkCandidates(p *Principal) ([]TransitIface, error) {
 		}
 		rows.Close()
 	}
+	storage := s.StorageIface()
 	var out []TransitIface
 	for _, it := range ifs {
-		if it.Master != mgmt || it.Type == "tap" || it.Type == "vxlan" || it.Type == "bridge" {
-			continue
-		}
-		if already[it.Name] {
+		if !sharedTrunkCandidate(it, mgmt, storage) || already[it.Name] {
 			continue
 		}
 		out = append(out, TransitIface{Name: it.Name, State: it.State, Carrier: it.Carrier, SpeedMbps: it.SpeedMbps, Addrs: it.Addrs})
@@ -263,6 +275,9 @@ func (s *Service) DesignateTrunk(p *Principal, iface string, qinqCapable bool, m
 	}
 	if st := s.StorageIface(); st != "" && iface == st {
 		return fmt.Errorf("refusing to designate the storage interface %q as a tenant trunk", st)
+	}
+	if err := netdrv.CheckTrunkName(iface); err != nil {
+		return err
 	}
 	// Is this the management vSwitch's uplink? If so it's a SHARED trunk and the
 	// normal "already enslaved / is a vSwitch uplink" refusals are expected and
@@ -495,6 +510,13 @@ func (s *Service) DeleteUplink(p *Principal, id int64, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
+	var tnetID int64
+	_ = s.db.QueryRow(`SELECT id FROM tenant_networks WHERE uplink_id=?`, id).Scan(&tnetID)
+	if tnetID != 0 {
+		if err := s.checkUplinkLegs(tnetID, "", 0); err != nil {
+			return err
+		}
+	}
 	if err := s.unrealizeUplink(id, true, true); err != nil {
 		return err
 	}
@@ -503,13 +525,24 @@ func (s *Service) DeleteUplink(p *Principal, id int64, ip string) error {
 	if _, err := s.db.Exec(`DELETE FROM tenant_uplinks WHERE id=?`, id); err != nil {
 		return err
 	}
+	if tnetID != 0 {
+		// Port groups it carried get their host gateway / DHCP back.
+		if err := s.resyncVSwitch(tnetID); err != nil {
+			log.Printf("tenant-net: resync vSwitch %d after deleting its uplink: %v", tnetID, err)
+		}
+	}
 	s.audit(p, p.OrgID, "uplink.delete", "uplink", fmt.Sprint(id), ip, nil)
 	return nil
 }
 
 // realizeUplink wires the uplink's device into the given tenant egress bridge:
-// a VLAN subinterface for access/qinq, or the whole dedicated NIC. Idempotent.
+// a VLAN subinterface for access/qinq, or the whole dedicated NIC. The port is
+// enslaved DOWN; syncVSwitch brings it up once its VLANs are set and the host is
+// off everything it carries. Idempotent.
 func (s *Service) realizeUplink(id int64, egressBridge string) error {
+	if !strings.HasPrefix(egressBridge, "vdxt") {
+		return fmt.Errorf("refusing to wire an uplink into %q: not a tenant vSwitch", egressBridge)
+	}
 	var mode, dedIface string
 	var vid int
 	var trunkID sql.NullInt64
@@ -527,12 +560,10 @@ func (s *Service) realizeUplink(id int64, egressBridge string) error {
 		if mode == "qinq" {
 			proto = "802.1ad"
 		}
-		sub, err := netdrv.EnsureVlanSub(trunk, vid, proto)
-		if err != nil {
-			s.markUplink(id, "error", err.Error())
-			return err
+		if vid <= 0 {
+			return fmt.Errorf("uplink has no tag assigned")
 		}
-		if err := netdrv.EnslaveToBridge(sub, egressBridge); err != nil {
+		if _, err := netdrv.ClaimVlanSub(trunk, vid, proto, egressBridge); err != nil {
 			s.markUplink(id, "error", err.Error())
 			return err
 		}
@@ -542,7 +573,7 @@ func (s *Service) realizeUplink(id int64, egressBridge string) error {
 		if err := s.guardMgmt(dedIface); err != nil {
 			return err
 		}
-		if err := netdrv.EnslaveToBridge(dedIface, egressBridge); err != nil {
+		if err := netdrv.EnslavePortDown(dedIface, egressBridge); err != nil {
 			s.markUplink(id, "error", err.Error())
 			return err
 		}
@@ -574,11 +605,12 @@ func (s *Service) unrealizeUplink(id int64, guardLiveVMs, free bool) error {
 		if trunkID.Valid {
 			var trunk string
 			if s.db.QueryRow(`SELECT iface FROM ext_trunks WHERE id=?`, trunkID.Int64).Scan(&trunk) == nil && vid > 0 {
-				sub := netdrv.SubName(trunk, vid)
-				if err := netdrv.DelVlanSub(sub); err != nil {
+				// Only the uplink's own subinterface is removed — a host device
+				// that a refused claim left alone is never touched.
+				if err := netdrv.ReleaseVlanSub(trunk, vid); err != nil {
 					// Device still present — do NOT free the VID (would risk reuse
 					// while the device lingers). Surface the error.
-					return fmt.Errorf("tear down subinterface %s: %w", sub, err)
+					return fmt.Errorf("tear down subinterface %s: %w", netdrv.SubName(trunk, vid), err)
 				}
 			}
 		}
@@ -645,7 +677,11 @@ func (s *Service) ReensureExtTrunks() {
 		}
 	}
 	rows.Close()
+	pending := false
 	for _, x := range ts {
+		if x.tp == 1 {
+			pending = true
+		}
 		if x.sh == 1 {
 			continue // shared mgmt-uplink trunk: the parent is never prepped or restored
 		}
@@ -655,12 +691,21 @@ func (s *Service) ReensureExtTrunks() {
 		}
 		_ = netdrv.EnsureTrunk(x.iface, s.trunkSlaves(x.iface), x.mtu, x.qinq == 1)
 	}
+	if pending {
+		// A "Disable tenant egress" that didn't finish (crash, or a device that
+		// wouldn't go away): carry it on rather than re-wiring its uplinks.
+		if err := s.teardownTenantEgress(true); err != nil {
+			log.Printf("tenant egress teardown (resumed at boot): %v", err)
+		}
+	}
 }
 
 // ReensureUplinks re-wires bound uplinks' subinterfaces into their egress bridges
 // on boot. Runs AFTER ReensureTenantNetworks (the egress bridges must exist).
+// While a global teardown is pending, uplinks are left off the wire.
 func (s *Service) ReensureUplinks() {
-	rows, err := s.db.Query(`SELECT id,egress_bridge FROM tenant_uplinks WHERE status='bound' AND egress_bridge!=''`)
+	rows, err := s.db.Query(`SELECT id,egress_bridge FROM tenant_uplinks WHERE status='bound' AND egress_bridge!=''
+		AND NOT EXISTS (SELECT 1 FROM ext_trunks WHERE teardown_pending=1)`)
 	if err != nil {
 		return
 	}
@@ -690,28 +735,71 @@ func (s *Service) DisableTenantEgress(p *Principal, ip string) error {
 	if !p.IsAdmin {
 		return ErrUnauthorized
 	}
-	// Mark all trunks teardown_pending first so a crash mid-teardown converges.
-	_, _ = s.db.Exec(`UPDATE ext_trunks SET teardown_pending=1`)
-	var ids []int64
-	rows, _ := s.db.Query(`SELECT id FROM tenant_uplinks`)
+	err := s.teardownTenantEgress(false)
+	s.audit(p, p.OrgID, "trunk.disable_all", "ext_trunk", "*", ip, map[string]any{"complete": err == nil})
+	return err
+}
+
+// teardownTenantEgress takes every uplink off the wire and removes it (router
+// external interfaces on its vSwitch are detached first; the port groups it
+// carried get their host gateway / DHCP back), then restores and removes every
+// trunk that no longer has an uplink. The DB only ever forgets what is really
+// gone: an uplink whose device won't go away is kept (status error) along with
+// its trunk, which stays teardown_pending — the next run, or the next boot,
+// carries on from there. onlyPending (boot) resumes an earlier teardown: only
+// uplinks on trunks already marked teardown_pending.
+func (s *Service) teardownTenantEgress(onlyPending bool) error {
+	q := `SELECT u.id,COALESCE(t.id,0) FROM tenant_uplinks u LEFT JOIN tenant_networks t ON t.uplink_id=u.id`
+	if onlyPending {
+		q += ` WHERE u.trunk_id IN (SELECT id FROM ext_trunks WHERE teardown_pending=1)`
+	} else {
+		// Mark every trunk first so a crash mid-teardown converges at boot.
+		if _, err := s.db.Exec(`UPDATE ext_trunks SET teardown_pending=1`); err != nil {
+			return err
+		}
+	}
+	type up struct{ id, tnet int64 }
+	var ups []up
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return err
+	}
 	for rows.Next() {
-		var id int64
-		if rows.Scan(&id) == nil {
-			ids = append(ids, id)
+		var x up
+		if rows.Scan(&x.id, &x.tnet) == nil {
+			ups = append(ups, x)
 		}
 	}
 	rows.Close()
-	var firstErr error
-	for _, id := range ids {
-		if err := s.unrealizeUplink(id, false, true); err != nil && firstErr == nil {
-			firstErr = err
+	var failed []string
+	for _, x := range ups {
+		if x.tnet != 0 {
+			s.detachUplinkLegs(x.tnet)
 		}
-		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE uplink_id=?`, id)
-		_, _ = s.db.Exec(`DELETE FROM tenant_uplinks WHERE id=?`, id)
+		if err := s.unrealizeUplink(x.id, false, true); err != nil {
+			s.markUplink(x.id, "error", "teardown: "+err.Error())
+			failed = append(failed, err.Error())
+			continue
+		}
+		_, _ = s.db.Exec(`UPDATE tenant_networks SET uplink_id=NULL WHERE uplink_id=?`, x.id)
+		if _, err := s.db.Exec(`DELETE FROM tenant_uplinks WHERE id=?`, x.id); err != nil {
+			failed = append(failed, err.Error())
+			continue
+		}
+		if x.tnet != 0 {
+			if err := s.resyncVSwitch(x.tnet); err != nil {
+				log.Printf("tenant egress teardown: resync vSwitch %d: %v", x.tnet, err)
+			}
+		}
 	}
-	// Restore + remove every trunk (shared trunks never modified the parent, so
-	// skip the restore for them — don't touch the live mgmt bond).
-	trows, _ := s.db.Query(`SELECT id,iface,orig_mtu,orig_offload,shared FROM ext_trunks`)
+	// Restore + remove each pending trunk nothing rides any more (shared trunks
+	// never modified the parent, so skip the restore for them — don't touch the
+	// live mgmt bond).
+	trows, err := s.db.Query(`SELECT id,iface,orig_mtu,orig_offload,shared FROM ext_trunks WHERE teardown_pending=1
+		AND id NOT IN (SELECT trunk_id FROM tenant_uplinks WHERE trunk_id IS NOT NULL)`)
+	if err != nil {
+		return err
+	}
 	type tr struct {
 		id      int64
 		iface   string
@@ -731,11 +819,14 @@ func (s *Service) DisableTenantEgress(p *Principal, ip string) error {
 		if x.shared == 0 {
 			_ = netdrv.RestoreTrunk(x.iface, s.trunkSlaves(x.iface), x.origMTU, x.origOff)
 		}
+		_, _ = s.db.Exec(`DELETE FROM tenant_vlan_pools WHERE trunk_id=?`, x.id)
+		_, _ = s.db.Exec(`DELETE FROM ext_trunks WHERE id=?`, x.id)
 	}
-	_, _ = s.db.Exec(`DELETE FROM tenant_vlan_pools`)
-	_, _ = s.db.Exec(`DELETE FROM ext_trunks`)
-	s.audit(p, p.OrgID, "trunk.disable_all", "ext_trunk", "*", ip, nil)
-	return firstErr
+	if len(failed) > 0 {
+		return fmt.Errorf("%d external network(s) couldn't be taken off the wire (first: %s) — they and their trunks are kept and marked; fix the cause and run Disable again (it also resumes at the next boot)",
+			len(failed), failed[0])
+	}
+	return nil
 }
 
 // OrgLite is a minimal org row for admin-page dropdowns.

@@ -25,10 +25,10 @@
 </style>
 <div class="card">
   <div class="card-head">
-    <h2>Tenant egress</h2>
-    <button class="btn primary" data-modal="m-wiz" id="wiz-open">+ Add tenant egress</button>
+    <h2>External connectivity</h2>
+    <button class="btn primary" data-modal="m-wiz" id="wiz-open">+ Add external connectivity</button>
   </div>
-  <p class="muted" style="margin:0">This is the <b>admin</b> side of tenant networking. Tenants build their own networks normally and connect them to a named <b>uplink</b>; here you decide what that uplink <em>really</em> is on the wire. Designate a physical NIC or bond as an <b>external trunk</b>, then give each tenant an uplink that egresses as a <b>dedicated VLAN</b> (single 802.1Q tag), <b>QinQ</b> (a per-tenant outer tag with the tenant's own VLANs carried inside), or a <b>dedicated interface</b>. Everything past the trunk — routing the tags where they belong — is your physical fabric's job. <b>+ Add tenant egress</b> walks you through a tenant's trunk, VLAN pool, uplink and vSwitch in one go; everything below can be edited afterwards.</p>
+  <p class="muted" style="margin:0">This is the <b>admin</b> side of tenant networking. Tenants build their own networks normally and connect them to a named <b>external network</b>; here you decide what that external network <em>really</em> is on the wire. Designate a physical NIC or bond as an <b>external trunk</b>, then give each tenant an external network that leaves as a <b>dedicated VLAN</b> (single 802.1Q tag), <b>QinQ</b> (a per-tenant outer tag with the tenant's own VLANs carried inside), or a <b>dedicated interface</b>. Everything past the trunk — routing the tags where they belong — is your physical fabric's job. <b>+ Add external connectivity</b> walks you through a tenant's trunk, VLAN range, external network and vSwitch in one go; everything below can be edited afterwards.</p>
 </div>
 
 <!-- ===================== External trunks ===================== -->
@@ -37,13 +37,13 @@
     <h2>External trunks</h2>
     <button class="btn primary" data-modal="m-trunk">+ Designate trunk</button>
   </div>
-  <p class="muted" style="margin:0 0 10px">A <strong>dedicated</strong> trunk (a free NIC/bond) can't also be a vSwitch uplink, bond member, or vRouter transit NIC, and can carry QinQ (which raises MTU and disables VLAN offload — original state recorded and restored on removal). A <strong>shared</strong> trunk is your management uplink itself: tenant traffic rides it as access VLANs beside untagged management, the parent is never modified, and QinQ is not available there.</p>
+  <p class="muted" style="margin:0 0 10px">A <strong>dedicated</strong> trunk (a free NIC/bond) can't also be a vSwitch uplink, bond member, or vRouter transit NIC, and can carry QinQ (which raises MTU and disables VLAN offload — original state recorded and restored on removal). A <strong>shared</strong> trunk is your management uplink itself: tenant traffic rides it as access VLANs beside untagged management, the parent is never modified, and QinQ is not available there. Tags the host already uses on a trunk (your own port groups' VLANs, existing VLAN interfaces) are never handed to a tenant. A trunk's name must be 10 characters or fewer, so its VLAN interfaces (<span class="mono">name.4094</span>) fit the kernel's limit.</p>
   {{if .Trunks}}
   <table>
-    <tr><th>Interface</th><th>Kind</th><th>MTU</th><th>Mode</th><th>Slaves</th><th>Uplinks</th><th></th></tr>
+    <tr><th>Interface</th><th>Kind</th><th>MTU</th><th>Mode</th><th>Slaves</th><th>External networks</th><th></th></tr>
     {{range .Trunks}}
     <tr{{if .TeardownPending}} style="opacity:.5"{{end}}>
-      <td class="mono"><strong>{{.Iface}}</strong>{{if .Shared}} <span class="pill" title="Shares the management uplink — tenant egress rides it as access VLANs; the parent is never modified">shared w/ mgmt</span>{{end}}</td>
+      <td class="mono"><strong>{{.Iface}}</strong>{{if .Shared}} <span class="pill" title="Shares the management uplink — tenant traffic rides it as access VLANs; the parent is never modified">shared w/ mgmt</span>{{end}}{{if .TeardownPending}} <span class="pill" style="color:var(--danger)" title="A rollback didn't finish: an external network on this trunk couldn't be taken off the wire. Fix its error and run Disable again — it also resumes at the next boot.">teardown pending</span>{{end}}</td>
       <td><span class="pill">{{.Kind}}</span></td>
       <td class="mono">{{.MTU}}</td>
       <td>{{if .QinQCapable}}<span class="pill">QinQ (802.1ad)</span>{{else}}<span class="pill">802.1Q</span>{{end}}</td>
@@ -52,43 +52,43 @@
       <td style="text-align:right">
         {{if .QinQCapable}}<button class="btn sm" onclick="verifyQinQ({{.ID}},this)">Verify QinQ</button>{{end}}
         {{if not .Shared}}<button class="btn sm" data-modal="m-trunk-{{.ID}}">Edit</button>{{end}}
-        <form method="post" action="/trunks/{{.ID}}/undesignate" style="display:inline" onsubmit="return confirm('Remove trunk {{.Iface}}? Restores its original MTU/offload. Refused if uplinks/pools still reference it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form>
+        <form method="post" action="/trunks/{{.ID}}/undesignate" style="display:inline" onsubmit="return confirm('Remove trunk {{.Iface}}? Restores its original MTU/offload. Refused if external networks or VLAN ranges still reference it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Remove</button></form>
       </td>
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No external trunks yet. Designate a free NIC or bond to carry tenant egress.</div>{{end}}
+  {{else}}<div class="empty">No external trunks yet. Designate a free NIC or bond to carry tenant traffic.</div>{{end}}
 </div>
 
 <!-- ===================== VLAN pools ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Per-tenant VLAN pools</h2>
-    <button class="btn primary" data-modal="m-pool"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Set pool</button>
+    <h2>Per-tenant VLAN ranges</h2>
+    <button class="btn primary" data-modal="m-pool"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Set VLAN range</button>
   </div>
-  <p class="muted" style="margin:0 0 10px">Reserve an outer-VLAN range for a tenant on a trunk (matching what you've configured switch-side). Uplinks then auto-allocate tags from it — or you can type an explicit tag per uplink.</p>
+  <p class="muted" style="margin:0 0 10px">Reserve an outer-VLAN range for a tenant on a trunk (matching what you've configured switch-side). External networks then auto-allocate tags from it — or you can type an explicit tag per external network.</p>
   {{if .Pools}}
   <table>
     <tr><th>Org</th><th>Trunk</th><th>Range</th><th>Used</th><th>Available</th><th></th></tr>
     {{range .Pools}}
     <tr><td>{{.OrgName}}</td><td class="mono">{{.TrunkName}}</td><td class="mono">{{.VidMin}}–{{.VidMax}}</td><td class="mono">{{.Used}}</td><td class="mono">{{.Available}}</td>
       <td style="text-align:right"><button class="btn sm" data-modal="m-pool-{{.ID}}">Edit</button>
-        <form method="post" action="/trunks/pool/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this VLAN pool? Refused if uplinks still use a tag from it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>
+        <form method="post" action="/trunks/pool/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete this VLAN range? Refused if external networks still use a tag from it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td></tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No pools yet. Optional — you can also assign explicit tags per uplink.</div>{{end}}
+  {{else}}<div class="empty">No VLAN ranges yet. Optional — you can also assign explicit tags per external network.</div>{{end}}
 </div>
 
 <!-- ===================== Tenant uplinks ===================== -->
 <div class="card">
   <div class="card-head">
-    <h2>Tenant uplinks</h2>
-    <button class="btn primary" data-modal="m-uplink"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Create uplink</button>
+    <h2>Tenant external networks</h2>
+    <button class="btn primary" data-modal="m-uplink"{{if not .Trunks}} disabled title="Designate a trunk first"{{end}}>+ Create external network</button>
   </div>
-  <p class="muted" style="margin:0 0 10px">Each uplink is what one tenant network will egress through. The tenant connects a network to it by name from their own Networks page — they never see the trunk or the tag.</p>
+  <p class="muted" style="margin:0 0 10px">Each external network is what one tenant vSwitch leaves the host through. The tenant connects a vSwitch to it by name from their own Networks page — they never see the trunk or the tag.</p>
   {{if .Uplinks}}
   <table>
-    <tr><th>Org</th><th>Uplink</th><th>Mode</th><th>Tag / NIC</th><th>Trunk</th><th>Connected to</th><th>Status</th><th></th></tr>
+    <tr><th>Org</th><th>External network</th><th>Mode</th><th>Tag / NIC</th><th>Trunk</th><th>Connected to</th><th>Status</th><th></th></tr>
     {{range .Uplinks}}
     <tr>
       <td>{{.OrgName}}</td>
@@ -99,19 +99,19 @@
       <td class="muted">{{if .InUseBy}}{{.InUseBy}}{{else}}—{{end}}</td>
       <td>{{if eq .Status "bound"}}<span class="pill running">● bound</span>{{else if eq .Status "error"}}<span class="pill" style="color:var(--danger)" title="{{.Error}}">● error</span>{{else}}<span class="pill">unbound</span>{{end}}</td>
       <td style="text-align:right"><button class="btn sm" data-modal="m-upl-{{.ID}}">Edit</button>
-        <form method="post" action="/trunks/uplink/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete uplink {{.Name}}? Tears down its subinterface. Refused if a VM is live on its network.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
+        <form method="post" action="/trunks/uplink/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete external network {{.Name}}? Tears down its subinterface. Refused while a VM is live on its vSwitch, or a router\'s external interface is on it.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form></td>
     </tr>
     {{end}}
   </table>
-  {{else}}<div class="empty">No uplinks yet.</div>{{end}}
+  {{else}}<div class="empty">No external networks yet.</div>{{end}}
 </div>
 
 <!-- ===================== Danger: disable ===================== -->
 {{if .Trunks}}
 <div class="card">
   <div class="card-head"><h2>Roll back</h2></div>
-  <p class="muted" style="margin:0 0 10px">Tear down <strong>all</strong> tenant egress: delete every uplink subinterface, restore every trunk's original MTU/offload, and remove all trunks and pools. Host management and the default vSwitch are untouched. Internal (unconnected) tenant networks keep working.</p>
-  <form method="post" action="/trunks/disable" onsubmit="return confirm('Disable ALL tenant egress and restore trunks to their pre-feature state?')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn danger">Disable tenant egress</button></form>
+  <p class="muted" style="margin:0 0 10px">Tear down <strong>all</strong> external connectivity: detach every router's external interface, delete every external network's subinterface, restore every trunk's original MTU/offload, and remove all trunks and VLAN ranges. Host management and the default vSwitch are untouched. Internal (unconnected) tenant networks keep working, and port groups that were carried out get their host gateway and DHCP back. If a subinterface won't go away, that external network and its trunk are kept and marked — fix the cause and run it again (it also resumes at the next boot).</p>
+  <form method="post" action="/trunks/disable" onsubmit="return confirm('Disable ALL external connectivity and restore trunks to their pre-feature state?')"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="btn danger">Disable external connectivity</button></form>
 </div>
 {{end}}
 
@@ -128,34 +128,34 @@
     </label>
     <label class="fld" data-for="dedicated">MTU<input type="number" name="mtu" value="1600" min="1500" max="9000" title="Raised so tagged/double-tagged frames aren't dropped; +4 for one tag, +8 for QinQ."></label>
     <label class="fld" data-for="dedicated">QinQ capable<select name="qinq"><option value="0">no — single 802.1Q tags only</option><option value="1">yes — allow QinQ (disables NIC VLAN offload)</option></select></label>
-    <p class="muted" data-for="shared" style="display:none;margin:0;font-size:12px">This interface carries host <b>management</b>. It will be shared as an <b>access</b> trunk: tenant networks egress as single-tagged VLANs alongside untagged management, and the parent is never modified (no MTU/offload change). QinQ isn't available on a shared uplink.</p>
+    <p class="muted" data-for="shared" style="display:none;margin:0;font-size:12px">This interface carries host <b>management</b>. It will be shared as an <b>access</b> trunk: tenant networks leave as single-tagged VLANs alongside untagged management, and the parent is never modified (no MTU/offload change). QinQ isn't available on a shared uplink. Your own port groups' VLANs on it are never handed to a tenant.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Designate</button></div>
   </form>
 </div></div>
 
 <div class="modal" id="m-pool"><div class="modal-card">
-  <div class="modal-head"><h3>Set VLAN pool</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Set VLAN range</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/trunks/pool">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Org<select name="org_id" required>{{range .Orgs}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
     <label class="fld">Trunk<select name="trunk_id" required>{{range .Trunks}}<option value="{{.ID}}">{{.Iface}}</option>{{end}}</select></label>
     <label class="fld">VLAN min<input type="number" name="vid_min" min="2" max="4094" placeholder="1000" required></label>
     <label class="fld">VLAN max<input type="number" name="vid_max" min="2" max="4094" placeholder="1099" required></label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save pool</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save VLAN range</button></div>
   </form>
 </div></div>
 
 <div class="modal" id="m-uplink"><div class="modal-card">
-  <div class="modal-head"><h3>Create tenant uplink</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Create tenant external network</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/trunks/uplink">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <label class="fld">Org<select name="org_id" required>{{range .Orgs}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
-    <label class="fld">Uplink name<input type="text" name="name" placeholder="wan" required></label>
+    <label class="fld">External network name<input type="text" name="name" placeholder="wan" required></label>
     <label class="fld">Mode<select name="mode" data-upmode><option value="access">dedicated VLAN (single 802.1Q tag)</option><option value="qinq">QinQ (per-tenant outer tag, inner VLANs preserved)</option><option value="dedicated">dedicated interface (whole NIC)</option></select></label>
     <label class="fld" data-for="trunk">Trunk<select name="trunk_id">{{range .Trunks}}<option value="{{.ID}}"{{if .QinQCapable}} data-qinq="1"{{end}}>{{.Iface}}</option>{{end}}</select></label>
-    <label class="fld" data-for="trunk">Tag<input type="number" name="vid" value="0" min="0" max="4094" title="0 = auto-allocate from the tenant's pool; or type an explicit tag"></label>
+    <label class="fld" data-for="trunk">Tag<input type="number" name="vid" value="0" min="0" max="4094" title="0 = auto-allocate from the tenant's VLAN range; or type an explicit tag"></label>
     <label class="fld" data-for="ded" style="display:none">Dedicated NIC<select name="ded_iface"><option value="">— pick a free NIC —</option>{{range .Candidates}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create uplink</button></div>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create external network</button></div>
   </form>
 </div></div>
 
@@ -167,7 +167,7 @@
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     <label class="fld">MTU<input type="number" name="mtu" value="{{.MTU}}" min="1500" max="9000" required title="+4 for one tag, +8 for QinQ."></label>
     <label class="fld">QinQ capable<select name="qinq"><option value="0">no — single 802.1Q tags only</option><option value="1"{{if .QinQCapable}} selected{{end}}>yes — allow QinQ (disables NIC VLAN offload)</option></select></label>
-    <p class="muted full" style="margin:0;font-size:12px">Applied to {{.Iface}}{{if .Slaves}} and its members{{end}} immediately. Turning QinQ off puts the NIC's VLAN offload back the way it was before designation, and is refused while a QinQ uplink still uses this trunk.</p>
+    <p class="muted full" style="margin:0;font-size:12px">Applied to {{.Iface}}{{if .Slaves}} and its members{{end}} immediately. Turning QinQ off puts the NIC's VLAN offload back the way it was before designation, and is refused while a QinQ external network still uses this trunk.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
   </form>
 </div></div>
@@ -175,34 +175,34 @@
 
 {{range .Pools}}
 <div class="modal" id="m-pool-{{.ID}}"><div class="modal-card">
-  <div class="modal-head"><h3>Edit VLAN pool — {{.OrgName}} on {{.TrunkName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Edit VLAN range — {{.OrgName}} on {{.TrunkName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/trunks/pool">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
     <input type="hidden" name="org_id" value="{{.OrgID}}"><input type="hidden" name="trunk_id" value="{{.TrunkID}}">
     <label class="fld">VLAN min<input type="number" name="vid_min" value="{{.VidMin}}" min="2" max="4094" required></label>
     <label class="fld">VLAN max<input type="number" name="vid_max" value="{{.VidMax}}" min="2" max="4094" required></label>
-    <p class="muted full" style="margin:0;font-size:12px">Refused if the new range overlaps another tenant's pool or tag on {{.TrunkName}}, or leaves out a tag one of {{.OrgName}}'s uplinks already uses. Match the range to what the switch port allows.</p>
-    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save pool</button></div>
+    <p class="muted full" style="margin:0;font-size:12px">Refused if the new range overlaps another tenant's VLAN range or tag on {{.TrunkName}}, or leaves out a tag one of {{.OrgName}}'s external networks already uses. Match the range to what the switch port allows.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save VLAN range</button></div>
   </form>
 </div></div>
 {{end}}
 
 {{range $u := .Uplinks}}
 <div class="modal" id="m-upl-{{.ID}}"><div class="modal-card">
-  <div class="modal-head"><h3>Edit uplink {{.Name}} — {{.OrgName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <div class="modal-head"><h3>Edit external network {{.Name}} — {{.OrgName}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/trunks/uplink/{{.ID}}/edit"{{if .InUseBy}} data-connected="{{.InUseBy}}"{{end}}>
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <label class="fld">Uplink name<input type="text" name="name" value="{{.Name}}" required></label>
+    <label class="fld">External network name<input type="text" name="name" value="{{.Name}}" required></label>
     <label class="fld">Mode<select name="mode" data-upmode data-wire>
       <option value="access"{{if eq .Mode "access"}} selected{{end}}>dedicated VLAN (single 802.1Q tag)</option>
       <option value="qinq"{{if eq .Mode "qinq"}} selected{{end}}>QinQ (per-tenant outer tag, inner VLANs preserved)</option>
       <option value="dedicated"{{if eq .Mode "dedicated"}} selected{{end}}>dedicated interface (whole NIC)</option></select></label>
     <label class="fld" data-for="trunk">Trunk<select name="trunk_id" data-wire>{{range $.Trunks}}<option value="{{.ID}}"{{if .QinQCapable}} data-qinq="1"{{end}}{{if eq .ID $u.TrunkID.Int64}} selected{{end}}>{{.Iface}}</option>{{end}}</select></label>
-    <label class="fld" data-for="trunk">Tag<input type="number" name="vid" value="{{.OuterVID}}" min="0" max="4094" data-wire title="0 = next free tag from the tenant's pool"></label>
+    <label class="fld" data-for="trunk">Tag<input type="number" name="vid" value="{{.OuterVID}}" min="0" max="4094" data-wire title="0 = next free tag from the tenant's VLAN range"></label>
     <label class="fld" data-for="ded">Dedicated NIC<select name="ded_iface" data-wire><option value="">— pick a free NIC —</option>{{if .DedIface}}<option value="{{.DedIface}}" selected>{{.DedIface}}</option>{{end}}{{range $.Candidates}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
     <label class="fld full">Connected to vSwitch<select name="tnet_id"><option value="0">— not connected —</option>
       {{range $.TenantNets}}{{if and (eq .OrgID $u.OrgID) (or (eq .UplinkID 0) (eq .UplinkID $u.ID))}}<option value="{{.ID}}"{{if eq .ID $u.InUseByID}} selected{{end}}>{{.Name}}{{if .IsDefault}} (default){{end}}</option>{{end}}{{end}}</select></label>
-    <p class="muted full" style="margin:0;font-size:12px">{{if .InUseBy}}Connected to <b>{{.InUseBy}}</b>: changing the mode, trunk, tag or NIC takes it off the wire and back on with the new settings (a short pause for {{.OrgName}}'s external traffic; the old wiring is put back if the new one fails). Renaming is instant.{{else}}Not connected, so nothing is on the wire yet — changes just update the definition.{{end}} Disconnecting is refused while a VM is running on that vSwitch.</p>
+    <p class="muted full" style="margin:0;font-size:12px">{{if .InUseBy}}Connected to <b>{{.InUseBy}}</b>: changing the mode, trunk, tag or NIC takes it off the wire and back on with the new settings (a short pause for {{.OrgName}}'s external traffic; the old wiring is put back if the new one fails). Renaming is instant.{{else}}Not connected, so nothing is on the wire yet — changes just update the definition.{{end}} Disconnecting is refused while a VM is running on that vSwitch, or a router's external interface is on a port group it carries.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
   </form>
 </div></div>
@@ -210,20 +210,20 @@
 
 <!-- ===================== wizard ===================== -->
 <div class="modal" id="m-wiz"><div class="modal-card lg">
-  <div class="modal-head"><h3>Add tenant egress</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
-  <ol class="wiz-steps" id="wz-steps"><li>Tenant</li><li>Trunk</li><li>VLAN pool</li><li>Uplink</li><li>vSwitch</li><li>Review</li></ol>
+  <div class="modal-head"><h3>Add external connectivity</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <ol class="wiz-steps" id="wz-steps"><li>Tenant</li><li>Trunk</li><li>VLAN range</li><li>External network</li><li>vSwitch</li><li>Review</li></ol>
   <form class="mform" method="post" action="/trunks/wizard" id="wz" novalidate>
     <input type="hidden" name="csrf" value="{{.CSRF}}">
 
     <section class="wiz-pane">
-      <p class="wiz-note">Which tenant is this egress for? Its traffic will leave the host on a trunk you pick next, tagged with a VLAN from its own pool.</p>
+      <p class="wiz-note">Which tenant is this external connectivity for? Its traffic will leave the host on a trunk you pick next, tagged with a VLAN from its own VLAN range.</p>
       <label class="fld">Tenant<select name="org_id" id="wz-org">{{range .Orgs}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
       <p class="wiz-note" id="wz-orgsum"></p>
     </section>
 
     <section class="wiz-pane">
       <p class="wiz-note">Which physical link carries this tenant's traffic out of the host?</p>
-      <label class="wiz-choice" id="wz-tc-existing"><input type="radio" name="trunk_choice" value="existing"><span>Use a designated trunk<small>A NIC or bond already set up for tenant egress.</small></span></label>
+      <label class="wiz-choice" id="wz-tc-existing"><input type="radio" name="trunk_choice" value="existing"><span>Use a designated trunk<small>A NIC or bond already set up for tenant traffic.</small></span></label>
       <div class="wiz-sub" data-when="trunk_choice=existing">
         <label class="fld full">Trunk<select name="trunk_id" id="wz-trunk">{{range .Trunks}}{{if not .TeardownPending}}<option value="{{.ID}}">{{.Iface}} — {{if .Shared}}shared with mgmt, access only{{else if .QinQCapable}}QinQ-capable, MTU {{.MTU}}{{else}}802.1Q, MTU {{.MTU}}{{end}}</option>{{end}}{{end}}</select></label>
       </div>
@@ -235,12 +235,12 @@
         </select></label>
         <label class="fld" data-for="dedicated">MTU<input type="number" name="new_mtu" id="wz-mtu" value="1600" min="1500" max="9000"></label>
         <label class="fld" data-for="dedicated">QinQ capable<select name="new_qinq" id="wz-qinq"><option value="0">no — single 802.1Q tags</option><option value="1">yes — allow QinQ</option></select></label>
-        <p class="wiz-note full" data-for="shared" style="display:none">This interface carries host <b>management</b>: tenant VLANs ride beside untagged management, the parent is never modified, and only access (single-tag) uplinks are possible.</p>
+        <p class="wiz-note full" data-for="shared" style="display:none">This interface carries host <b>management</b>: tenant VLANs ride beside untagged management, the parent is never modified, and only access (single-tag) external networks are possible.</p>
       </div>
     </section>
 
     <section class="wiz-pane">
-      <p class="wiz-note">The outer VLAN tags reserved for this tenant on <b class="wz-trunkname"></b>. Uplinks take their tag from this range — allow the same range on the switch port.</p>
+      <p class="wiz-note">The outer VLAN tags reserved for this tenant on <b class="wz-trunkname"></b>. External networks take their tag from this range — allow the same range on the switch port. Tags the host itself uses on the trunk are skipped.</p>
       <div class="wiz-sub" style="padding-left:0">
         <label class="fld">First VLAN<input type="number" name="pool_min" id="wz-pmin" min="2" max="4094"></label>
         <label class="fld">Last VLAN<input type="number" name="pool_max" id="wz-pmax" min="2" max="4094"></label>
@@ -249,22 +249,22 @@
     </section>
 
     <section class="wiz-pane">
-      <p class="wiz-note">The uplink is what the tenant sees and connects to — by name only; they never see the trunk or the tag.</p>
-      <label class="wiz-choice"><input type="radio" name="uplink_choice" value="new"><span>Create an uplink</span></label>
+      <p class="wiz-note">The external network is what the tenant sees and connects to — by name only; they never see the trunk or the tag.</p>
+      <label class="wiz-choice"><input type="radio" name="uplink_choice" value="new"><span>Create an external network</span></label>
       <div class="wiz-sub" data-when="uplink_choice=new">
         <label class="fld">Name<input type="text" name="uplink_name" id="wz-uname" placeholder="wan"></label>
         <label class="fld">Mode<select name="mode" id="wz-mode"><option value="access">dedicated VLAN (single 802.1Q tag)</option><option value="qinq">QinQ (tenant's own VLANs inside an outer tag)</option></select></label>
-        <label class="chk full"><input type="checkbox" name="vid_auto" value="1" id="wz-vauto" checked> Use the next free tag from the pool</label>
+        <label class="chk full"><input type="checkbox" name="vid_auto" value="1" id="wz-vauto" checked> Use the next free tag from the VLAN range</label>
         <label class="fld" id="wz-vidfld">Tag<input type="number" name="vid" id="wz-vid" min="2" max="4094"></label>
       </div>
-      <label class="wiz-choice" id="wz-uc-existing"><input type="radio" name="uplink_choice" value="existing"><span>Use one of this tenant's uplinks<small id="wz-uc-hint">An uplink on this trunk that isn't connected to a vSwitch yet.</small></span></label>
+      <label class="wiz-choice" id="wz-uc-existing"><input type="radio" name="uplink_choice" value="existing"><span>Use one of this tenant's external networks<small id="wz-uc-hint">An external network on this trunk that isn't connected to a vSwitch yet.</small></span></label>
       <div class="wiz-sub" data-when="uplink_choice=existing">
-        <label class="fld full">Uplink<select name="uplink_id" id="wz-upl"></select></label>
+        <label class="fld full">External network<select name="uplink_id" id="wz-upl"></select></label>
       </div>
     </section>
 
     <section class="wiz-pane">
-      <p class="wiz-note">Which of the tenant's vSwitches goes out through this uplink? Its untagged port group is carried on the wire — the provider network then serves that subnet, so the host stops answering DHCP or holding a gateway IP on it.</p>
+      <p class="wiz-note">Which of the tenant's vSwitches goes out through this external network? Its untagged port group is carried on the wire — the provider network then serves that subnet, so the host stops answering DHCP or holding a gateway IP on it.</p>
       <label class="wiz-choice" id="wz-vc-existing"><input type="radio" name="vs_choice" value="existing"><span>Connect an existing vSwitch</span></label>
       <div class="wiz-sub" data-when="vs_choice=existing">
         <label class="fld full">vSwitch<select name="vs_id" id="wz-vs"></select></label>
@@ -275,7 +275,7 @@
         <label class="fld">Subnet (optional)<input type="text" name="vs_cidr" id="wz-vscidr" placeholder="203.0.113.0/24" title="The provider subnet on this VLAN — shown on the tenant's map; the host takes no address on it."></label>
         <label class="chk full" id="wz-vsdeffld"><input type="checkbox" name="vs_default" value="1" id="wz-vsdef"> Make it the tenant's default vSwitch (new VMs attach to it)</label>
       </div>
-      <label class="wiz-choice"><input type="radio" name="vs_choice" value="none"><span>Not now<small>The tenant can connect a vSwitch to the uplink from their own Networks page.</small></span></label>
+      <label class="wiz-choice"><input type="radio" name="vs_choice" value="none"><span>Not now<small>The tenant can connect a vSwitch to the external network from their own Networks page.</small></span></label>
     </section>
 
     <section class="wiz-pane">
@@ -317,7 +317,7 @@ document.addEventListener('submit',function(e){
     if(el.closest('[data-for]')&&el.closest('[data-for]').style.display==='none') return false;
     return el.tagName==='SELECT'?!el.selectedOptions[0].defaultSelected:el.value!==el.defaultValue;
   });
-  if(changed&&!confirm('This uplink is connected to '+f.getAttribute('data-connected')+'. Re-wire it now? Its external traffic pauses briefly.')) e.preventDefault();
+  if(changed&&!confirm('This external network is connected to '+f.getAttribute('data-connected')+'. Re-wire it now? Its external traffic pauses briefly.')) e.preventDefault();
 },true);
 
 function verifyQinQ(id,btn){
@@ -352,7 +352,7 @@ function verifyQinQ(id,btn){
   function freeNets(){return myNets().filter(function(t){return !t.uplink})}
   function overlap(lo,hi){
     var p=othersPools().find(function(p){return p.VidMin<=hi&&p.VidMax>=lo});
-    if(p) return 'overlaps '+p.OrgName+"'s pool "+p.VidMin+'–'+p.VidMax;
+    if(p) return 'overlaps '+p.OrgName+"'s VLAN range "+p.VidMin+'–'+p.VidMax;
     var u=tagsOnTrunk(true).find(function(u){return u.OuterVID>=lo&&u.OuterVID<=hi});
     if(u) return 'VLAN '+u.OuterVID+' is used by '+u.OrgName+' / '+u.Name;
     return '';
@@ -365,8 +365,8 @@ function verifyQinQ(id,btn){
   // Fill each step from the tenant / trunk chosen before it.
   function fillOrg(){
     var ups=myUplinks(), nets=myNets(), pools=EG.pools.filter(function(p){return p.OrgID===org()}), bits=[];
-    if(pools.length) bits.push('VLAN pools: '+pools.map(function(p){return p.VidMin+'–'+p.VidMax+' on '+p.TrunkName}).join(', '));
-    if(ups.length) bits.push('uplinks: '+ups.map(function(u){return u.Name+(u.InUseBy?' → '+u.InUseBy:' (not connected)')}).join(', '));
+    if(pools.length) bits.push('VLAN ranges: '+pools.map(function(p){return p.VidMin+'–'+p.VidMax+' on '+p.TrunkName}).join(', '));
+    if(ups.length) bits.push('external networks: '+ups.map(function(u){return u.Name+(u.InUseBy?' → '+u.InUseBy:' (not connected)')}).join(', '));
     bits.push(nets.length?'vSwitches: '+nets.map(function(t){return t.name+(t.default?' (default)':'')}).join(', '):'no vSwitches yet');
     $('wz-orgsum').textContent=orgName()+' has '+bits.join('; ')+'.';
     // Prefer the trunk this tenant already has a pool on.
@@ -385,7 +385,7 @@ function verifyQinQ(id,btn){
     sel.innerHTML=free.map(function(u){return '<option value="'+u.ID+'">'+esc(u.Name)+' — '+esc(u.Mode)+(u.OuterVID?', VLAN '+u.OuterVID:'')+'</option>'}).join('');
     $('wz-uc-existing').classList.toggle('off',!free.length);
     $('wz-uc-existing').querySelector('input').disabled=!free.length;
-    $('wz-uc-hint').textContent=free.length?'An uplink on this trunk that isn\'t connected to a vSwitch yet.':'This tenant has no unconnected uplink on this trunk.';
+    $('wz-uc-hint').textContent=free.length?'An external network on this trunk that isn\'t connected to a vSwitch yet.':'This tenant has no unconnected external network on this trunk.';
     if(!free.length||!radio('uplink_choice')) setRadio('uplink_choice','new');
     var names=myUplinks().map(function(u){return u.Name}), n='wan', i=2;
     while(names.indexOf(n)>=0) n='wan'+(i++);
@@ -411,9 +411,9 @@ function verifyQinQ(id,btn){
     var rows=[['Tenant',orgName()]], p=myPool();
     rows.push(['Trunk',newTrunk()?'designate '+trunkName()+(trunkShared()?' (shared with management)':', MTU '+$('wz-mtu').value+($('wz-qinq').value==='1'?', QinQ':'')):trunkName()]);
     var lo=$('wz-pmin').value, hi=$('wz-pmax').value;
-    rows.push(['VLAN pool',(p&&+lo===p.VidMin&&+hi===p.VidMax)?lo+'–'+hi+' (unchanged)':(p?'change '+p.VidMin+'–'+p.VidMax+' to ':'reserve ')+lo+'–'+hi]);
-    if(radio('uplink_choice')==='existing') rows.push(['Uplink','use '+$('wz-upl').selectedOptions[0].textContent]);
-    else rows.push(['Uplink','create '+$('wz-uname').value+' — '+($('wz-mode').value==='qinq'?'QinQ':'single 802.1Q tag')+', '+($('wz-vauto').checked?'next free tag from the pool':'VLAN '+$('wz-vid').value)]);
+    rows.push(['VLAN range',(p&&+lo===p.VidMin&&+hi===p.VidMax)?lo+'–'+hi+' (unchanged)':(p?'change '+p.VidMin+'–'+p.VidMax+' to ':'reserve ')+lo+'–'+hi]);
+    if(radio('uplink_choice')==='existing') rows.push(['External network','use '+$('wz-upl').selectedOptions[0].textContent]);
+    else rows.push(['External network','create '+$('wz-uname').value+' — '+($('wz-mode').value==='qinq'?'QinQ':'single 802.1Q tag')+', '+($('wz-vauto').checked?'next free tag from the VLAN range':'VLAN '+$('wz-vid').value)]);
     var vs=radio('vs_choice');
     rows.push(['vSwitch',vs==='existing'?'connect '+$('wz-vs').selectedOptions[0].textContent:vs==='new'?'create '+$('wz-vsname').value+($('wz-vscidr').value?' ('+$('wz-vscidr').value+')':'')+($('wz-vsdef').checked&&$('wz-vsdeffld').style.display!=='none'?', as the default':'')+' and connect it':'none for now']);
     $('wz-review').innerHTML=rows.map(function(r){return '<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>'}).join('');
@@ -431,22 +431,22 @@ function verifyQinQ(id,btn){
       if(!(lo>=2&&hi<=4094&&lo<=hi)) return 'Enter a VLAN range within 2–4094.';
       var o=overlap(lo,hi); if(o) return lo+'–'+hi+' '+o+'.';
       var p=myPool(), held=p&&tagsOnTrunk(false).find(function(u){return u.OrgID===org()&&u.OuterVID>=p.VidMin&&u.OuterVID<=p.VidMax&&(u.OuterVID<lo||u.OuterVID>hi)});
-      if(held) return 'Uplink '+held.Name+' uses VLAN '+held.OuterVID+', which '+lo+'–'+hi+' leaves out — retag it first.';
+      if(held) return 'External network '+held.Name+' uses VLAN '+held.OuterVID+', which '+lo+'–'+hi+' leaves out — retag it first.';
       return '';
     }
     if(i===3){
-      if(radio('uplink_choice')==='existing') return $('wz-upl').value?'':'Pick an uplink.';
+      if(radio('uplink_choice')==='existing') return $('wz-upl').value?'':'Pick an external network.';
       var n=$('wz-uname').value.trim();
-      if(!n) return 'Name the uplink.';
-      if(myUplinks().some(function(u){return u.Name===n})) return orgName()+' already has an uplink named '+n+'.';
+      if(!n) return 'Name the external network.';
+      if(myUplinks().some(function(u){return u.Name===n})) return orgName()+' already has an external network named '+n+'.';
       if($('wz-mode').value==='qinq'&&!trunkQinQ()) return 'This trunk isn\'t QinQ-capable — use a single tag.';
       if(!$('wz-vauto').checked){
         var v=+$('wz-vid').value, lo2=+$('wz-pmin').value, hi2=+$('wz-pmax').value;
-        if(!(v>=lo2&&v<=hi2)) return 'The tag must be inside the pool '+lo2+'–'+hi2+'.';
+        if(!(v>=lo2&&v<=hi2)) return 'The tag must be inside the VLAN range '+lo2+'–'+hi2+'.';
         if(tagsOnTrunk(false).some(function(u){return u.OuterVID===v})) return 'VLAN '+v+' is already in use on this trunk.';
       } else {
         var lo3=+$('wz-pmin').value, hi3=+$('wz-pmax').value, used=tagsOnTrunk(false).filter(function(u){return u.OuterVID>=lo3&&u.OuterVID<=hi3}).length;
-        if(used>hi3-lo3) return 'The pool '+lo3+'–'+hi3+' has no free tag left — widen it.';
+        if(used>hi3-lo3) return 'The VLAN range '+lo3+'–'+hi3+' has no free tag left — widen it.';
       }
       return '';
     }

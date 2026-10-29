@@ -49,6 +49,9 @@ func (s *Service) SharedCaps(p *Principal) SharedCaps {
 
 func (s *Service) StorageIface() string {
 	var v string
+	if s.db == nil {
+		return "" // a bare test Service
+	}
 	_ = s.db.QueryRow(`SELECT value FROM settings WHERE key='storage_iface'`).Scan(&v)
 	return v
 }

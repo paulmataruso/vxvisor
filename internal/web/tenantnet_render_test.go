@@ -22,9 +22,10 @@ func TestTenantNetworkPagesRender(t *testing.T) {
 	}
 	tnets := []service.TenantNetwork{
 		{ID: 1, Name: "default", NetName: "default", NetworkID: 7, Bridge: "vdxt7", CIDR: "10.3.0.0/24", Gateway: "10.3.0.1", IsDefault: true,
-			State: "applied", UplinkID: 4, UplinkName: "wan", UplinkMode: "qinq", DefaultCarried: true, VMs: 2,
+			State: "applied", UplinkID: 4, UplinkName: "wan", UplinkMode: "qinq", DefaultCarried: true, VMs: 2, AddrLocked: true,
 			PortGroups: []service.TenantPortGroup{
-				{ID: 1, TnetID: 1, Name: "web", VLAN: 10, NetworkID: 8, CIDR: "10.60.0.0/24", Gateway: "10.60.0.1", DHCP: true, Carried: true},
+				{ID: 1, TnetID: 1, Name: "web", VLAN: 10, NetworkID: 8, CIDR: "10.60.0.0/24", Gateway: "10.60.0.1", DHCP: true, Carried: true,
+					DHCPRange: "10.60.0.100,10.60.0.200", DNS: "1.1.1.1", ExtRouter: "edge", AddrLocked: true},
 				{ID: 2, TnetID: 1, Name: "db", VLAN: 20, NetworkID: 9, CIDR: "10.70.0.0/24", VRouterID: 3, VRouterName: "edge"},
 			}},
 		{ID: 2, Name: "lab", NetworkID: 11, Bridge: "vdxt11", State: "applied"},
@@ -60,10 +61,33 @@ func TestTenantNetworkPagesRender(t *testing.T) {
 		}
 		out := b.String()
 		for _, want := range []string{`id="m-tpg"`, `data-modal="m-tpg"`, `action="/networks/tenant/portgroups"`, `action="/networks/tenant/1/native"`,
-			`↗ uplink`, `routed`, `class="susp"`, `id="topo"`, `/api/topology`, "</html>"} {
+			`↗ external`, `routed`, `class="susp"`, `id="topo"`, `/api/topology`, "</html>",
+			// Edit / Make default: every Edit button has its modal.
+			`data-modal="m-tnet-edit-1"`, `id="m-tnet-edit-1"`, `action="/networks/tenant/1/edit"`,
+			`data-modal="m-tnet-edit-2"`, `id="m-tnet-edit-2"`, `action="/networks/tenant/2/default"`,
+			`data-modal="m-tpg-edit-1"`, `id="m-tpg-edit-1"`, `action="/networks/portgroups/1/edit"`,
+			`data-modal="m-tpg-edit-2"`, `id="m-tpg-edit-2"`, `value="10.60.0.100-10.60.0.200"`} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("networks.html (admin=%v) missing %q", p.IsAdmin, want)
 			}
+		}
+		// The default vSwitch can't be deleted (nor made default again); the
+		// other one can.
+		if strings.Contains(out, `action="/networks/tenant/1/delete"`) || strings.Contains(out, `action="/networks/tenant/1/default"`) ||
+			!strings.Contains(out, `action="/networks/tenant/2/delete"`) {
+			t.Fatalf("networks.html (admin=%v): default vSwitch delete / make-default controls wrong", p.IsAdmin)
+		}
+		// Addressing is locked on the untagged port group (2 VMs) and absent on
+		// the routed one.
+		edit1 := out[strings.Index(out, `id="m-tnet-edit-1"`):]
+		edit1 = edit1[:strings.Index(edit1, "</form>")]
+		if !strings.Contains(edit1, `name="cidr" value="10.3.0.0/24" placeholder="10.50.0.0/24" readonly`) {
+			t.Fatalf("networks.html: a vSwitch with instances must show its subnet read-only:\n%s", edit1)
+		}
+		pg2 := out[strings.Index(out, `id="m-tpg-edit-2"`):]
+		pg2 = pg2[:strings.Index(pg2, "</form>")]
+		if strings.Contains(pg2, `name="cidr"`) || strings.Contains(pg2, `name="l3"`) {
+			t.Fatalf("networks.html: a routed port group's edit form must not carry addressing:\n%s", pg2)
 		}
 		if hostOnly := strings.Contains(out, `id="iftable"`) || strings.Contains(out, `data-modal="m-bond"`); hostOnly != p.IsAdmin {
 			t.Fatalf("networks.html (admin=%v): host interfaces / uplinks shown=%v", p.IsAdmin, hostOnly)

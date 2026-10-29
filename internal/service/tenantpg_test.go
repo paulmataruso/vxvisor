@@ -109,7 +109,7 @@ func TestTenantPortGroupGuards(t *testing.T) {
 	}{
 		{1, "", "", "VLAN must be 2-4094", false},
 		{4095, "", "", "VLAN must be 2-4094", false},
-		{10, "", "10.60.0.1", "needs the port group's CIDR", false},
+		{10, "", "10.60.0.1", "needs the subnet", false},
 		{10, "10.60.0.0/24", "10.61.0.1", "not an IPv4 address inside", false},
 		{10, "10.60.0.0/24", "", "DHCP needs a gateway", true},
 	} {

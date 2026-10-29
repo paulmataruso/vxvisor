@@ -21,6 +21,7 @@ func egressTestService(t *testing.T) (s *Service, a, b, trunk int64) {
 	}
 	t.Cleanup(func() { d.Close() })
 	s = &Service{db: d, store: store.New(d)}
+	stubTenantHost(t, nil)
 	ins := func(q string, args ...any) int64 {
 		t.Helper()
 		res, err := d.Exec(q, args...)
