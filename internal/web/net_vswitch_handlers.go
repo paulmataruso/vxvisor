@@ -84,8 +84,9 @@ func (s *Server) deleteVSwitch(w http.ResponseWriter, r *http.Request, p *servic
 		return
 	}
 	if err := s.svc.DeleteVSwitch(p, r.PathValue("name"), clientIP(r)); err != nil {
-		http.Error(w, err.Error(), statusFor(err))
-		return
+		setFlash(w, err.Error()) // why it's in use — shown on the page
+	} else {
+		setFlashOK(w, "vSwitch deleted.")
 	}
 	http.Redirect(w, r, "/networks", http.StatusSeeOther)
 }

@@ -86,8 +86,13 @@ func (s *Supervisor) Run(ctx context.Context) {
 		if err := s.svc.EnsureDefaultPortGroup(); err != nil {
 			log.Printf("ensure default port group: %v", err)
 		}
-		// Bring every physical NIC up (even unconfigured ones) so the UI can show
-		// which ports have a live cable (carrier). One-shot at boot.
+		// Re-create the NIC teams and vSwitches vdxd built with ip link (a reboot
+		// loses them; netplan-defined management devices are left alone) and turn
+		// VLAN filtering on for every vSwitch. Before everything that may sit on
+		// them: backup mounts (storage NIC), vRouter transits, trunks, tenant nets.
+		s.svc.ReensureVSwitches()
+		// Bring up the physical NICs vdxd manages (team members, uplinks, trunks,
+		// transits) that are admin-down. One-shot at boot.
 		s.svc.EnsurePhysicalLinksUp()
 		// Remount any configured network backup targets (NFS/CIFS/CephFS) so
 		// scheduled + manual backups to shares work after a reboot.
