@@ -104,7 +104,7 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   See `docs/TUNING.md` for host-level knobs. Guest needs `ethtool -L <nic> combined N` for net mq.
 - **zvol:** `zfs.CreateZvol` **waits for the `/dev/zvol/<name>` udev node** (settle+poll) —
   qemu-img convert races udev otherwise. Purge does `zfs destroy`, not file remove. Resize =
-  `zfs set volsize`. zvol VMs can't use qemu-img snapshots (would need zfs snapshots — TODO).
+  `zfs set volsize`. zvol snapshots are ZFS snapshots (see Snapshots below; never `-r`).
 - **ZFS registration:** creating a zpool/LVM registers a `storage_pools` row; destroy removes it.
   Use `DeleteStoragePool`/`deleteStoragePool` to remove a storage pool.
 - **FRR:** apply via `/usr/lib/frr/frr-reload.py --reload` (NOT `systemctl reload frr`, which
@@ -286,6 +286,21 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
     `bridge vdxtenantl2` (rogue DHCP/RA/BPDU), plus the system group `vdxqemu`.
   - Routing and FRR changes are applied first and saved only on success.
   - Tenant gateways export only their downlinks.
+
+- **Snapshots / instant clones / snapshot policies** (migrations 55–57 on the feature branch;
+  renumber at merge). Full design in `docs/SNAPSHOTS.md`. Invariants:
+  - Every backend: qcow2 internal (live = QMP `blockdev-snapshot-internal-sync`, not `savevm`),
+    zvol `zfs snapshot`, LVM thin `lvcreate -s`, RBD `rbd snap`. UEFI NVRAM copied with each one.
+  - Only snapshots with a `snapshots` row are ever destroyed, via the row's `ref`. No `-r/-R/--force`.
+  - Live snapshots freeze via QGA and ALWAYS thaw (defer); unverified freeze/thaw = `crash`.
+  - Revert needs a stopped VM. ZFS revert to an older snapshot destroys newer ones only with
+    `discard_newer` and only if all are ours, unlocked and clone-free. LVM revert is a swap (keeps
+    every snapshot), never `lvconvert --merge`.
+  - `snapshot_clones.snapshot_id` is set only while the clone shares blocks (zvol/rbd); deleting such
+    a snapshot is refused; purging the origin promotes (zvol) / flattens (rbd) the clones first.
+  - Immutable (`locked_until`) snapshots: no delete, no purge of their VM, no prune — for anyone.
+  - Storage move / migrate refuse a VM with snapshots or a dependent-clone tie.
+  - Policies: instance admin = all orgs; org admin = own org, `org_id` in every query.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

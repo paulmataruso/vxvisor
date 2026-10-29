@@ -56,12 +56,14 @@ func fakeSnapOps(t *testing.T) *opsRec {
 	old := ops
 	f := func(name string, a ...string) error { return r.add(name + " " + strings.Join(a, " ")) }
 	ops = snapOps{
-		qmpSnap:        func(s, d, t string) error { return f("qmp-snap", d, t) },
-		qmpSnapDelete:  func(s, d, t string) error { return f("qmp-snap-delete", d, t) },
-		imgSnapCreate:  func(d, t string) error { return f("img-snap", d, t) },
-		imgSnapApply:   func(d, t string) error { return f("img-apply", d, t) },
-		imgSnapDelete:  func(d, t string) error { return f("img-delete", d, t) },
-		imgClone:       func(s, t, d string, live bool) (string, error) { return "convert", f("img-clone", s, t, d, fmt.Sprint(live)) },
+		qmpSnap:       func(s, d, t string) error { return f("qmp-snap", d, t) },
+		qmpSnapDelete: func(s, d, t string) error { return f("qmp-snap-delete", d, t) },
+		imgSnapCreate: func(d, t string) error { return f("img-snap", d, t) },
+		imgSnapApply:  func(d, t string) error { return f("img-apply", d, t) },
+		imgSnapDelete: func(d, t string) error { return f("img-delete", d, t) },
+		imgClone: func(s, t, d string, live bool) (string, error) {
+			return "convert", f("img-clone", s, t, d, fmt.Sprint(live))
+		},
 		zfsSnap:        func(ds, t string) error { return f("zfs-snap", ds+"@"+t) },
 		zfsRollback:    func(ds, t string) error { return f("zfs-rollback", ds+"@"+t) },
 		zfsDestroySnap: func(ds, t string) error { return f("zfs-destroy-snap", ds+"@"+t) },
