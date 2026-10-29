@@ -38,6 +38,23 @@ func TestArgsBindLoopback(t *testing.T) {
 	}
 }
 
+// TestArgsSPICETicketed: SPICE stays on loopback and requires the console
+// password (the same vncpw secret) instead of disable-ticketing.
+func TestArgsSPICETicketed(t *testing.T) {
+	s := Spec{
+		ID: "abc", DiskPath: "/d.qcow2", CPUs: 2, MemoryMB: 2048,
+		VNCPort: 5901, WSPort: 6901, QMPSocket: "/q.sock", UserNet: true,
+		VNCPwFile: "/run/x.vncpw", Display: "spice", SPICEPort: 8901,
+	}
+	a := strings.Join(s.Args(), " ")
+	if !strings.Contains(a, "-spice port=8901,addr=127.0.0.1,password-secret=vncpw ") {
+		t.Errorf("SPICE not loopback + ticketed: %s", a)
+	}
+	if strings.Contains(a, "disable-ticketing") {
+		t.Errorf("SPICE must not disable ticketing when a console password is set: %s", a)
+	}
+}
+
 // TestArgsUEFI checks the firmware pflash ordering: readonly code before the
 // writable per-VM vars, both before the OS disk.
 func TestArgsUEFI(t *testing.T) {

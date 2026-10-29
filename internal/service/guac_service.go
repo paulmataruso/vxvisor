@@ -94,6 +94,9 @@ func (s *Service) AdvancedConsole(p *Principal, id, proto string) (GuacSession, 
 		}
 		body["session_type"] = "spice"
 		body["port"] = sess.SPICEPort
+		if sess.VNCPassword != "" {
+			body["password"] = sess.VNCPassword // SPICE shares the console password
+		}
 	default:
 		return GuacSession{}, fmt.Errorf("unsupported protocol %q", proto)
 	}

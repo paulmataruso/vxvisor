@@ -480,8 +480,16 @@ func (s Spec) Args() []string {
 	a = append(a, "-device", "virtio-serial-pci,id=vserial0")
 	if spiceOn {
 		// SPICE display: the SPICE client provides clipboard via spicevmc.
+		// Ticketed with the same per-launch console password as VNC (the vncpw
+		// secret), so a local user can't attach to the loopback SPICE port without it.
+		spice := fmt.Sprintf("port=%d,addr=127.0.0.1", s.SPICEPort)
+		if s.VNCPwFile != "" {
+			spice += ",password-secret=vncpw"
+		} else {
+			spice += ",disable-ticketing=on"
+		}
 		a = append(a,
-			"-spice", fmt.Sprintf("port=%d,addr=127.0.0.1,disable-ticketing=on", s.SPICEPort),
+			"-spice", spice,
 			"-chardev", "spicevmc,id=vdagent,name=vdagent",
 			"-device", "virtserialport,bus=vserial0.0,chardev=vdagent,name=com.redhat.spice.0",
 		)
