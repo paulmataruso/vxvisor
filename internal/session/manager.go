@@ -132,6 +132,8 @@ type Manager struct {
 	// incomingNet: the port group (and lease) each receiver was attached to on
 	// THIS node, resolved before the stream started so the adopt can't fail on it.
 	incomingNet map[string]receiverNet
+	// fabric allocates addresses on VXVisor Fabric port groups (nil: none).
+	fabric FabricIPAM
 	// coldStaged tracks files written on the destination for an in-flight COLD
 	// migration (keyed by session id) so an aborted copy can be cleaned up exactly,
 	// without globbing.
@@ -293,7 +295,7 @@ func (m *Manager) Create(o CreateOpts) (*Session, error) {
 	lvPath := ""   // set when the disk backend is a raw LVM thin volume
 	rbdImage := "" // set when the disk backend is a Ceph RBD image
 	fail := func(e error) (*Session, error) {
-		m.releaseLeases(id)
+		m.releaseAddresses(id)
 		for _, f := range created {
 			_ = os.Remove(f)
 		}
@@ -1241,6 +1243,9 @@ func (m *Manager) SetNetwork(id string, networkID int64) (live bool, err error) 
 		return false, err
 	}
 	if err := m.CheckPortGroup(cur.OrgID, networkID); err != nil {
+		return false, err
+	}
+	if err := m.rebindFabricLease(cur, networkID); err != nil {
 		return false, err
 	}
 	if _, err := m.db.Exec(`UPDATE sessions SET network_id=? WHERE id=?`, nullIf0(networkID), id); err != nil {

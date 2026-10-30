@@ -301,6 +301,21 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /networks/vswitches/{name}/bond", s.auth(s.bondVSwitch))
 	// NSX-lite virtual routers (vRouter): a per-tenant FRR routing instance (LXC
 	// container or network namespace) between a transit link and internal port groups.
+	// VXVisor Fabric (docs/FABRIC.md §14): multi-host EVPN overlay, fabric port
+	// groups, the connectivity table and egress.
+	mux.HandleFunc("GET /fabric", s.auth(s.fabricPage))
+	mux.HandleFunc("POST /fabric/preflight", s.auth(s.fabricPreflight))
+	mux.HandleFunc("POST /fabric/deploy", s.auth(s.fabricDeploy))
+	mux.HandleFunc("POST /fabric/f/{id}/host", s.auth(s.fabricAddHost))
+	mux.HandleFunc("POST /fabric/f/{id}/host-remove", s.auth(s.fabricRemoveHost))
+	mux.HandleFunc("POST /fabric/f/{id}/orgs", s.auth(s.fabricOrgs))
+	mux.HandleFunc("POST /fabric/f/{id}/delete", s.auth(s.fabricDelete))
+	mux.HandleFunc("POST /fabric/f/{id}/egress", s.auth(s.fabricEgress))
+	mux.HandleFunc("POST /fabric/pg", s.auth(s.fabricCreatePG))
+	mux.HandleFunc("POST /fabric/pg/{id}/edit", s.auth(s.fabricEditPG))
+	mux.HandleFunc("POST /fabric/pg/{id}/delete", s.auth(s.fabricDeletePG))
+	mux.HandleFunc("POST /fabric/rule", s.auth(s.fabricAddRule))
+	mux.HandleFunc("POST /fabric/rule/{id}/{action}", s.auth(s.fabricRuleAction))
 	mux.HandleFunc("GET /trunks", s.auth(s.trunksPage))
 	mux.HandleFunc("POST /trunks/designate", s.auth(s.designateTrunk))
 	mux.HandleFunc("POST /trunks/{id}/undesignate", s.auth(s.undesignateTrunk))

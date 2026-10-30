@@ -47,6 +47,7 @@ type Service struct {
 	vmwimp *vmwImportTracker
 	vmwexp *vmExportTracker
 	cbt    *cbtRuntime // CBT warm imports: running jobs + test seams (cbtRT)
+	fab    fabricRT    // VXVisor Fabric: intent replication + reconcile (fabricRT())
 	// adReload, when registered by the web layer, pushes a freshly-saved or
 	// freshly-replicated AD config to the live auth provider (no restart). Lets a
 	// follower apply the leader's AD settings the moment a snapshot lands.
@@ -56,6 +57,9 @@ type Service struct {
 func New(cfg *config.Config, d *db.DB, st *store.Store, stg *storage.Store, net *netdrv.Store, mgr *session.Manager, enf policy.Enforcer) *Service {
 	s := &Service{cfg: cfg, db: d, store: st, stg: stg, net: net, mgr: mgr, enf: enf, migtr: newMigTracker(), joins: newJoinTracker(), vmwimp: newVmwImportTracker(), vmwexp: newVMExportTracker()}
 	s.reloadExports() // re-register export files left on disk so they stay listable/deletable across restarts
+	if mgr != nil {
+		mgr.SetFabricIPAM(fabricIPAM{s})
+	}
 	return s
 }
 

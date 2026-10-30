@@ -39,6 +39,14 @@ func (s *Server) PeerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /cluster/v1/console/{id}/ws", g(s.peerConsoleWS))
 	mux.HandleFunc("GET /cluster/v1/serial/{id}/ws", g(s.peerSerialWS))
 	mux.HandleFunc("GET /cluster/v1/health", g(s.peerHealth))
+	mux.HandleFunc("GET /cluster/v1/fabric/intent", g(s.peerFabricIntent))
+	mux.HandleFunc("POST /cluster/v1/fabric/prepare", g(s.peerFabricPrepare))
+	mux.HandleFunc("POST /cluster/v1/fabric/commit", g(s.peerFabricCommit))
+	mux.HandleFunc("POST /cluster/v1/fabric/abort", g(s.peerFabricAbort))
+	mux.HandleFunc("POST /cluster/v1/fabric/preflight", g(s.peerFabricPreflight))
+	mux.HandleFunc("POST /cluster/v1/fabric/dfping", g(s.peerFabricDFPing))
+	mux.HandleFunc("GET /cluster/v1/fabric/status", g(s.peerFabricStatus))
+	mux.HandleFunc("GET /cluster/v1/fabric/nics", g(s.peerFabricNICs))
 }
 
 // peerMigratePrecheck (destination) checks an inbound migration record (port

@@ -123,6 +123,13 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// The host's TCP 179 guard: only configured BGP neighbours and fabric
 		// peers may open a session to bgpd.
 		s.svc.ReensureBGPGuard()
+		// VXVisor Fabric: this host's share of the replicated intent (underlay,
+		// VRFs, VXLANs, anycast gateways, DHCP, firewall, FRR) — before autostart
+		// so a VM on a fabric port group finds its bridge.
+		if err := s.svc.ReconcileFabric(); err != nil {
+			log.Printf("fabric: %v", err)
+		}
+		go s.svc.RunFabric(ctx.Done())
 	}
 	// Autostart flagged VMs — but ONLY after a real HOST reboot, never on a plain
 	// control-plane restart/upgrade (where KillMode=process keeps guests alive and

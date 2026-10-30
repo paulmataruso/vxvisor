@@ -109,7 +109,7 @@ func (m *Manager) CreateBare(o CreateOpts, userData string) (*Session, error) {
 	id := uuid.NewString()
 	var created []string
 	fail := func(e error) (*Session, error) {
-		m.releaseLeases(id)
+		m.releaseAddresses(id)
 		for _, f := range created {
 			_ = os.Remove(f)
 		}

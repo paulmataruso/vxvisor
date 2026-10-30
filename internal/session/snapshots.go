@@ -641,7 +641,7 @@ func (m *Manager) CloneFromSnapshot(o CloneOpts) (*Session, error) {
 		if tx != nil {
 			_ = tx.Rollback() // first: it holds the DB's only writer connection
 		}
-		m.releaseLeases(id)
+		m.releaseAddresses(id)
 		for _, f := range created {
 			_ = os.Remove(f)
 		}

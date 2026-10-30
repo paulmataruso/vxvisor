@@ -1342,6 +1342,40 @@ CREATE TABLE ovirt_vms (
 	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 `},
+	{60, "fabric", `
+-- VXVisor Fabric (docs/FABRIC.md §14). fabric_intent holds the replicated
+-- intent: ONE versioned JSON document (fabric.Intent), identical on every node
+-- at a given version, changed only by a unanimous two-phase commit. Everything
+-- else here is this node's own realization of it and never replicates:
+--   fabric_pg_networks maps a fabric port group (UUID) to the local networks
+--   row VMs attach to (mode 'fabric', bridge vxfb<vni>); RESTRICT so the raw
+--   network delete can't orphan it;
+--   fabric_underlay records what vdxd did to the underlay interface (MTU before,
+--   the VLAN subinterface it made) so leaving the fabric restores it exactly.
+-- STRICTLY ADDITIVE: new tables no older binary reads.
+CREATE TABLE fabric_intent (
+	id         INTEGER PRIMARY KEY CHECK (id = 1),
+	version    INTEGER NOT NULL DEFAULT 0,
+	body       TEXT NOT NULL DEFAULT '{}',
+	updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+INSERT INTO fabric_intent(id, version, body) VALUES (1, 0, '{}');
+CREATE TABLE fabric_pg_networks (
+	pg_uuid    TEXT PRIMARY KEY,
+	network_id INTEGER NOT NULL UNIQUE REFERENCES networks(id) ON DELETE RESTRICT
+);
+CREATE TABLE fabric_underlay (
+	fabric_uuid TEXT PRIMARY KEY,
+	iface       TEXT NOT NULL,
+	dev         TEXT NOT NULL,
+	tep         TEXT NOT NULL,
+	made_vlan   INTEGER NOT NULL DEFAULT 0,
+	orig_mtu    INTEGER NOT NULL DEFAULT 0,
+	state       TEXT NOT NULL DEFAULT '',
+	error       TEXT NOT NULL DEFAULT '',
+	updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

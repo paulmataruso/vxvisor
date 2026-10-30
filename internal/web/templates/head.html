@@ -238,6 +238,7 @@
     <a href="/networks" title="vSwitches, port groups and NIC teams" class="{{if eq .Active "networks"}}on{{end}}"><svg class="ic"><use href="#i-network"/></svg><span>Switching</span></a>
     {{if .P.OrgAdmin}}<a href="/vrouters" title="Tier-0 / Tier-1 gateways (vRouters)" class="{{if eq .Active "vrouters"}}on{{end}}"><svg class="ic"><use href="#i-route"/></svg><span>Gateways</span></a>{{end}}
     {{if .P.OrgAdmin}}<a href="/vfirewall" title="Gateway firewall (north-south) and distributed firewall (east-west)" class="{{if eq .Active "vfirewall"}}on{{end}}"><svg class="ic"><use href="#i-shield"/></svg><span>Firewall</span></a>{{end}}
+    {{if .P.OrgAdmin}}<a href="/fabric" title="VXVisor Fabric: port groups stretched across hosts (EVPN), distributed gateway and the connectivity table" class="{{if eq .Active "fabric"}}on{{end}}"><svg class="ic"><use href="#i-network"/></svg><span>Fabric</span></a>{{end}}
     {{if .P.IsAdmin}}<a href="/trunks" title="Trunks, VLAN ranges and tenants' external networks" class="{{if eq .Active "trunks"}}on{{end}}"><svg class="ic"><use href="#i-network"/></svg><span>External Connectivity</span></a>{{end}}
     {{if .P.IsAdmin}}<a href="/routing" title="The host's own routing (static, OSPF, BGP, NAT)" class="{{if eq .Active "routing"}}on{{end}}"><svg class="ic"><use href="#i-route"/></svg><span>Host Routing</span></a>{{end}}
     <div class="grp">Tenancy</div>

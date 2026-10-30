@@ -112,6 +112,38 @@ func (s *Service) guardNICFree(nics ...string) error {
 // address, or has any device stacked on it (a bridge or bond it's enslaved to,
 // VLAN subinterfaces). what ("bond" / "interface") is only for the message.
 func (s *Service) guardIfaceInUse(name, what string) error {
+	if err := s.guardIfaceRoles(name, what); err != nil {
+		return err
+	}
+	if ifs, err := hostinfo.Interfaces(); err == nil {
+		for _, it := range ifs {
+			if it.Name != name {
+				continue
+			}
+			var global []string
+			for _, a := range it.Addrs {
+				if ip, _, err := net.ParseCIDR(a); err == nil && !ip.IsLinkLocalUnicast() {
+					global = append(global, a)
+				}
+			}
+			if len(global) > 0 {
+				return fmt.Errorf("%s %q has addresses (%s) — remove them first", what, name, strings.Join(global, ", "))
+			}
+		}
+	}
+	// Last, the kernel's view: anything stacked on it (e.g. enslaved to a bridge
+	// vdxd doesn't track, or VLAN subinterfaces) — including the management bridge
+	// when the admin listener binds 0.0.0.0 and mgmtIface can't be resolved.
+	if up := ifaceUppers(name); len(up) > 0 {
+		return fmt.Errorf("%s %q is in use by %s", what, name, strings.Join(up, ", "))
+	}
+	return nil
+}
+
+// guardIfaceRoles refuses an interface that already has a role on this host:
+// management, a vSwitch/egress/uplink/transit/storage/routing uplink, or the
+// VXVisor Fabric underlay. It fails closed when management can't be told.
+func (s *Service) guardIfaceRoles(name, what string) error {
 	if s.isMgmtIface(name) || s.isMgmtBridgeUplink(name) {
 		return fmt.Errorf("%s %q carries host management (the admin IP) — changing it would cut host access", what, name)
 	}
@@ -140,27 +172,11 @@ func (s *Service) guardIfaceInUse(name, what string) error {
 	if c, err := s.GetRoutingConfig(&Principal{IsAdmin: true}); err == nil && c.Uplink == name {
 		return fmt.Errorf("%s %q is the L3 routing uplink", what, name)
 	}
-	if ifs, err := hostinfo.Interfaces(); err == nil {
-		for _, it := range ifs {
-			if it.Name != name {
-				continue
-			}
-			var global []string
-			for _, a := range it.Addrs {
-				if ip, _, err := net.ParseCIDR(a); err == nil && !ip.IsLinkLocalUnicast() {
-					global = append(global, a)
-				}
-			}
-			if len(global) > 0 {
-				return fmt.Errorf("%s %q has addresses (%s) — remove them first", what, name, strings.Join(global, ", "))
-			}
+	if s.db != nil {
+		var dev string
+		if s.db.QueryRow(`SELECT dev FROM fabric_underlay WHERE iface=? OR dev=?`, name, name).Scan(&dev) == nil {
+			return fmt.Errorf("%s %q carries the VXVisor Fabric underlay (%s) — remove this host from its fabric first", what, name, dev)
 		}
-	}
-	// Last, the kernel's view: anything stacked on it (e.g. enslaved to a bridge
-	// vdxd doesn't track, or VLAN subinterfaces) — including the management bridge
-	// when the admin listener binds 0.0.0.0 and mgmtIface can't be resolved.
-	if up := ifaceUppers(name); len(up) > 0 {
-		return fmt.Errorf("%s %q is in use by %s", what, name, strings.Join(up, ", "))
 	}
 	return nil
 }

@@ -174,7 +174,7 @@ func (s *Service) vxlanListeners() []netdrv.VXLANListener {
 	if c := s.cfg; c != nil && c.Cluster.Overlay && (c.Network.Mode == "bridge" || c.Network.Mode == "overlay") && c.Cluster.VNI > 0 {
 		out = append(out, netdrv.VXLANListener{Port: 4789, VNI: c.Cluster.VNI, Open: true})
 	}
-	return out
+	return append(out, s.fabricVXLANListeners()...)
 }
 
 // applyVXLANGuard rebuilds the vdxvxlan ingress guard from the DB. extra adds

@@ -47,6 +47,13 @@ func (m *Manager) guestAddressing(orgID, netID int64, sessionID, mac string) (st
 		}
 		onClusterBridge := clusterMode && pg.Bridge == m.cfg.Cluster.Bridge && pg.VLAN == 0
 		if !onClusterBridge {
+			if pg.Mode == "fabric" {
+				lease, err := m.fabricLease(pg, sessionID, mac)
+				if err != nil || lease == "" {
+					return "", "", false, err
+				}
+				return lease, pg.Gateway, false, nil
+			}
 			if pg.CIDR != "" && pg.PoolStart != "" && pg.PoolEnd != "" {
 				ip, err := m.allocLease(pg.ID, sessionID, mac, pg.CIDR, pg.Gateway, pg.PoolStart, pg.PoolEnd, false)
 				if err != nil {
@@ -157,10 +164,19 @@ func (m *Manager) allocLease(netID int64, sessionID, mac, cidr, gateway, start, 
 	return "", fmt.Errorf("its address pool is exhausted — widen the pool or free an address")
 }
 
-// releaseLeases frees every address a session holds (on a failed create or a
-// purge), so a pool doesn't leak addresses to deleted VMs.
+// releaseLeases frees every address a session holds on THIS node. A migration
+// source calls it after the handoff: the VM keeps its fabric-wide lease.
 func (m *Manager) releaseLeases(sessionID string) {
 	_, _ = m.db.Exec(`DELETE FROM ip_leases WHERE session_id=?`, sessionID)
+}
+
+// releaseAddresses frees every address a session holds anywhere (on a failed
+// create or a purge), so no pool leaks addresses to deleted VMs.
+func (m *Manager) releaseAddresses(sessionID string) {
+	m.releaseLeases(sessionID)
+	if m.fabric != nil {
+		m.fabric.Release(sessionID)
+	}
 }
 
 // leaseHost strips the /prefix from a stored lease.

@@ -371,7 +371,7 @@ func (m *Manager) purgeLocked(id string) (release []int64, err error) {
 	if _, err := m.db.Exec(`DELETE FROM sessions WHERE id=?`, id); err != nil {
 		return nil, err // e.g. the snapshot_clones RESTRICT backstop
 	}
-	m.releaseLeases(id) // give its static address back to the port group pool
+	m.releaseAddresses(id) // give its static address back to the port group pool
 
 	disk := s.DiskPath
 	switch backend {

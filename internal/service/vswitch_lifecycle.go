@@ -470,6 +470,9 @@ func (s *Service) vswitchByNameOrBridge(name string) (netdrv.VSwitch, error) {
 // owns it, or instances, a vRouter leg or containers are bound to it.
 func (s *Service) portGroupInUse(n netdrv.Network) error {
 	var owner string
+	if s.db.QueryRow(`SELECT pg_uuid FROM fabric_pg_networks WHERE network_id=?`, n.ID).Scan(&owner) == nil {
+		return fmt.Errorf("port group %q belongs to the VXVisor Fabric — manage it on the Fabric page", n.Name)
+	}
 	if s.db.QueryRow(`SELECT name FROM tenant_networks WHERE network_id=?`, n.ID).Scan(&owner) == nil {
 		return fmt.Errorf("port group %q is tenant vSwitch %q's own network — delete that vSwitch on the tenant's Networks page", n.Name, owner)
 	}

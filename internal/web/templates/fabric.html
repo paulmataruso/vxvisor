@@ -1,0 +1,344 @@
+{{define "fabric.html"}}{{template "head" .}}
+<style>
+ .wiz-steps{display:flex;gap:6px;list-style:none;margin:0 0 18px;padding:0;counter-reset:wz}
+ .wiz-steps li{flex:1;counter-increment:wz;font-size:12px;color:var(--faint);padding-top:8px;border-top:3px solid var(--line);white-space:nowrap}
+ .wiz-steps li::before{content:counter(wz) ". "}
+ .wiz-steps li.done{color:var(--muted);border-color:color-mix(in srgb,var(--primary) 45%,var(--line))}
+ .wiz-steps li.on{color:var(--fg);font-weight:600;border-color:var(--primary)}
+ .wiz-pane{display:none;flex-direction:column;gap:13px}
+ .wiz-pane.on{display:flex}
+ .wiz-note{margin:0;font-size:12.5px;color:var(--muted)}
+ .wiz-err{color:var(--danger);font-size:12.5px}
+ .wiz-err:empty{display:none}
+ label.chk{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--fg)}
+ label.chk input{width:auto;flex:none}
+ .fx-hosts{display:grid;grid-template-columns:minmax(90px,max-content) 1fr 90px 1fr;gap:8px 12px;align-items:center;font-size:13px}
+ .fx-hosts .h{color:var(--muted);font-size:12px}
+ .fx-matrix td,.fx-matrix th{text-align:center;font-size:12px;white-space:nowrap}
+ .fx-matrix td.yes{color:var(--ok,#1a7f37)}
+ .fx-matrix td.no{color:var(--faint)}
+ .fx-checks td{font-size:12.5px;vertical-align:top}
+ .fx-checks .bad{color:var(--danger)}
+ .fx-checks .warn{color:var(--warn)}
+ .fx-sub{margin:14px 0 6px;font-size:13px;font-weight:600}
+</style>
+<div class="card">
+  <div class="card-head">
+    <h2>VXVisor Fabric</h2>
+    {{if .V.Admin}}<button class="btn primary" data-modal="m-deploy">+ Deploy fabric</button>{{end}}
+  </div>
+  <p class="muted" style="margin:0">A fabric stretches <b>port groups across hosts</b>. A VM on a fabric port group reaches the others on it at layer 2 wherever they run, and keeps its address when it moves. Routed port groups get a <b>distributed gateway</b>: the same gateway address answers on every host, so traffic between port groups is routed on the host where the VM runs. Hosts reach each other over a dedicated underlay (a NIC, or a VLAN on a non-management uplink). The control plane is BGP EVPN, the data plane VXLAN. Traffic between two port groups is <b>denied</b> until a row in the connectivity table allows it. Inside one port group, traffic is always allowed.</p>
+</div>
+
+{{with .Checks}}
+<div class="card">
+  <div class="card-head"><h2>{{if .OK}}Deploy checks{{else}}Deploy failed — checks{{end}}</h2></div>
+  <table class="fx-checks"><tr><th>Host</th><th>Check</th><th>Result</th></tr>
+  {{range .Checks}}<tr><td class="mono">{{.Node}}</td><td>{{.Check}}</td><td class="{{if not .OK}}{{if .Warn}}warn{{else}}bad{{end}}{{end}}">{{if .OK}}✓{{else if .Warn}}⚠{{else}}✗{{end}} {{.Detail}}</td></tr>{{end}}
+  </table>
+</div>
+{{end}}
+
+{{if not .Cards}}
+<div class="card"><div class="empty">{{if .V.Admin}}No fabric yet. <b>+ Deploy fabric</b> picks the hosts and the interface each uses to reach the others, checks every host first, then sets the fabric up and proves the hosts reach each other at full MTU. If anything fails, it is removed again.{{else}}No fabric is open to this organization. Ask your provider to give it access.{{end}}</div></div>
+{{end}}
+
+{{range $c := .Cards}}
+<div class="card">
+  <div class="card-head">
+    <h2>{{$c.Name}} <span class="pill">AS {{$c.ASN}}</span> <span class="pill" title="Underlay MTU; VMs on its port groups get {{$c.GuestMTU}}">MTU {{$c.MTU}} → guests {{$c.GuestMTU}}</span></h2>
+    <span>
+      {{if $.V.Admin}}<button class="btn sm" data-modal="m-host-{{$c.UUID}}">+ Add host</button>
+      <button class="btn sm" data-modal="m-orgs-{{$c.UUID}}">Organizations</button>
+      <form method="post" action="/fabric/f/{{$c.UUID}}/delete" style="display:inline" onsubmit="return confirm('Delete fabric {{$c.Name}}? Every host removes its fabric devices and restores its underlay. Refused while port groups remain.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}
+    </span>
+  </div>
+
+  {{if $.V.Admin}}
+  <table>
+    <tr><th>Host</th><th>Underlay</th><th>TEP</th><th>Status</th><th>EVPN sessions</th><th></th></tr>
+    {{range $c.Hosts}}{{$h := index $c.Health .Node}}
+    <tr>
+      <td class="mono"><strong>{{.Node}}</strong>{{if eq .Node $.V.Self}} <span class="pill">this host</span>{{end}}</td>
+      <td class="mono">{{.UnderlayDev}}</td>
+      <td class="mono">{{.TEP}}</td>
+      <td>{{if eq $h.State "ok"}}<span class="pill running">● ok</span>{{else if eq $h.State "error"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● error</span>{{else if eq $h.State "unreachable"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● unreachable</span>{{else}}<span class="pill">● applying</span>{{end}}{{if and $h.State (not $h.BFD) (ne $h.State "unreachable")}} <span class="pill" title="bfdd isn't running: BFD is off until FRR restarts with bfdd (install.sh enables it)">no BFD</span>{{end}}</td>
+      <td class="mono" style="font-size:12px">{{range $h.BGP}}{{.Peer}} {{if eq .State "Established"}}<span style="color:var(--ok,#1a7f37)">up {{.Uptime}}</span>{{else}}<span style="color:var(--danger)">{{.State}}</span>{{end}}<br>{{else}}{{if gt (len $c.Hosts) 1}}<span class="muted">none</span>{{else}}<span class="muted">single host</span>{{end}}{{end}}</td>
+      <td style="text-align:right">
+        <form method="post" action="/fabric/f/{{$c.UUID}}/host-remove" style="display:inline" onsubmit="return confirm('Remove {{.Node}} from {{$c.Name}}? Refused while anything on that host uses a fabric port group.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="node" value="{{.Node}}"><button class="btn sm">Remove</button></form>
+        {{if eq $h.State "unreachable"}}<form method="post" action="/fabric/f/{{$c.UUID}}/host-remove" style="display:inline" onsubmit="return confirm('Evict {{.Node}}? Use this only for a dead host: the others drop it without its consent. When it comes back it removes its own fabric state.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="node" value="{{.Node}}"><input type="hidden" name="evict" value="1"><button class="btn sm danger">Evict</button></form>{{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted" style="margin:8px 0 0;font-size:12px">Open to: {{if $c.OrgNames}}{{$c.OrgNames}}{{else}}instance admins only{{end}}.</p>
+  {{else}}
+  <p class="muted" style="margin:0">Hosts: {{range $i, $h := $c.Hosts}}{{if $i}}, {{end}}{{$h.Node}}{{end}}</p>
+  {{end}}
+
+  <div class="card-head" style="margin-top:16px"><h3 style="margin:0">Port groups</h3>{{if $c.Build}}<button class="btn sm primary" data-modal="m-pg-{{$c.UUID}}">+ Add port group</button>{{end}}</div>
+  {{if $c.PGs}}
+  <table>
+    <tr><th>Name</th>{{if $.V.Admin}}<th>Organization</th>{{end}}<th>Subnet</th><th>Gateway</th><th>VNI</th><th>Span</th><th>Addresses</th><th></th></tr>
+    {{range $c.PGs}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      {{if $.V.Admin}}<td>{{.OrgName}}</td>{{end}}
+      <td class="mono">{{if .Routed}}{{.CIDR}}{{else}}<span class="pill" title="No gateway, no DHCP: for appliances that bring their own">L2-only</span>{{end}}</td>
+      <td class="mono">{{if .Routed}}{{.Gateway}} <span class="muted" style="font-size:12px">anycast</span>{{else}}—{{end}}</td>
+      <td class="mono">{{.VNI}}</td>
+      <td>{{.SpanText}}</td>
+      <td class="mono">{{if .Routed}}{{.Leases}}{{if .PoolStart}} <span class="muted" style="font-size:12px">pool {{.PoolStart}}–{{.PoolEnd}}</span>{{end}}{{else}}—{{end}}</td>
+      <td style="text-align:right">{{if and $c.Build (or .Mine $.V.Admin)}}
+        <button class="btn sm" data-modal="m-pgedit-{{.UUID}}">Edit</button>
+        <form method="post" action="/fabric/pg/{{.UUID}}/delete" style="display:inline" onsubmit="return confirm('Delete port group {{.Name}} on every host? Refused while instances, containers or router legs use it anywhere.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No port groups on this fabric yet.</div>{{end}}
+
+  <div class="card-head" style="margin-top:16px"><h3 style="margin:0">Connectivity</h3>{{if and $c.Build $c.Routed}}<button class="btn sm primary" data-modal="m-rule-{{$c.UUID}}">+ Allow traffic</button>{{end}}</div>
+  <p class="muted" style="margin:0 0 8px;font-size:12.5px">Each row allows traffic between two routed port groups. A one-way row (→) allows new connections from the first to the second, and their replies. Every host enforces the same table.</p>
+  {{if $c.Rules}}
+  <table>
+    <tr><th>From</th><th></th><th>To</th><th>Service</th>{{if $.V.Admin}}<th>Organization</th>{{end}}<th>Note</th><th></th></tr>
+    {{range $c.Rules}}
+    <tr{{if .Off}} style="opacity:.5"{{end}}>
+      <td><strong>{{.SrcName}}</strong></td><td>{{if .Both}}↔{{else}}→{{end}}</td><td><strong>{{.DstName}}</strong></td>
+      <td class="mono">{{.Service}}</td>{{if $.V.Admin}}<td>{{.OrgName}}</td>{{end}}<td class="muted">{{.Note}}</td>
+      <td style="text-align:right">{{if and $c.Build (or .Mine $.V.Admin)}}
+        <form method="post" action="/fabric/rule/{{.UUID}}/{{if .Off}}on{{else}}off{{end}}" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm">{{if .Off}}Turn on{{else}}Turn off{{end}}</button></form>
+        <form method="post" action="/fabric/rule/{{.UUID}}/delete" style="display:inline" onsubmit="return confirm('Delete this rule?')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="btn sm danger">Delete</button></form>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<div class="empty">No rules: routed port groups can't reach each other yet.</div>{{end}}
+  {{range $c.Matrices}}
+  <p class="fx-sub">Who can reach whom{{if $.V.Admin}} — {{.OrgName}}{{end}}</p>
+  <table class="fx-matrix"><tr><th style="text-align:left">from ↓ to →</th>{{range .Names}}<th>{{.}}</th>{{end}}</tr>
+  {{range .Rows}}<tr><th style="text-align:left">{{.Name}}</th>{{range .Cells}}<td class="{{if eq . "✗"}}no{{else if ne . "·"}}yes{{end}}">{{.}}</td>{{end}}</tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if and $c.Build $c.HasVRF}}
+  <div class="card-head" style="margin-top:16px"><h3 style="margin:0">Egress</h3></div>
+  <p class="muted" style="margin:0 0 8px;font-size:12.5px">Traffic leaving the fabric goes to your tenant gateway: give the address its interface holds on one of your routed fabric port groups. Every host routes the organization's outbound traffic there. A rule to <b>External</b> then allows it.</p>
+  <form method="post" action="/fabric/f/{{$c.UUID}}/egress" style="display:flex;gap:8px;align-items:center"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <input type="text" name="egress" value="{{$c.Egress}}" placeholder="10.10.0.254" style="max-width:200px" class="mono">
+    <button class="btn sm primary">Save</button>{{if $c.Egress}}<span class="muted" style="font-size:12px">Clearing it also removes the rules to and from External.</span>{{end}}</form>
+  {{end}}
+</div>
+
+{{/* ---- per-fabric modals ---- */}}
+{{if $.V.Admin}}
+<div class="modal" id="m-host-{{$c.UUID}}"><div class="modal-card">
+  <div class="modal-head"><h3>Add a host to {{$c.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/fabric/f/{{$c.UUID}}/host">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <label class="fld">Host<select name="node" data-nicfor="h-{{$c.UUID}}" required><option value="">— pick a host —</option>{{range $.V.Nodes}}{{if not ($c.HasHost .)}}<option>{{.}}</option>{{end}}{{end}}</select></label>
+    <label class="fld">Interface<select name="iface" id="h-{{$c.UUID}}" required></select></label>
+    <label class="fld">VLAN<input type="number" name="vlan" value="0" min="0" max="4094" title="0 = untagged on a free NIC; a tag puts the TEP on a VLAN of the interface (the interface itself is never changed)"></label>
+    <label class="fld">TEP<input type="text" name="tep" class="mono" placeholder="{{with index $c.Hosts 0}}{{.TEP}}{{end}}" required title="This host's tunnel address, in the same subnet as the other hosts' TEPs"></label>
+    <p class="muted full" style="margin:0;font-size:12px">The host is checked first, then joins. Every host must then reach it at {{$c.MTU}} bytes with DF set, or it is removed again.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add host</button></div>
+  </form>
+</div></div>
+<div class="modal" id="m-orgs-{{$c.UUID}}"><div class="modal-card">
+  <div class="modal-head"><h3>Organizations on {{$c.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/fabric/f/{{$c.UUID}}/orgs">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <p class="wiz-note">Admins of these organizations can create port groups, rules and egress on this fabric, inside their own organization. Each organization gets its own routing domain (VRF), so organizations never reach each other, even with overlapping subnets.</p>
+    {{range $.Orgs}}<label class="chk"><input type="checkbox" name="orgs" value="{{.ID}}"{{if $c.Orgs}}{{$id := .ID}}{{range $c.Orgs}}{{if eq . $id}} checked{{end}}{{end}}{{end}}> {{.Name}}</label>{{end}}
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+  </form>
+</div></div>
+{{end}}
+{{if $c.Build}}
+<div class="modal" id="m-pg-{{$c.UUID}}"><div class="modal-card">
+  <div class="modal-head"><h3>Add port group to {{$c.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/fabric/pg">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fabric" value="{{$c.UUID}}">
+    <label class="fld">Name<input type="text" name="name" placeholder="web" required></label>
+    <label class="fld">Kind<select name="kind" data-pgkind><option value="routed">Routed: subnet, distributed gateway, DHCP</option><option value="l2">L2-only: no gateway, no DHCP</option></select></label>
+    <label class="fld" data-for="routed">Subnet<input type="text" name="cidr" class="mono" placeholder="10.10.1.0/24"></label>
+    <label class="fld" data-for="routed">Gateway<input type="text" name="gateway" class="mono" placeholder="first address"></label>
+    <label class="fld" data-for="routed">Pool start<input type="text" name="pool_start" class="mono" placeholder="optional"></label>
+    <label class="fld" data-for="routed">Pool end<input type="text" name="pool_end" class="mono" placeholder="optional"></label>
+    <label class="fld full" data-for="routed">DNS servers<input type="text" name="dns" class="mono" placeholder="1.1.1.1, 9.9.9.9"></label>
+    <div class="full"><span class="muted" style="font-size:12px">Span: leave all unticked for every host (new hosts included).</span>
+      {{range $c.Hosts}}<label class="chk"><input type="checkbox" name="span" value="{{.Node}}"> {{.Node}}</label>{{end}}</div>
+    <p class="muted full" style="margin:0;font-size:12px">VMs get their address from the pool, fabric-wide. Every host's DHCP answers with the same lease, and a VM keeps it when it moves. Guest MTU is {{$c.GuestMTU}}.</p>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create port group</button></div>
+  </form>
+</div></div>
+{{range $c.PGs}}{{if or .Mine $.V.Admin}}
+<div class="modal" id="m-pgedit-{{.UUID}}"><div class="modal-card">
+  <div class="modal-head"><h3>Edit port group {{.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform" method="post" action="/fabric/pg/{{.UUID}}/edit">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    {{$pg := .}}
+    <div><span class="muted" style="font-size:12px">Span: leave all unticked for every host. Removing a host is refused while something there uses this port group.</span>
+      {{range $c.Hosts}}{{$n := .Node}}<label class="chk"><input type="checkbox" name="span" value="{{$n}}"{{range $pg.Span}}{{if eq . $n}} checked{{end}}{{end}}> {{$n}}</label>{{end}}</div>
+    {{if .Routed}}<label class="fld">DNS servers<input type="text" name="dns" class="mono" value="{{range $i, $d := .DNS}}{{if $i}}, {{end}}{{$d}}{{end}}"></label>
+    <p class="muted" style="margin:0;font-size:12px">The subnet ({{.CIDR}}) and gateway ({{.Gateway}}) are fixed: VMs hold leases in them.</p>{{end}}
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+  </form>
+</div></div>
+{{end}}{{end}}
+{{if $c.Routed}}
+<div class="modal" id="m-rule-{{$c.UUID}}"><div class="modal-card">
+  <div class="modal-head"><h3>Allow traffic</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <form class="mform row2" method="post" action="/fabric/rule">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fabric" value="{{$c.UUID}}">
+    <label class="fld">From<select name="src" required>{{range $c.Routed}}<option value="{{.UUID}}">{{.Name}} ({{.CIDR}})</option>{{end}}{{if $c.Egress}}<option value="external">External</option>{{end}}</select></label>
+    <label class="fld">To<select name="dst" required>{{range $c.Routed}}<option value="{{.UUID}}">{{.Name}} ({{.CIDR}})</option>{{end}}{{if $c.Egress}}<option value="external">External</option>{{end}}</select></label>
+    <label class="fld">Direction<select name="dir"><option value="one">→ one way (replies allowed)</option><option value="both">↔ both ways</option></select></label>
+    <label class="fld">Service<select name="proto" data-proto><option value="any">any</option><option value="icmp">ICMP (ping)</option><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
+    <label class="fld" data-for="ports">Ports<input type="text" name="ports" class="mono" placeholder="22,443,8000-8100 (blank = all)"></label>
+    <label class="fld">Note<input type="text" name="note" maxlength="120" placeholder="optional"></label>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Allow</button></div>
+  </form>
+</div></div>
+{{end}}
+{{end}}
+{{end}}
+
+{{if .V.Admin}}
+<div class="modal" id="m-deploy"><div class="modal-card lg">
+  <div class="modal-head"><h3>Deploy fabric</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
+  <ol class="wiz-steps" id="fx-steps"><li>Hosts</li><li>Underlay</li><li>Access</li><li>Check &amp; deploy</li></ol>
+  <form class="mform" method="post" action="/fabric/deploy" id="fx" novalidate>
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <section class="wiz-pane">
+      <p class="wiz-note">Name the fabric and pick its hosts. Port groups you create on it can then exist on every one of them.</p>
+      <label class="fld">Name<input type="text" name="name" id="fx-name" placeholder="prod" maxlength="32"></label>
+      <div><span class="muted" style="font-size:12px">Hosts</span>
+        {{range .V.Nodes}}<label class="chk"><input type="checkbox" name="node" value="{{.}}" data-fxnode> {{.}}{{if eq . $.V.Self}} <span class="muted">(this host)</span>{{end}}</label>{{end}}</div>
+      <p class="wiz-err" id="fx-err1"></p>
+    </section>
+    <section class="wiz-pane">
+      <p class="wiz-note">How each host reaches the others: a free NIC (untagged), or a VLAN on a NIC that has no other role. Management is never offered, and a VLAN's parent is never changed. Every TEP must be in one subnet that nothing else on the hosts uses.</p>
+      <div class="wiz-sub" style="display:grid;grid-template-columns:1fr 1fr;gap:13px">
+        <label class="fld">TEP subnet<input type="text" id="fx-tepnet" class="mono" value="10.250.0.0/24" title="Each host gets the next address; edit any of them below"></label>
+        <label class="fld">Underlay MTU<input type="number" name="mtu" id="fx-mtu" value="1550" min="1330" max="9216" title="The fabric adds 50 bytes. At 1550, guests keep 1500. A VLAN can't exceed its parent's MTU."></label>
+      </div>
+      <div class="fx-hosts" id="fx-hostrows"></div>
+      <p class="wiz-err" id="fx-err2"></p>
+    </section>
+    <section class="wiz-pane">
+      <p class="wiz-note">Which organizations' admins may build port groups and rules on this fabric? Instance admins always can. Each organization gets its own routing domain.</p>
+      {{range .Orgs}}<label class="chk"><input type="checkbox" name="orgs" value="{{.ID}}"> {{.Name}}</label>{{end}}
+      <label class="fld">BGP AS<input type="number" name="asn" placeholder="auto: the hosts' own AS, else 65100" min="1" max="4294967295"></label>
+    </section>
+    <section class="wiz-pane">
+      <p class="wiz-note">Every host is checked before anything changes. On deploy each host sets up its underlay, VRFs and BGP EVPN. Then every pair of hosts must reach each other at full MTU with DF set. If anything fails, the fabric is removed again.</p>
+      <div id="fx-checks"><span class="muted">Checking…</span></div>
+      <p class="wiz-err" id="fx-err4"></p>
+    </section>
+    <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn" id="fx-back">Back</button><button type="button" class="btn primary" id="fx-next">Next</button><button class="btn primary" id="fx-go" style="display:none" disabled>Deploy</button></div>
+  </form>
+</div></div>
+{{end}}
+
+<script>
+(function(){
+  const NICS = {{.NICsJSON}} || {};
+  function nicOptions(node, sel){
+    sel.innerHTML = '';
+    const list = NICS[node] || [];
+    if(!list.length){ sel.innerHTML = '<option value="">— no free interface —</option>'; return; }
+    for(const n of list){
+      const o = document.createElement('option');
+      o.value = n.name;
+      o.textContent = n.name + ' · ' + n.kind + ' · MTU ' + n.mtu + (n.carrier ? '' : ' · no link') + (n.nbr ? ' · ' + n.nbr : '') + (n.free ? '' : ' · VLAN only');
+      o.dataset.free = n.free ? '1' : '';
+      sel.appendChild(o);
+    }
+  }
+  document.querySelectorAll('[data-nicfor]').forEach(s => s.addEventListener('change', () => nicOptions(s.value, document.getElementById(s.dataset.nicfor))));
+  document.querySelectorAll('[data-pgkind]').forEach(s => {
+    const f = () => s.form.querySelectorAll('[data-for=routed]').forEach(e => e.style.display = s.value === 'l2' ? 'none' : '');
+    s.addEventListener('change', f); f();
+  });
+  document.querySelectorAll('[data-proto]').forEach(s => {
+    const f = () => s.form.querySelectorAll('[data-for=ports]').forEach(e => e.style.display = (s.value === 'tcp' || s.value === 'udp') ? '' : 'none');
+    s.addEventListener('change', f); f();
+  });
+
+  const form = document.getElementById('fx');
+  if(!form) return;
+  const panes = form.querySelectorAll('.wiz-pane'), steps = document.querySelectorAll('#fx-steps li');
+  const next = document.getElementById('fx-next'), back = document.getElementById('fx-back'), go = document.getElementById('fx-go');
+  let at = 0;
+  const nodes = () => [...form.querySelectorAll('[data-fxnode]:checked')].map(c => c.value);
+  function ipAdd(cidr, k){
+    const [ip, pfx] = cidr.split('/');
+    const p = ip.split('.').map(Number);
+    if(p.length !== 4 || p.some(isNaN) || !pfx) return '';
+    let v = ((p[0]<<24)>>>0) + (p[1]<<16) + (p[2]<<8) + p[3] + k;
+    return [v>>>24 & 255, v>>>16 & 255, v>>>8 & 255, v & 255].join('.') + '/' + pfx;
+  }
+  function hostRows(){
+    const box = document.getElementById('fx-hostrows');
+    const keep = {};
+    box.querySelectorAll('[data-k]').forEach(e => keep[e.name] = e.value);
+    box.innerHTML = '<span class="h">Host</span><span class="h">Interface</span><span class="h">VLAN</span><span class="h">TEP</span>';
+    nodes().forEach((n, i) => {
+      const lab = document.createElement('span'); lab.className = 'mono'; lab.textContent = n; box.appendChild(lab);
+      const sel = document.createElement('select'); sel.name = 'iface_' + n; sel.dataset.k = 1; nicOptions(n, sel); box.appendChild(sel);
+      const vl = document.createElement('input'); vl.type = 'number'; vl.min = 0; vl.max = 4094; vl.value = 0; vl.name = 'vlan_' + n; vl.dataset.k = 1; box.appendChild(vl);
+      const tp = document.createElement('input'); tp.type = 'text'; tp.className = 'mono'; tp.name = 'tep_' + n; tp.dataset.k = 1;
+      tp.value = ipAdd(document.getElementById('fx-tepnet').value.trim(), i + 1); box.appendChild(tp);
+      [sel, vl, tp].forEach(e => { if(keep[e.name] !== undefined) e.value = keep[e.name]; });
+    });
+  }
+  document.getElementById('fx-tepnet').addEventListener('change', () => {
+    nodes().forEach((n, i) => { const t = form.querySelector('[name="tep_' + CSS.escape(n) + '"]'); if(t) t.value = ipAdd(document.getElementById('fx-tepnet').value.trim(), i + 1); });
+  });
+  function show(i){
+    at = i;
+    panes.forEach((p, k) => p.classList.toggle('on', k === i));
+    steps.forEach((s, k) => { s.classList.toggle('on', k === i); s.classList.toggle('done', k < i); });
+    back.style.visibility = i ? 'visible' : 'hidden';
+    next.style.display = i === panes.length - 1 ? 'none' : '';
+    go.style.display = i === panes.length - 1 ? '' : 'none';
+    if(i === 1) hostRows();
+    if(i === panes.length - 1) preflight();
+  }
+  function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : s; return d.innerHTML; }
+  async function preflight(){
+    const box = document.getElementById('fx-checks'), err = document.getElementById('fx-err4');
+    box.innerHTML = '<span class="muted">Checking every host…</span>'; err.textContent = ''; go.disabled = true;
+    try{
+      const r = await fetch('/fabric/preflight', {method: 'POST', body: new FormData(form), credentials: 'same-origin'});
+      const j = await r.json();
+      if(j.error) err.textContent = j.error;
+      let h = '<table class="fx-checks"><tr><th>Host</th><th>Check</th><th>Result</th></tr>';
+      for(const c of (j.checks || [])){
+        const cls = c.ok ? '' : (c.warn ? 'warn' : 'bad');
+        h += '<tr><td class="mono">' + esc(c.node) + '</td><td>' + esc(c.check) + '</td><td class="' + cls + '">' + (c.ok ? '✓ ' : c.warn ? '⚠ ' : '✗ ') + esc(c.detail) + '</td></tr>';
+      }
+      box.innerHTML = h + '</table>';
+      go.disabled = !!j.failed;
+    }catch(e){ err.textContent = 'Preflight failed: ' + e; }
+  }
+  next.addEventListener('click', () => {
+    if(at === 0){
+      const e = document.getElementById('fx-err1');
+      e.textContent = !document.getElementById('fx-name').value.trim() ? 'Name the fabric.' : !nodes().length ? 'Pick at least one host.' : '';
+      if(e.textContent) return;
+    }
+    if(at === 1){
+      const e = document.getElementById('fx-err2');
+      const bad = nodes().filter(n => !form.querySelector('[name="iface_' + CSS.escape(n) + '"]').value);
+      e.textContent = bad.length ? 'Pick an interface for ' + bad.join(', ') + '.' : '';
+      if(e.textContent) return;
+    }
+    show(at + 1);
+  });
+  back.addEventListener('click', () => show(Math.max(0, at - 1)));
+  form.addEventListener('submit', () => { go.disabled = true; go.textContent = 'Deploying… (up to 2 minutes)'; });
+  show(0);
+})();
+</script>
+{{template "foot" .}}{{end}}

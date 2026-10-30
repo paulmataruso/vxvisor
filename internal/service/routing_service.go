@@ -524,19 +524,30 @@ func (s *Service) ReensureBGPGuard() {
 	if !routing.NFTAvailable() {
 		return
 	}
-	if err := routing.ApplyBGPGuard(s.loadHostRouting()); err != nil {
+	c := s.loadHostRouting()
+	c.Fabric = s.fabricRouting()
+	if err := routing.ApplyBGPGuard(c); err != nil {
 		log.Printf("routing: BGP peer guard: %v", err)
 	}
 }
 
-// applyHostRouting applies the host routing config, then re-fences the tenant
-// networks: rewriting the global ip_forward resets every interface's forwarding
-// flag, including the ones that keep the host from routing for a tenant.
+// applyHostRouting applies the host routing config with this host's VXVisor
+// Fabric section composed in (the one place both meet, so neither can drop the
+// other from frr.conf), then re-fences the tenant networks and the fabric's
+// L2-only port groups: rewriting the global ip_forward resets every interface's
+// forwarding flag, including the ones that keep the host from routing for them.
 func (s *Service) applyHostRouting(c routing.Config) error {
+	c.Fabric = s.fabricRouting()
+	if c.Fabric != nil {
+		if err := c.Validate(); err != nil {
+			return fmt.Errorf("with the VXVisor Fabric: %w", err)
+		}
+	}
 	err := routing.Apply(c)
 	if ierr := s.applyTenantIsolation(); ierr != nil {
 		log.Printf("routing: re-apply tenant isolation: %v", ierr)
 	}
+	s.refenceFabric()
 	return err
 }
 
