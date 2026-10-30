@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<snapshots><snapshot href="/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111/snapshots/a9685243-0e9f-5961-8f9a-2383c5574696" id="a9685243-0e9f-5961-8f9a-2383c5574696"><description>Active VM</description><snapshot_type>active</snapshot_type><snapshot_status>ok</snapshot_status><date>2026-10-01T12:00:00.000+00:00</date><persist_memorystate>false</persist_memorystate><vm href="/ovirt-engine/api/vms/11111111-1111-4111-8111-111111111111" id="11111111-1111-4111-8111-111111111111"/></snapshot></snapshots>

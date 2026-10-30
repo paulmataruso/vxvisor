@@ -20,6 +20,19 @@ func TestUserDataShape(t *testing.T) {
 	}
 }
 
+// TestRawUserData: a client-supplied cloud-config is used verbatim, with the
+// generated meta-data kept.
+func TestRawUserData(t *testing.T) {
+	raw := "#cloud-config\nruncmd:\n  - echo hi\n"
+	c := Config{InstanceID: "id2", Hostname: "w", Username: "vdx", Password: "pw", RawUserData: raw}
+	if got := c.userData(); got != raw {
+		t.Errorf("user-data = %q, want the raw document", got)
+	}
+	if !strings.Contains(c.metaData(), "instance-id: id2") {
+		t.Errorf("meta-data missing instance-id")
+	}
+}
+
 // TestYAMLQuoting guards against a name breaking the document structure.
 func TestYAMLQuoting(t *testing.T) {
 	if got := yamlStr("a'b"); got != "'a''b'" {

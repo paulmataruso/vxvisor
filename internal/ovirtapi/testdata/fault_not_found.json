@@ -1,0 +1,8 @@
+{
+  "detail": "[not found: VM 00000000-dead-4000-8000-000000000000]",
+  "fault": {
+    "detail": "[not found: VM 00000000-dead-4000-8000-000000000000]",
+    "reason": "Not Found"
+  },
+  "reason": "Not Found"
+}

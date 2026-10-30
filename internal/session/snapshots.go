@@ -19,6 +19,7 @@ import (
 	"vdxclone/internal/lvm"
 	"vdxclone/internal/netdrv"
 	"vdxclone/internal/qemu"
+	"vdxclone/internal/vmbackup"
 	"vdxclone/internal/zfs"
 )
 
@@ -82,6 +83,7 @@ type snapOps struct {
 	qmpSnap, qmpSnapDelete                     func(sock, dev, tag string) error
 	imgSnapCreate, imgSnapApply, imgSnapDelete func(disk, tag string) error
 	imgClone                                   func(src, tag, dst string, live bool) (string, error)
+	dropBackupBitmaps                          func(disk string) error
 	zfsSnap, zfsRollback, zfsDestroySnap       func(ds, tag string) error
 	zfsClone                                   func(ds, tag, target string) error
 	zfsPromote, zfsDestroy                     func(ds string) error
@@ -98,32 +100,33 @@ type snapOps struct {
 }
 
 var ops = snapOps{
-	qmpSnap:        qemu.QMPInternalSnapshot,
-	qmpSnapDelete:  qemu.QMPDeleteInternalSnapshot,
-	imgSnapCreate:  qemu.SnapshotCreate,
-	imgSnapApply:   qemu.SnapshotApply,
-	imgSnapDelete:  qemu.SnapshotDelete,
-	imgClone:       qemu.CloneSnapshot,
-	zfsSnap:        zfs.Snapshot,
-	zfsRollback:    zfs.Rollback,
-	zfsDestroySnap: zfs.DestroySnapshot,
-	zfsClone:       zfs.Clone,
-	zfsPromote:     zfs.Promote,
-	zfsDestroy:     zfs.DestroyDataset,
-	zfsTags:        zfs.ListSnapshotTags,
-	lvmSnap:        lvm.ThinSnapshot,
-	lvmCopy:        lvm.ThinCopy,
-	lvmRevert:      lvm.RevertThin,
-	lvmRemove:      lvm.RemoveNamed,
-	lvmRemoveDev:   lvm.RemoveLV,
-	rbdSnap:        ceph.SnapCreate,
-	rbdRollback:    ceph.SnapRollback,
-	rbdSnapRemove:  ceph.SnapRemove,
-	rbdClone:       ceph.Clone,
-	rbdFlatten:     ceph.Flatten,
-	rbdRemove:      ceph.RemoveImage,
-	freeze:         qemu.GuestFsFreeze,
-	thaw:           qemu.GuestFsThaw,
+	qmpSnap:           qemu.QMPInternalSnapshot,
+	qmpSnapDelete:     qemu.QMPDeleteInternalSnapshot,
+	imgSnapCreate:     qemu.SnapshotCreate,
+	imgSnapApply:      qemu.SnapshotApply,
+	imgSnapDelete:     qemu.SnapshotDelete,
+	imgClone:          qemu.CloneSnapshot,
+	dropBackupBitmaps: dropBackupBitmaps,
+	zfsSnap:           zfs.Snapshot,
+	zfsRollback:       zfs.Rollback,
+	zfsDestroySnap:    zfs.DestroySnapshot,
+	zfsClone:          zfs.Clone,
+	zfsPromote:        zfs.Promote,
+	zfsDestroy:        zfs.DestroyDataset,
+	zfsTags:           zfs.ListSnapshotTags,
+	lvmSnap:           lvm.ThinSnapshot,
+	lvmCopy:           lvm.ThinCopy,
+	lvmRevert:         lvm.RevertThin,
+	lvmRemove:         lvm.RemoveNamed,
+	lvmRemoveDev:      lvm.RemoveLV,
+	rbdSnap:           ceph.SnapCreate,
+	rbdRollback:       ceph.SnapRollback,
+	rbdSnapRemove:     ceph.SnapRemove,
+	rbdClone:          ceph.Clone,
+	rbdFlatten:        ceph.Flatten,
+	rbdRemove:         ceph.RemoveImage,
+	freeze:            qemu.GuestFsFreeze,
+	thaw:              qemu.GuestFsThaw,
 }
 
 // diskRef is a VM disk resolved to its backend's own names.
@@ -231,6 +234,10 @@ func (m *Manager) SnapshotGroup(ids []string) map[string]SnapItem {
 	for _, id := range ids {
 		if m.MigrationBusy(id) {
 			out[id] = SnapItem{Err: errMigrating}
+			continue
+		}
+		if m.BackupBusy(id) {
+			out[id] = SnapItem{Err: ErrBackupBusy}
 			continue
 		}
 		s, err := m.Get(id)
@@ -348,6 +355,9 @@ func (m *Manager) RevertSnapshot(id string, snapID int64, discardNewer bool) err
 	if m.MigrationBusy(id) {
 		return errMigrating
 	}
+	if m.BackupBusy(id) {
+		return ErrBackupBusy
+	}
 	s, err := m.Get(id)
 	if err != nil {
 		return err
@@ -385,7 +395,12 @@ func (m *Manager) RevertSnapshot(id string, snapID int64, discardNewer bool) err
 	case "rbd":
 		err = ops.rbdRollback(d.pool, d.image, sn.Tag)
 	default:
-		err = ops.imgSnapApply(d.path, sn.Tag)
+		// QEMU refuses to apply an internal snapshot while the image holds
+		// persistent dirty bitmaps (the backup API's checkpoints). Reverting
+		// invalidates them anyway, so remove ours first; the next backup is full.
+		if err = ops.dropBackupBitmaps(d.path); err == nil {
+			err = ops.imgSnapApply(d.path, sn.Tag)
+		}
 	}
 	if err != nil {
 		return err
@@ -397,6 +412,7 @@ func (m *Manager) RevertSnapshot(id string, snapID int64, discardNewer bool) err
 			}
 		}
 	}
+	m.DropCheckpoints(id) // the disk went back in time; its backup dirty bitmaps no longer apply
 	return nil
 }
 
@@ -586,6 +602,9 @@ func (m *Manager) CloneFromSnapshot(o CloneOpts) (*Session, error) {
 	defer unlock()
 	if m.MigrationBusy(o.OriginID) {
 		return nil, errMigrating
+	}
+	if m.BackupBusy(o.OriginID) {
+		return nil, ErrBackupBusy
 	}
 	s, err := m.Get(o.OriginID)
 	if err != nil {
@@ -901,4 +920,21 @@ func (m *Manager) releaseTransientBase(snapID int64) {
 		return
 	}
 	m.dropSnapshotRow(r)
+}
+
+// dropBackupBitmaps removes the backup API's checkpoint bitmaps (vdxckpt-*)
+// from a stopped qcow2. Bitmaps it didn't create are left alone.
+func dropBackupBitmaps(disk string) error {
+	info, err := qemu.ImageInfo(disk)
+	if err != nil {
+		return err
+	}
+	for _, b := range info.Bitmaps {
+		if strings.HasPrefix(b.Name, vmbackup.BitmapPrefix) {
+			if err := qemu.BitmapRemoveOffline(disk, b.Name); err != nil {
+				return fmt.Errorf("remove backup checkpoint %s before the revert: %w", b.Name, err)
+			}
+		}
+	}
+	return nil
 }

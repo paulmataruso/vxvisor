@@ -1299,6 +1299,49 @@ CREATE TABLE IF NOT EXISTS snapshot_clones (
 CREATE INDEX IF NOT EXISTS idx_snapclones_snapshot ON snapshot_clones(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_snapclones_origin ON snapshot_clones(origin_id);
 `},
+	{58, "ovirt-checkpoints", `
+-- Backup checkpoints made through the oVirt-compatible backup API ([ovirt]).
+-- Each row names one persistent qcow2 dirty bitmap "vdxckpt-<id>" on the VM's
+-- disk; the bitmap is the authority, this row is what the API lists. A bitmap
+-- with no row is a leftover of a failed backup and is pruned at the next one.
+-- Rows go with the VM (ON DELETE CASCADE) and are dropped whenever the disk is
+-- rewritten outside a backup (snapshot revert, storage move, resize), which
+-- forces the next backup to be a full one.
+-- STRICTLY ADDITIVE: a new table no older binary reads.
+CREATE TABLE ovirt_checkpoints (
+	id          TEXT PRIMARY KEY,
+	vm_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	parent_id   TEXT NOT NULL DEFAULT '',
+	description TEXT NOT NULL DEFAULT '',
+	created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE INDEX ix_ovirt_checkpoints_vm ON ovirt_checkpoints(vm_id, created_at);
+`},
+	{59, "ovirt-disks", `
+-- Disks created through the oVirt-compatible API (restore targets, backup
+-- worker images). vm_id is NULL while the disk is staged (detached) and set
+-- once it is attached, so the disk keeps the id the client created it with;
+-- attaching also records the file as the VM's disk_path. ovirt_vms marks VMs
+-- the API created and why ("restore" | "worker"): a worker is purged outright
+-- when the client deletes it, anything else goes to Trash like a UI delete.
+-- STRICTLY ADDITIVE: new tables no older binary reads.
+CREATE TABLE ovirt_disks (
+	id         TEXT PRIMARY KEY,
+	vm_id      TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+	name       TEXT NOT NULL DEFAULT '',
+	path       TEXT NOT NULL,
+	format     TEXT NOT NULL DEFAULT 'qcow2',
+	pool_id    INTEGER NOT NULL DEFAULT 0,
+	size       INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+CREATE UNIQUE INDEX ux_ovirt_disks_vm ON ovirt_disks(vm_id) WHERE vm_id IS NOT NULL;
+CREATE TABLE ovirt_vms (
+	vm_id      TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+	purpose    TEXT NOT NULL DEFAULT 'restore',
+	created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+);
+`},
 }
 
 // Open connects to the SQLite database, enables WAL, and applies migrations.

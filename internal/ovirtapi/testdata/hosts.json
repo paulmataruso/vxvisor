@@ -1,0 +1,62 @@
+{
+  "host": [
+    {
+      "address": "198.51.100.7",
+      "cluster": {
+        "href": "/ovirt-engine/api/clusters/365be992-9ad1-5660-84a0-6eeea1f40ecb",
+        "id": "365be992-9ad1-5660-84a0-6eeea1f40ecb"
+      },
+      "cpu": {
+        "name": "Test CPU",
+        "topology": {
+          "cores": "8",
+          "sockets": "1",
+          "threads": "1"
+        },
+        "type": "Host CPU"
+      },
+      "external_status": "ok",
+      "href": "/ovirt-engine/api/hosts/0184242a-c51d-5aee-a6ce-949dc23f39d5",
+      "id": "0184242a-c51d-5aee-a6ce-949dc23f39d5",
+      "kdump_status": "unknown",
+      "libvirt_version": {
+        "full_version": "libvirt-10.2.1"
+      },
+      "link": [
+        {
+          "href": "/ovirt-engine/api/hosts/0184242a-c51d-5aee-a6ce-949dc23f39d5/statistics",
+          "rel": "statistics"
+        }
+      ],
+      "max_scheduling_memory": "17179869184",
+      "memory": "34359738368",
+      "name": "node1",
+      "os": {
+        "type": "RHEL",
+        "version": {
+          "full_version": "Test Linux"
+        }
+      },
+      "port": "54321",
+      "protocol": "stomp",
+      "spm": {
+        "priority": "5",
+        "status": "spm"
+      },
+      "status": "up",
+      "summary": {
+        "active": "1",
+        "migrating": "0",
+        "total": "1"
+      },
+      "type": "rhel",
+      "version": {
+        "build": "5",
+        "full_version": "vdsm-4.50.5.1",
+        "major": "4",
+        "minor": "50",
+        "revision": "1"
+      }
+    }
+  ]
+}

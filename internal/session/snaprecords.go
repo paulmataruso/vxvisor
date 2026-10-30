@@ -309,6 +309,9 @@ var ErrLockedSnapshots = errors.New("instance has immutable snapshots")
 // immutable. Instant clones that depend on its snapshots are first made
 // independent (detachDependents), so purging an origin never breaks a clone.
 func (m *Manager) Purge(id string) error {
+	if m.BackupBusy(id) {
+		return ErrBackupBusy
+	}
 	m.purgeMu.Lock()
 	defer m.purgeMu.Unlock()
 	release, err := m.purgeLocked(id)

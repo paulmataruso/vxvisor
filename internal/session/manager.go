@@ -145,6 +145,10 @@ type Manager struct {
 	// dependent clone's storage while detaching it.
 	snapLocks sync.Map
 	purgeMu   sync.Mutex
+	// backupPins: vm id -> backups holding it (see PinBackup). In-memory: a
+	// daemon restart ends every backup anyway.
+	backupMu   sync.Mutex
+	backupPins map[string]int
 }
 
 func NewManager(cfg *config.Config, d *db.DB) *Manager {
@@ -714,6 +718,9 @@ func (m *Manager) Resize(id string, cpus, memMB, diskGB int) error {
 	if m.Running(s) {
 		return errors.New("stop the instance before resizing")
 	}
+	if m.BackupBusy(id) {
+		return ErrBackupBusy
+	}
 	if diskGB > 0 && diskGB < s.DiskGB {
 		return fmt.Errorf("cannot shrink disk from %d GB to %d GB", s.DiskGB, diskGB)
 	}
@@ -764,6 +771,9 @@ func (m *Manager) Resize(id string, cpus, memMB, diskGB int) error {
 	dg := s.DiskGB
 	if diskGB > 0 {
 		dg = diskGB
+	}
+	if dg != s.DiskGB {
+		m.DropCheckpoints(id) // a resized disk is backed up in full next time
 	}
 	_, err = m.db.Exec(`UPDATE sessions SET cpus=?, memory_mb=?, disk_gb=? WHERE id=?`, cpus, memMB, dg, id)
 	return err
@@ -859,6 +869,14 @@ func (m *Manager) Start(id string) (*Session, error) {
 	}
 	if s.State == "running" && processAliveSince(s.PID, m.startTime(id)) {
 		return s, nil
+	}
+	// A backup of the stopped VM reads its disk; a VM made through the backup
+	// API has no disk until one is attached.
+	if m.BackupBusy(id) {
+		return nil, ErrBackupBusy
+	}
+	if s.DiskPath == "" {
+		return nil, errors.New("the instance has no disk attached")
 	}
 	// Where the NIC goes (see planNIC). Decided before anything is allocated so a
 	// tenant VM with no port group of its own is refused cleanly, never started
@@ -1326,6 +1344,9 @@ func StorageLabelFor(backend, diskPath string) string {
 func (m *Manager) Delete(id string) error {
 	if m.MigrationBusy(id) {
 		return fmt.Errorf("instance is migrating its storage; try again when the move finishes")
+	}
+	if m.BackupBusy(id) {
+		return ErrBackupBusy
 	}
 	_ = m.Stop(id)
 	_, err := m.db.Exec(`UPDATE sessions SET deleted_at=? WHERE id=? AND deleted_at IS NULL`,

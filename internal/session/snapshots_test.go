@@ -56,11 +56,12 @@ func fakeSnapOps(t *testing.T) *opsRec {
 	old := ops
 	f := func(name string, a ...string) error { return r.add(name + " " + strings.Join(a, " ")) }
 	ops = snapOps{
-		qmpSnap:       func(s, d, t string) error { return f("qmp-snap", d, t) },
-		qmpSnapDelete: func(s, d, t string) error { return f("qmp-snap-delete", d, t) },
-		imgSnapCreate: func(d, t string) error { return f("img-snap", d, t) },
-		imgSnapApply:  func(d, t string) error { return f("img-apply", d, t) },
-		imgSnapDelete: func(d, t string) error { return f("img-delete", d, t) },
+		qmpSnap:           func(s, d, t string) error { return f("qmp-snap", d, t) },
+		qmpSnapDelete:     func(s, d, t string) error { return f("qmp-snap-delete", d, t) },
+		imgSnapCreate:     func(d, t string) error { return f("img-snap", d, t) },
+		imgSnapApply:      func(d, t string) error { return f("img-apply", d, t) },
+		dropBackupBitmaps: func(d string) error { return f("drop-bitmaps", d) },
+		imgSnapDelete:     func(d, t string) error { return f("img-delete", d, t) },
 		imgClone: func(s, t, d string, live bool) (string, error) {
 			return "convert", f("img-clone", s, t, d, fmt.Sprint(live))
 		},
@@ -337,6 +338,34 @@ func TestRevertRequiresStoppedAndKeepsOtherSnapshots(t *testing.T) {
 	bad := record(t, m, "ffff0002-lvm", SnapResult{Tag: "snap-x", Backend: "lvm", Ref: "OTHER/x"}, SnapMeta{})
 	if err := m.RevertSnapshot("ffff0002-lvm", bad, false); err == nil {
 		t.Fatal("cross-VG revert accepted")
+	}
+}
+
+// TestQcow2RevertDropsBackupBitmapsFirst: QEMU refuses to apply an internal
+// snapshot while the image holds persistent dirty bitmaps, so a qcow2 revert
+// removes the backup API's checkpoint bitmaps first, and stops if it can't.
+func TestQcow2RevertDropsBackupBitmapsFirst(t *testing.T) {
+	m, org := snapTestManager(t)
+	rec := fakeSnapOps(t)
+	mkVM(t, m, org, "ffff0003-q", "qcow2", "/d/ffff0003.qcow2", false, false)
+	sid := record(t, m, "ffff0003-q", SnapResult{Tag: "snap-1", Backend: "qcow2"}, SnapMeta{})
+	if err := m.RevertSnapshot("ffff0003-q", sid, false); err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Join(rec.list(), "|")
+	d, a := strings.Index(calls, "drop-bitmaps /d/ffff0003.qcow2"), strings.Index(calls, "img-apply /d/ffff0003.qcow2 snap-1")
+	if d < 0 || a < 0 || d > a {
+		t.Fatalf("bitmaps must be dropped before the apply: %q", rec.list())
+	}
+	rec.fail["drop-bitmaps /d/ffff0003.qcow2"] = errors.New("locked")
+	n := len(rec.list())
+	if err := m.RevertSnapshot("ffff0003-q", sid, false); err == nil {
+		t.Fatal("a revert must stop when the bitmaps can't be removed")
+	}
+	for _, c := range rec.list()[n:] {
+		if strings.HasPrefix(c, "img-apply") {
+			t.Fatalf("applied the snapshot after a failed bitmap drop: %q", rec.list())
+		}
 	}
 }
 

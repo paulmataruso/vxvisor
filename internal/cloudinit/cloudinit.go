@@ -53,12 +53,21 @@ type Config struct {
 	// MAC rather than by the machine-id-derived DUID, so a clone never collides
 	// with its origin's lease or identity.
 	Clone bool
+	// RawUserData, when set, is written as the user-data document verbatim
+	// instead of the generated cloud-config (Username/Password/SSHKey/Desktop/
+	// InstallGuestAgent are then ignored). An external client that brings its
+	// own cloud-config (the oVirt API's initialization.custom_script) uses it;
+	// meta-data and the network-config are still generated.
+	RawUserData string
 }
 
 // userData renders a minimal, broadly-compatible cloud-config. It enables
 // password SSH login and a passwordless-sudo admin user so a freshly booted
 // cloud image is immediately usable from the console or over SSH.
 func (c Config) userData() string {
+	if c.RawUserData != "" {
+		return c.RawUserData
+	}
 	var b strings.Builder
 	b.WriteString("#cloud-config\n")
 	fmt.Fprintf(&b, "hostname: %s\n", yamlStr(c.Hostname))

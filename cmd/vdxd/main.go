@@ -295,6 +295,16 @@ func cmdServe(cfgPath string) {
 		}()
 	}
 
+	// Optional oVirt-compatible backup API (Veeam): two TLS listeners on a
+	// specific (management) address. Off unless [ovirt] enabled = true; a
+	// configuration problem leaves it off and vdxd running.
+	var ovirtSrvs []*http.Server
+	if cfg.Ovirt.Enabled {
+		if ovirtSrvs, err = startOvirt(ctx, cfg, svc, nodeName); err != nil {
+			log.Printf("oVirt backup API not started: %v", err)
+		}
+	}
+
 	<-ctx.Done()
 	log.Println("shutting down…")
 	// Release the VIP synchronously BEFORE exit so the macvlan is gone and no
@@ -310,6 +320,9 @@ func cmdServe(cfgPath string) {
 	}
 	if guacSrv != nil {
 		_ = guacSrv.Shutdown(shutCtx)
+	}
+	for _, o := range ovirtSrvs {
+		_ = o.Shutdown(shutCtx)
 	}
 }
 

@@ -1,0 +1,40 @@
+{
+  "data_center": [
+    {
+      "description": "VXVisor host node1",
+      "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+      "id": "4ee3fdcb-c88c-539f-acfe-3ed7e23f935b",
+      "link": [
+        {
+          "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b/clusters",
+          "rel": "clusters"
+        },
+        {
+          "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b/networks",
+          "rel": "networks"
+        },
+        {
+          "href": "/ovirt-engine/api/datacenters/4ee3fdcb-c88c-539f-acfe-3ed7e23f935b/storagedomains",
+          "rel": "storagedomains"
+        }
+      ],
+      "local": "false",
+      "name": "node1",
+      "quota_mode": "disabled",
+      "status": "up",
+      "storage_format": "v5",
+      "supported_versions": {
+        "version": [
+          {
+            "major": "4",
+            "minor": "7"
+          }
+        ]
+      },
+      "version": {
+        "major": "4",
+        "minor": "7"
+      }
+    }
+  ]
+}
