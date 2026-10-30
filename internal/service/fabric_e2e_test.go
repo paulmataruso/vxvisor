@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func TestE2EFabric(t *testing.T) {
 	const ip, dummy = "e2e-test", "vxe2e0"
 	self := s.selfNode()
 
-	frrMarks := func() string { return sh(`grep -cE 'advertise-all-vni|VXFABRIC|vrf vxfvrf' /etc/frr/frr.conf`) }
+	frrMarks := k.frrMarks
 	initialFRR := frrMarks()
 	check(sh(`ip -br link | grep -c '^vxf'`) == "0", "no fabric devices before the test", sh(`ip -br link | grep '^vxf'`))
 
@@ -206,6 +207,11 @@ func newE2E(t *testing.T) *e2eKit {
 	return k
 }
 
+// frrMarks counts the fabric's lines in the host FRR config.
+func (k *e2eKit) frrMarks() string {
+	return k.sh(`grep -cE 'advertise-all-vni|VXFABRIC|vrf vxfvrf' /etc/frr/frr.conf`)
+}
+
 func (k *e2eKit) sh(c string) string {
 	out, _ := exec.Command("sh", "-c", c).CombinedOutput()
 	return strings.TrimSpace(string(out))
@@ -277,10 +283,11 @@ func TestE2EFabricMgmt(t *testing.T) {
 	if info.Problem != "" {
 		t.Skipf("this host can't ride over management: %s", info.Problem)
 	}
+	lifetimes := regexp.MustCompile(`(valid|preferred)_lft [0-9]+sec`) // a SLAAC address's countdown
 	mgmtState := func() string {
-		return k.sh("ip -o link show dev " + info.Iface + "; ip -o addr show dev " + info.Iface + "; ip -4 route show dev " + info.Iface)
+		return lifetimes.ReplaceAllString(k.sh("ip -o link show dev "+info.Iface+"; ip -o addr show dev "+info.Iface+"; ip -4 route show dev "+info.Iface), "${1}_lft N")
 	}
-	before := mgmtState()
+	before, initialFRR := mgmtState(), k.frrMarks()
 	k.check(k.sh(`ip -br link | grep -c '^vxf'`) == "0", "no fabric devices before the test")
 
 	fi := FabricInput{Name: "e2e-mgmt", Underlay: fabric.UnderlayMgmt, Orgs: []int64{k.org},
@@ -293,7 +300,10 @@ func TestE2EFabricMgmt(t *testing.T) {
 	defer func() {
 		k.must(s.DeleteFabric(p, fu, ip), "cleanup: delete fabric")
 		k.waitFor("WireGuard device removed", func() bool { return !netdrv.IfaceExists(fabric.WGDev) })
+		// The rest of the same teardown pass: every fabric device, then FRR.
+		k.waitFor("every fabric device removed", func() bool { return k.sh(`ip -br link | grep -c '^vxf'`) == "0" })
 		k.waitFor("fabric nft tables removed", func() bool { return !strings.Contains(k.sh("nft list tables"), "vdxfabric") })
+		k.waitFor("FRR fabric config removed", func() bool { return k.frrMarks() == initialFRR })
 		var n int
 		k.d.QueryRow(`SELECT count(*) FROM fabric_underlay`).Scan(&n)
 		k.check(n == 0, "fabric_underlay empty")
@@ -314,7 +324,9 @@ func TestE2EFabricMgmt(t *testing.T) {
 	fw := k.sh("nft list table inet vdxfabric")
 	k.check(strings.Contains(fw, "udp dport 51871 counter"), "tunnel port shut to everyone (single host)")
 	k.check(strings.Contains(fw, "ip dscp set cs1"), "tunnel packets marked CS1")
-	k.check(strings.Contains(fw, `iifname != { "vxfwg0", "lo" }`), "TEP sources only out of the tunnel")
+	// nft lists the set sorted: { "lo", "vxfwg0" }.
+	k.check(regexp.MustCompile(`ip saddr 10\.251\.78\.0/24 iifname != \{ "lo", "vxfwg0" \} counter packets \d+ bytes \d+ drop`).MatchString(fw),
+		"TEP sources only out of the tunnel", fw)
 	k.check(mgmtState() == before, "management interface unchanged", before, mgmtState())
 
 	// A routed port group: its VXLAN ends on the tunnel's TEP at guest MTU.
