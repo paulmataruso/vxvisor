@@ -287,6 +287,13 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   - Routing and FRR changes are applied first and saved only on success.
   - Tenant gateways export only their downlinks.
 
+- **Cross-node migration network binding** (`session/migratenet.go`). A `networks` row id is node-local
+  (port groups and leases are NOT replicated; orgs are). A migrating VM's port group travels as
+  `qemu.PortGroupRef` (org + name + VLAN + VNI + CIDR + its lease); the destination binds its OWN unique
+  match (none / several = refuse), reserves the same address, and a live receiver's tap goes on that
+  vSwitch before the stream (`attachReceiverNIC`). The source asks `POST /cluster/v1/migrate-precheck`
+  first (404 = older node → refuse); after the handoff it frees its tap + leases. All nodes must run the
+  same version to migrate.
 - **Snapshots / instant clones / snapshot policies** (migrations 55–57). Full design in
   `docs/SNAPSHOTS.md`. Invariants:
   - Every backend: qcow2 internal (live = QMP `blockdev-snapshot-internal-sync`, not `savevm`),

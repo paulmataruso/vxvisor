@@ -85,6 +85,11 @@ type Session struct {
 	OSType       string // linux | windows
 	Autostart    bool   // start automatically after a host reboot ("start at boot")
 	CreatedAt    string
+
+	// PortGroup is set only on a record shipped to another node by a migration
+	// (see PortGroupRefFor); it is not a column. NetworkID is node-local, so the
+	// destination binds the VM by this instead.
+	PortGroup *qemu.PortGroupRef `json:",omitempty"`
 }
 
 // sessionCols is the canonical column list/scan order for a session row.
@@ -124,6 +129,9 @@ type Manager struct {
 	// the real pid in its DB when it adopts the migrated VM.
 	incomingMu sync.Mutex
 	incoming   map[string]*os.Process
+	// incomingNet: the port group (and lease) each receiver was attached to on
+	// THIS node, resolved before the stream started so the adopt can't fail on it.
+	incomingNet map[string]receiverNet
 	// coldStaged tracks files written on the destination for an in-flight COLD
 	// migration (keyed by session id) so an aborted copy can be cleaned up exactly,
 	// without globbing.
@@ -152,7 +160,7 @@ type Manager struct {
 }
 
 func NewManager(cfg *config.Config, d *db.DB) *Manager {
-	return &Manager{cfg: cfg, db: d, incoming: map[string]*os.Process{},
+	return &Manager{cfg: cfg, db: d, incoming: map[string]*os.Process{}, incomingNet: map[string]receiverNet{},
 		coldStaged: map[string][]string{}, blockExport: map[string]blockExportRec{}, blockTarget: map[string]string{},
 		pinned: map[string][]int{}}
 }
@@ -1696,6 +1704,10 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 	if err != nil {
 		return qemu.Spec{}, fmt.Errorf("can't migrate: %w", err)
 	}
+	ref, err := m.PortGroupRefFor(s)
+	if err != nil {
+		return qemu.Spec{}, fmt.Errorf("can't migrate: %w", err)
+	}
 	srcArgs := procArgs(s.PID)
 	userNet := plan.UserNet
 	if u, known := userNetFromArgs(srcArgs); known {
@@ -1731,6 +1743,8 @@ func (m *Manager) ReceiverSpec(id string) (qemu.Spec, error) {
 		VGA:         s.VGA,
 		Windows:     s.OSType == "windows",
 		GuestAgent:  s.GuestAgent,
+		// The destination attaches the NIC to its own copy of this port group.
+		PortGroup: ref,
 	}
 	// Display backend + the shared virtio-serial controller must match the
 	// source's device topology, so mirror spice/guest-agent channels.
@@ -1808,6 +1822,18 @@ func (m *Manager) LaunchReceiver(specB64 string, port int) (int, error) {
 	if err := m.prepareReceiverSpec(&spec); err != nil {
 		return 0, err
 	}
+	// The NIC goes on this node's copy of the VM's port group, before the
+	// stream starts (a receiver with no tap resumes the guest offline).
+	rn, err := m.attachReceiverNIC(&spec)
+	if err != nil {
+		return 0, fmt.Errorf("can't receive this instance: %w", err)
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			m.detachReceiverNIC(spec.ID, rn)
+		}
+	}()
 	logPath := qemu.LogPath(m.cfg.Paths.DiskDir, "recv-"+spec.ID)
 	proc, err := qemu.Launch(spec, logPath)
 	if err != nil {
@@ -1824,9 +1850,8 @@ func (m *Manager) LaunchReceiver(specB64 string, port int) (int, error) {
 	}
 	// Remember the receiver process so AdoptMigrated can record its real pid when
 	// the source commits the migration.
-	m.incomingMu.Lock()
-	m.incoming[spec.ID] = proc
-	m.incomingMu.Unlock()
+	m.trackIncoming(spec.ID, proc, rn)
+	launched = true
 	return port, nil
 }
 
@@ -1872,13 +1897,13 @@ func readLogTail(path string, n int) string {
 // back). The runtime fields (pid/qmp/ports) come from the launched receiver and
 // the shipped record.
 func (m *Manager) AdoptMigrated(s *Session) error {
-	m.incomingMu.Lock()
-	proc := m.incoming[s.ID]
-	delete(m.incoming, s.ID)
-	m.incomingMu.Unlock()
+	proc, rn, _ := m.takeIncoming(s.ID)
 	if proc == nil {
 		return fmt.Errorf("no incoming migration receiver for %s", s.ID)
 	}
+	// The port group the receiver was attached to here (resolved before the
+	// stream, so this can't fail now); the shipped id is the source node's.
+	s.NetworkID = rn.NetID
 	ci := 0
 	if s.CloudInit {
 		ci = 1
@@ -1903,7 +1928,7 @@ func (m *Manager) AdoptMigrated(s *Session) error {
 		ON CONFLICT(id) DO UPDATE SET state='running',deleted_at=NULL,
 		 pid=excluded.pid,pid_start_time=excluded.pid_start_time,qmp_socket=excluded.qmp_socket,
 		 vnc_port=excluded.vnc_port,ws_port=excluded.ws_port,vnc_password=excluded.vnc_password,
-		 spice_port=excluded.spice_port,node_id=excluded.node_id`,
+		 spice_port=excluded.spice_port,node_id=excluded.node_id,network_id=excluded.network_id`,
 		s.ID, s.Name, s.OrgID, s.OwnerID, s.ImageName, s.DiskPath, s.Kind, s.Firmware, s.OVMFVarsPath, nullIf0(s.BootISOID), s.MAC,
 		s.CPUs, s.MemoryMB, s.DiskGB, ci, s.CIUsername, s.CIPassword, s.CISSHKey, s.SeedPath, s.Passthrough,
 		nullIf0(s.NetworkID), s.Display, s.DiskBackend, nullIf0(s.PoolID),
@@ -1925,6 +1950,20 @@ func (m *Manager) AdoptColdMigrated(s *Session) error {
 	if fi, err := os.Stat(s.DiskPath); err != nil || fi.IsDir() {
 		return fmt.Errorf("cold migrate: disk not present on destination (%s): %v", s.DiskPath, err)
 	}
+	// Bind this node's copy of the VM's port group (the shipped id is the
+	// source's) and keep the guest's address; refusing leaves the source as is.
+	if err := m.CheckMigrationTarget(s); err != nil {
+		return fmt.Errorf("cold migrate: %w", err)
+	}
+	netID, _ := m.migratedNetwork(s)
+	lease := ""
+	if s.PortGroup != nil {
+		lease = s.PortGroup.Lease
+	}
+	if err := m.reserveMigratedLease(netID, s.ID, s.MAC, lease); err != nil {
+		return fmt.Errorf("cold migrate: %w", err)
+	}
+	s.NetworkID = netID
 	ci := 0
 	if s.CloudInit {
 		ci = 1
@@ -1937,26 +1976,30 @@ func (m *Manager) AdoptColdMigrated(s *Session) error {
 		VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?,?,'stopped',?,?,?,?,?,?, ?,?,?,?, ?)
 		ON CONFLICT(id) DO UPDATE SET state='stopped',deleted_at=NULL,
 		 disk_path=excluded.disk_path,ovmf_vars_path=excluded.ovmf_vars_path,seed_path=excluded.seed_path,
-		 pool_id=excluded.pool_id,node_id=excluded.node_id,
+		 pool_id=excluded.pool_id,node_id=excluded.node_id,network_id=excluded.network_id,
 		 pid=NULL,pid_start_time=NULL,qmp_socket=NULL,vnc_port=NULL,ws_port=NULL,vnc_password=NULL,spice_port=NULL`,
 		s.ID, s.Name, s.OrgID, s.OwnerID, s.ImageName, s.DiskPath, s.Kind, s.Firmware, s.OVMFVarsPath, nullIf0(s.BootISOID), s.MAC,
 		s.CPUs, s.MemoryMB, s.DiskGB, ci, s.CIUsername, s.CIPassword, s.CISSHKey, s.SeedPath, s.Passthrough,
 		nullIf0(s.NetworkID), s.Display, s.DiskBackend, nullIf0(s.PoolID), nid)
-	if err == nil {
-		m.ColdDone(s.ID) // adopted — the staged files are the VM's now, not garbage
+	if err != nil {
+		if lease != "" {
+			m.releaseLeases(s.ID)
+		}
+		return err
 	}
-	return err
+	m.ColdDone(s.ID) // adopted — the staged files are the VM's now, not garbage
+	return nil
 }
 
 // AbortIncoming tears down a migration receiver that will not be committed (the
 // source migration failed), so a half-migrated QEMU is not left running.
 func (m *Manager) AbortIncoming(id string) {
-	m.incomingMu.Lock()
-	proc := m.incoming[id]
-	delete(m.incoming, id)
-	m.incomingMu.Unlock()
+	proc, rn, ok := m.takeIncoming(id)
 	if proc != nil {
 		_ = proc.Kill()
+	}
+	if ok {
+		m.detachReceiverNIC(id, rn)
 	}
 }
 

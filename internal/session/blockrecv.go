@@ -88,6 +88,18 @@ func (m *Manager) LaunchBlockReceiver(specB64 string, migratePort int, bindIP st
 		_ = os.Remove(target)
 		return out, err
 	}
+	// The NIC goes on this node's copy of the VM's port group (LaunchReceiver).
+	rn, err := m.attachReceiverNIC(&spec)
+	if err != nil {
+		_ = os.Remove(target)
+		return out, fmt.Errorf("can't receive this instance: %w", err)
+	}
+	launched := false
+	defer func() {
+		if !launched {
+			m.detachReceiverNIC(spec.ID, rn)
+		}
+	}()
 
 	logPath := qemu.LogPath(m.cfg.Paths.DiskDir, "recv-"+spec.ID)
 	proc, err := qemu.Launch(spec, logPath)
@@ -139,9 +151,8 @@ func (m *Manager) LaunchBlockReceiver(specB64 string, migratePort int, bindIP st
 
 	// Track the receiver (for adopt, recording the real pid) and the export/target
 	// (for teardown + abort cleanup).
-	m.incomingMu.Lock()
-	m.incoming[spec.ID] = proc
-	m.incomingMu.Unlock()
+	m.trackIncoming(spec.ID, proc, rn)
+	launched = true
 	m.blockMu.Lock()
 	m.blockExport[spec.ID] = blockExportRec{qmp: spec.QMPSocket, exportID: exportID, target: target}
 	m.blockTarget[spec.ID] = target
@@ -172,12 +183,12 @@ func (m *Manager) StopBlockExport(id string) {
 func (m *Manager) AbortBlockReceiver(id string) {
 	m.StopBlockExport(id)
 	m.ColdCleanup(id) // remove any aux files (UEFI vars / seed) staged for this move
-	m.incomingMu.Lock()
-	proc := m.incoming[id]
-	delete(m.incoming, id)
-	m.incomingMu.Unlock()
+	proc, rn, ok := m.takeIncoming(id)
 	if proc != nil {
 		_ = proc.Kill()
+	}
+	if ok {
+		m.detachReceiverNIC(id, rn)
 	}
 	m.blockMu.Lock()
 	rec := m.blockExport[id]

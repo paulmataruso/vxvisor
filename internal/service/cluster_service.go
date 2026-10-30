@@ -26,6 +26,40 @@ func (s *Service) AdoptMigratedSession(body []byte) error {
 	return nil
 }
 
+// PrecheckMigration (destination) checks an inbound migration record before the
+// source copies or streams anything: the VM's port group must match one of
+// this node's own and its address must be free here. Changes nothing.
+func (s *Service) PrecheckMigration(body []byte) error {
+	var sess session.Session
+	if err := json.Unmarshal(body, &sess); err != nil {
+		return fmt.Errorf("decode session record: %w", err)
+	}
+	return s.mgr.CheckMigrationTarget(&sess)
+}
+
+// precheckMigration (source) asks dst whether it can take sess. Only the
+// fields the check needs are sent.
+func (s *Service) precheckMigration(dst cluster.Node, sess *session.Session) error {
+	if s.peerc == nil {
+		return errors.New("cluster peer client not configured")
+	}
+	rec, err := json.Marshal(&session.Session{ID: sess.ID, OrgID: sess.OrgID, NetworkID: sess.NetworkID, MAC: sess.MAC, PortGroup: sess.PortGroup})
+	if err != nil {
+		return err
+	}
+	body, code, err := s.peerc.PostBody(peer.BaseURL(dst.Address, peer.APIPort), "/cluster/v1/migrate-precheck", rec)
+	if err != nil {
+		return fmt.Errorf("check %s: %w", dst.Name, err)
+	}
+	if code == 404 {
+		return fmt.Errorf("%s runs an older VXVisor — update every node to the same version before migrating", dst.Name)
+	}
+	if code != 200 {
+		return fmt.Errorf("%s can't take this instance: %s", dst.Name, trimErr(body))
+	}
+	return nil
+}
+
 // AbortMigration tears down a migration receiver on this node (destination) when
 // the source migration failed. Called by the peer API on migrate abort. It uses
 // the block-aware teardown (a superset of AbortIncoming): it also stops any NBD
@@ -214,6 +248,12 @@ func (s *Service) MigrateSession(p *Principal, sessionID string, dstNodeID int64
 	if err != nil {
 		return err
 	}
+	// The destination binds the VM to its own copy of the port group (ids are
+	// node-local); ask it first so a mismatch fails here, not mid-stream.
+	sess.PortGroup = spec.PortGroup
+	if err := s.precheckMigration(dst, sess); err != nil {
+		return err
+	}
 	// Running + LOCAL disk → the NBD + drive-mirror live dance (BlockLive). The
 	// destination pre-creates its own target disk at the source's virtual size; the
 	// source is only read. Shared disk → the plain RAM-only live path.
@@ -290,6 +330,7 @@ func (s *Service) MigrateSession(p *Principal, sessionID string, dstNodeID int64
 		if merr != nil {
 			s.migtr.finish(sessionID, "failed", merr.Error())
 		} else {
+			s.mgr.ReleaseMigratedSource(sessionID) // its tap and leases here
 			s.migtr.finish(sessionID, "completed", "")
 		}
 		s.audit(p, p.OrgID, "session.migrate", "session", sessionID, ip, map[string]any{"dst_node": dstNodeID, "ok": merr == nil})

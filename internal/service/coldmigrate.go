@@ -33,6 +33,16 @@ func (s *Service) coldMigrate(p *Principal, sess *session.Session, src, dst clus
 	if sess.TPM {
 		return errors.New("TPM-backed instances can't be migrated across hosts yet (the TPM state is host-local)")
 	}
+	// The destination binds the VM to its own copy of the port group (ids are
+	// node-local); ask it before copying anything.
+	ref, err := s.mgr.PortGroupRefFor(sess)
+	if err != nil {
+		return fmt.Errorf("can't migrate: %w", err)
+	}
+	sess.PortGroup = ref
+	if err := s.precheckMigration(dst, sess); err != nil {
+		return err
+	}
 	if _, ok := s.migtr.begin(sess.ID, sess.Name, sess.Kind, src.Name, dst.Name); !ok {
 		return errors.New("a migration for this instance is already in progress")
 	}
@@ -72,7 +82,11 @@ func (s *Service) coldHandoffShared(dst cluster.Node, sess *session.Session) err
 		return fmt.Errorf("adopt on %s: HTTP %d: %s", dst.Name, code, trimErr(body))
 	}
 	// Ownership has moved — remove our row. (The disk stays; it is shared.)
-	return s.mgr.DeleteSessionRow(sess.ID)
+	if err := s.mgr.DeleteSessionRow(sess.ID); err != nil {
+		return err
+	}
+	s.mgr.ReleaseMigratedSource(sess.ID)
+	return nil
 }
 
 // coldCopyAndHandoff migrates a stopped VM on LOCAL storage: it streams the disk
@@ -131,6 +145,7 @@ func (s *Service) coldCopyAndHandoff(dst cluster.Node, sess *session.Session) er
 	if derr := s.mgr.DeleteSessionRow(sess.ID); derr != nil {
 		return fmt.Errorf("source row cleanup (VM is live on %s): %w", dst.Name, derr)
 	}
+	s.mgr.ReleaseMigratedSource(sess.ID)
 	s.mgr.RetainDiskAside(sess)
 	return nil
 }

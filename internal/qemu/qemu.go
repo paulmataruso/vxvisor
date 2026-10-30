@@ -104,6 +104,12 @@ type Spec struct {
 	// the source then streams its RAM/device state in over QMP migrate.
 	Incoming string
 
+	// PortGroup names the port group a migrating VM's NIC sits on, by an
+	// identity both nodes share (a networks row id is node-local). The
+	// destination resolves it to its own row and attaches the receiver's tap
+	// there. Never rendered into the command line.
+	PortGroup *PortGroupRef `json:",omitempty"`
+
 	// SerialSock, when set, exposes the guest's first serial port (ttyS0) on a
 	// loopback unix socket so the browser serial console (xterm.js) can attach.
 	// Cloud images and cirros put their login/getty on ttyS0, so this is the
@@ -131,6 +137,20 @@ type Spec struct {
 	// ExtraISO is an optional second cdrom (e.g. the virtio-win driver ISO for
 	// Windows guests), attached read-only after the seed/boot ISOs.
 	ExtraISO string
+}
+
+// PortGroupRef identifies a port group across cluster nodes: its org (account
+// state is replicated, so org ids agree) plus the name, VLAN, VXLAN VNI and
+// subnet that make it the same segment. Name "" means the VM had no port group
+// (the node's global network mode). Lease is the VM's address on it
+// ("ip/prefix"), "" for none.
+type PortGroupRef struct {
+	OrgID int64
+	Name  string `json:",omitempty"`
+	VLAN  int    `json:",omitempty"`
+	VNI   int    `json:",omitempty"`
+	CIDR  string `json:",omitempty"`
+	Lease string `json:",omitempty"`
 }
 
 // HostFwd is a user-mode port forward: host_ip:host_port → guest_port.

@@ -24,6 +24,7 @@ func (s *Server) PeerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /cluster/v1/sessions", g(s.peerSessions))
 	mux.HandleFunc("GET /cluster/v1/migrations", g(s.peerMigrations))
 	mux.HandleFunc("POST /cluster/v1/sessions/{id}/{action}", g(s.peerAction))
+	mux.HandleFunc("POST /cluster/v1/migrate-precheck", g(s.peerMigratePrecheck))
 	mux.HandleFunc("POST /cluster/v1/migrate-recv", g(s.peerMigrateRecv))
 	mux.HandleFunc("POST /cluster/v1/migrate-commit", g(s.peerMigrateCommit))
 	mux.HandleFunc("POST /cluster/v1/migrate-abort", g(s.peerMigrateAbort))
@@ -36,6 +37,17 @@ func (s *Server) PeerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /cluster/v1/console/{id}/ws", g(s.peerConsoleWS))
 	mux.HandleFunc("GET /cluster/v1/serial/{id}/ws", g(s.peerSerialWS))
 	mux.HandleFunc("GET /cluster/v1/health", g(s.peerHealth))
+}
+
+// peerMigratePrecheck (destination) checks an inbound migration record (port
+// group + address) before the source copies or streams anything.
+func (s *Server) peerMigratePrecheck(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err := s.svc.PrecheckMigration(body); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // peerMigrateRecv launches an inbound-migration QEMU on this (destination) node.
