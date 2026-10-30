@@ -120,6 +120,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// per-network config on first upgrade, then recompile both planes so the
 		// NSX-style model is authoritative after a reboot.
 		s.svc.ReensureFirewall()
+		// The host's TCP 179 guard: only configured BGP neighbours and fabric
+		// peers may open a session to bgpd.
+		s.svc.ReensureBGPGuard()
 	}
 	// Autostart flagged VMs — but ONLY after a real HOST reboot, never on a plain
 	// control-plane restart/upgrade (where KillMode=process keeps guests alive and

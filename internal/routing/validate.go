@@ -343,6 +343,14 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if c.Fabric != nil {
+		if err := c.Fabric.Validate(); err != nil {
+			return err
+		}
+		if err := c.validComposition(); err != nil {
+			return err
+		}
+	}
 	if c.BGP.Enabled {
 		if err := ValidASN(c.BGP.ASN); err != nil {
 			return fmt.Errorf("BGP local %w", err)

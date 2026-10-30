@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 )
@@ -145,6 +146,9 @@ type Config struct {
 	// its runtime (e.g. an LXC container on an older distro) so frr-reload.py
 	// doesn't choke on a mismatched banner.
 	FRRVersion string `json:"frr_version,omitempty"`
+	// Fabric is the VXVisor Fabric's BGP EVPN share of the host config (see
+	// fabric.go). Filled at apply time from the fabric's state, never stored.
+	Fabric *Fabric `json:"-"`
 }
 
 // ---- kernel forwarding ---------------------------------------------------
@@ -185,18 +189,44 @@ log syslog informational
 {{end}}{{range .OSPF.Networks}} network {{.CIDR}} area {{.Area}}
 {{end}}exit
 !
-{{end}}{{if .BGP.Enabled}}router bgp {{.BGP.ASN}}
-{{if .BGP.RouterID}} bgp router-id {{.BGP.RouterID}}
-{{end}}{{range .BGP.Neighbors}} neighbor {{.Addr}} remote-as {{.RemoteAS}}
-{{end}} address-family ipv4 unicast
-{{range .BGP.Networks}}  network {{.}}
-{{end}}{{range .BGP.Neighbors}}{{if .RouteMapIn}}  neighbor {{.Addr}} route-map {{.RouteMapIn}} in
+{{end}}{{if .Fabric}}{{range .Fabric.VRFs}}vrf {{.Name}}
+ vni {{.VNI}}
+exit-vrf
+!
+{{end}}{{end}}{{if .BGPOn}}router bgp {{.BGPASN}}
+{{if .BGPRouterID}} bgp router-id {{.BGPRouterID}}
+{{end}} no bgp default ipv4-unicast
+{{range .HostNeighbors}} neighbor {{.Addr}} remote-as {{.RemoteAS}}
+{{end}}{{with .Fabric}} neighbor {{$.PeerGroup}} peer-group
+ neighbor {{$.PeerGroup}} remote-as internal
+ neighbor {{$.PeerGroup}} update-source {{.TEP}}
+{{if .Password}} neighbor {{$.PeerGroup}} password {{.Password}}
+{{end}}{{if .BFD}} neighbor {{$.PeerGroup}} bfd
+{{end}}{{range .Peers}} neighbor {{.}} peer-group {{$.PeerGroup}}
+{{end}}{{end}} address-family ipv4 unicast
+{{range .HostNetworks}}  network {{.}}
+{{end}}{{range .HostNeighbors}}  neighbor {{.Addr}} activate
+{{if .RouteMapIn}}  neighbor {{.Addr}} route-map {{.RouteMapIn}} in
 {{end}}{{if .RouteMapOut}}  neighbor {{.Addr}} route-map {{.RouteMapOut}} out
 {{end}}{{if .PrefixListOut}}  neighbor {{.Addr}} prefix-list {{.PrefixListOut}} out
 {{end}}{{end}} exit-address-family
+{{if .Fabric}} address-family l2vpn evpn
+  neighbor {{.PeerGroup}} activate
+  advertise-all-vni
+ exit-address-family
+{{end}}exit
+!
+{{if .Fabric}}{{range .Fabric.VRFs}}router bgp {{$.BGPASN}} vrf {{.Name}}
+ bgp router-id {{$.BGPRouterID}}
+ address-family ipv4 unicast
+  redistribute connected
+ exit-address-family
+ address-family l2vpn evpn
+  advertise ipv4 unicast
+ exit-address-family
 exit
 !
-{{end}}{{if .EIGRP.Enabled}}router eigrp {{.EIGRP.ASN}}
+{{end}}{{end}}{{end}}{{if .EIGRP.Enabled}}router eigrp {{.EIGRP.ASN}}
 {{if .EIGRP.RouterID}} eigrp router-id {{.EIGRP.RouterID}}
 {{end}}{{range .EIGRP.Networks}} network {{.}}
 {{end}}exit
@@ -215,6 +245,13 @@ type ifaceGroup struct {
 type frrView struct {
 	Config
 	IfaceGroups []ifaceGroup
+	// The one `router bgp` block, composed from the host's BGP and the fabric.
+	BGPOn         bool
+	BGPASN        int
+	BGPRouterID   string
+	HostNeighbors []Neighbor
+	HostNetworks  []string
+	PeerGroup     string
 }
 
 // RenderFRR produces the full frr.conf for the given config. It renders nothing
@@ -260,8 +297,16 @@ func RenderFRR(c Config) (string, error) {
 			groups = append(groups, ifaceGroup{Iface: p.Iface, CIDRs: []string{p.CIDR}, Passive: passive[p.Iface]})
 		}
 	}
+	v := frrView{Config: c, IfaceGroups: groups, PeerGroup: FabricPeerGroup}
+	if c.BGP.Enabled {
+		v.BGPOn, v.BGPASN, v.BGPRouterID = true, c.BGP.ASN, c.BGP.RouterID
+		v.HostNeighbors, v.HostNetworks = c.BGP.Neighbors, c.BGP.Networks
+	}
+	if c.Fabric != nil {
+		v.BGPOn, v.BGPASN, v.BGPRouterID = true, c.Fabric.ASN, c.Fabric.TEP
+	}
 	var b bytes.Buffer
-	if err := frrTmpl.Execute(&b, frrView{Config: c, IfaceGroups: groups}); err != nil {
+	if err := frrTmpl.Execute(&b, v); err != nil {
 		return "", err
 	}
 	return b.String(), nil
@@ -303,11 +348,33 @@ func ApplyFRR(c Config) error {
 	if extra.Len() > 0 {
 		conf += extra.String()
 	}
-	if err := os.WriteFile(frrConfPath, []byte(conf), 0o640); err != nil {
+	// Check the new config with FRR itself (frr-reload --test parses it through
+	// vtysh and diffs it against the running config without applying) BEFORE it
+	// replaces the live file, so a config FRR rejects never lands on disk and the
+	// running routing is untouched. The previous file is kept as .vdxprev.
+	_, _ = run(10*time.Second, "systemctl", "start", "frr")
+	tmp := frrConfPath + ".vdxnew"
+	if err := os.WriteFile(tmp, []byte(conf), 0o640); err != nil {
 		return err
 	}
-	_, _ = run(10*time.Second, "systemctl", "start", "frr")
-	if _, err := os.Stat(frrReloadPy); err == nil {
+	defer os.Remove(tmp)
+	if _, err := run(30*time.Second, "vtysh", "-C", "-f", tmp); err != nil {
+		return fmt.Errorf("FRR rejected the new routing config, nothing was changed: %w", err)
+	}
+	_, haveReload := os.Stat(frrReloadPy)
+	if haveReload == nil {
+		if _, err := run(60*time.Second, frrReloadPy, "--test", "--stdout", tmp); err != nil {
+			return fmt.Errorf("FRR rejected the new routing config, nothing was changed: %w", err)
+		}
+	}
+	if prev, err := os.ReadFile(frrConfPath); err == nil {
+		_ = os.WriteFile(frrConfPath+".vdxprev", prev, 0o640)
+	}
+	keepOwnership(frrConfPath, tmp) // the swap must not change who can read it
+	if err := os.Rename(tmp, frrConfPath); err != nil {
+		return err
+	}
+	if haveReload == nil {
 		out, rerr := run(60*time.Second, frrReloadPy, "--reload", "--stdout", frrConfPath)
 		if rerr != nil {
 			// Tolerate FRR's refusal to delete a stale, non-managed interface node
@@ -322,6 +389,18 @@ func ApplyFRR(c Config) error {
 	}
 	_, err = run(45*time.Second, "systemctl", "restart", "frr")
 	return err
+}
+
+// keepOwnership gives dst the mode and owner of src, when src exists.
+func keepOwnership(src, dst string) {
+	fi, err := os.Stat(src)
+	if err != nil {
+		return
+	}
+	_ = os.Chmod(dst, fi.Mode().Perm())
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		_ = os.Chown(dst, int(st.Uid), int(st.Gid))
+	}
 }
 
 // ifaceRemovalOnly reports whether a frr-reload failure is only FRR refusing to
@@ -430,18 +509,13 @@ func ApplyNAT(c Config) error {
 	if err != nil {
 		return err
 	}
-	// Flush our table first (ignore error if absent), then load the new ruleset.
-	_, _ = run(5*time.Second, "nft", "delete", "table", "inet", "vdxclone")
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(ruleset)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("nft load: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	// Replace the table in ONE checked transaction: a ruleset nft rejects leaves
+	// the old table in place (deleting first used to leave none on a bad load).
+	return nftLoad("table inet vdxclone {}\ndelete table inet vdxclone\n" + ruleset)
 }
 
-// Apply enables forwarding and applies both FRR and nftables. Partial failures
-// are surfaced but it applies as much as it can.
+// Apply enables forwarding and applies the NAT/firewall table, the BGP peer
+// guard and FRR. Partial failures are surfaced but it applies as much as it can.
 func Apply(c Config) error {
 	var errs []string
 	if err := EnableForwarding(); err != nil {
@@ -449,6 +523,9 @@ func Apply(c Config) error {
 	}
 	if err := ApplyNAT(c); err != nil {
 		errs = append(errs, "nat: "+err.Error())
+	}
+	if err := ApplyBGPGuard(c); err != nil {
+		errs = append(errs, "bgp guard: "+err.Error())
 	}
 	if err := ApplyFRR(c); err != nil {
 		errs = append(errs, "frr: "+err.Error())

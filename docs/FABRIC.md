@@ -280,7 +280,7 @@ Full review: the session transcript of 2026-10-30.
 - **(b) Done.** The peer API HMACs the method, path, query, body digest, timestamp and a single-use nonce, and
   MACs its responses; streamed bodies carry a trailer MAC. The admin reverse proxy now signs the user too (it
   was unsigned, so a sniffed header could be replayed as any admin within 30 s).
-- **(c)** One composed FRR renderer for host routing plus fabric, with BGP hygiene:
+- **(c) Done.** One composed FRR renderer for host routing plus fabric (`routing.Config.Fabric`), with BGP hygiene:
   - IPv4 unicast deactivated for fabric peers;
   - router-id and update-source pinned to the TEP;
   - an immutable ASN, BFD, and `frr-reload.py --test` before applying;

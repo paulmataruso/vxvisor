@@ -517,6 +517,18 @@ func (s *Service) DeleteEIGRPNetwork(p *Principal, idx int, ip string) error {
 	})
 }
 
+// ReensureBGPGuard reloads the host's TCP 179 peer guard at boot (the kernel
+// drops nft tables on reboot; frr.service's drop-in reloads the saved copy
+// before bgpd starts, and this brings an upgraded host up to date).
+func (s *Service) ReensureBGPGuard() {
+	if !routing.NFTAvailable() {
+		return
+	}
+	if err := routing.ApplyBGPGuard(s.loadHostRouting()); err != nil {
+		log.Printf("routing: BGP peer guard: %v", err)
+	}
+}
+
 // applyHostRouting applies the host routing config, then re-fences the tenant
 // networks: rewriting the global ip_forward resets every interface's forwarding
 // flag, including the ones that keep the host from routing for a tenant.

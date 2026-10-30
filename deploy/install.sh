@@ -268,11 +268,12 @@ fi
 # ---- routing stack (FRR) -------------------------------------------------
 # vdxd writes /etc/frr/frr.conf and reloads via /usr/lib/frr/frr-reload.py, but
 # FRR ships with every routing daemon DISABLED. Turn on the ones vdxd drives
-# (ospfd/bgpd/eigrpd/staticd) in /etc/frr/daemons, then enable the service. We
-# never touch frr.conf here — that file is owned by vdxd.
+# (ospfd/bgpd/eigrpd/staticd, plus bfdd for the VXVisor Fabric's BFD on its
+# EVPN sessions) in /etc/frr/daemons, then enable the service. We never touch
+# frr.conf here — that file is owned by vdxd.
 if [ -f /etc/frr/daemons ]; then
-  say "Enabling FRR routing daemons (ospfd, bgpd, eigrpd, staticd)"
-  for d in ospfd bgpd eigrpd staticd; do
+  say "Enabling FRR routing daemons (ospfd, bgpd, eigrpd, staticd, bfdd)"
+  for d in ospfd bgpd eigrpd staticd bfdd; do
     if grep -q "^${d}=" /etc/frr/daemons; then
       sed -i "s/^${d}=.*/${d}=yes/" /etc/frr/daemons
     else
@@ -281,6 +282,12 @@ if [ -f /etc/frr/daemons ]; then
   done
   systemctl enable --now frr >/dev/null 2>&1 || true
   echo "  frr: $(systemctl is-active frr 2>/dev/null || echo inactive)"
+  # A running FRR picks up a newly enabled daemon only on restart (watchfrr
+  # can't add one live). We don't restart it here — that would drop live
+  # routing sessions; creating a fabric restarts FRR when bfdd isn't running.
+  if systemctl is-active --quiet frr && ! pgrep -x bfdd >/dev/null; then
+    echo "  note: bfdd is enabled but starts at FRR's next restart"
+  fi
 fi
 
 # netns vRouters run each router's FRR in a pathspace (`-N <id>`), which puts its

@@ -108,7 +108,15 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 - **ZFS registration:** creating a zpool/LVM registers a `storage_pools` row; destroy removes it.
   Use `DeleteStoragePool`/`deleteStoragePool` to remove a storage pool.
 - **FRR:** apply via `/usr/lib/frr/frr-reload.py --reload` (NOT `systemctl reload frr`, which
-  hangs against watchfrr). vdxd owns `/etc/frr/frr.conf` + nft table `inet vdxclone`.
+  hangs against watchfrr). vdxd owns `/etc/frr/frr.conf` + nft table `inet vdxclone`. `ApplyFRR` writes
+  `frr.conf.vdxnew`, gates it with `vtysh -C -f` and `frr-reload.py --test`, keeps `frr.conf.vdxprev`, and only
+  then swaps it in (mode/owner preserved): a config FRR rejects never touches the live file. `ApplyNAT` replaces
+  its table in one checked nft transaction. One `router bgp` block is composed from the host's /routing BGP
+  and `Config.Fabric` (the fabric's EVPN section, filled at apply time, `json:"-"`, never stored): same AS,
+  router-id = TEP, `no bgp default ipv4-unicast` with explicit `activate` for host neighbours, fabric peers in
+  peer-group `VXFABRIC` (l2vpn evpn only). vdxd also owns `inet vdxbgp` — inbound TCP 179 only from configured
+  neighbours + fabric TEPs — saved to `/etc/vdxclone/bgp-guard.nft` and loaded by an `frr.service` drop-in
+  before bgpd starts (and at vdxd boot). install.sh enables bfdd (starts on FRR's next restart).
 - **ISO upload** streams via `r.MultipartReader()` (NO `ParseMultipartForm`/`FormFile` — those
   buffer to `os.TempDir()` which is tmpfs/RAM and OOM-kills on multi-GB ISOs). Form field order:
   csrf, name, file. `TMPDIR` is set to disk in the systemd unit.
