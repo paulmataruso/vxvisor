@@ -272,6 +272,98 @@ func TestLab(t *testing.T) {
 	t.Logf("fh1 BFD:\n%s", bfd)
 	t.Logf("fh1 EVPN:\n%s", evpn)
 
+	// ---- distributed firewall, rendered from an intent describing this lab ----
+	const labFab = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	pg := func(n int) string { return fmt.Sprintf("bbbbbbbb-bbbb-4bbb-8bbb-%012d", n) }
+	intent := Intent{
+		Fabrics: []Spec{{UUID: labFab, Name: "lab", ASN: labASN, MTU: labMTU + 50, Hosts: []Host{
+			{Node: "fh1", Iface: "u0", TEP: "10.250.0.1/24"}, {Node: "fh2", Iface: "u0", TEP: "10.250.0.2/24"}}}},
+		PGs: []PortGroup{
+			{UUID: pg(100), Fabric: labFab, Org: 1, Name: "a", VNI: 100, CIDR: "10.10.1.0/24", Gateway: "10.10.1.1"},
+			{UUID: pg(200), Fabric: labFab, Org: 1, Name: "b", VNI: 200, CIDR: "10.10.2.0/24", Gateway: "10.10.2.1"},
+			{UUID: pg(300), Fabric: labFab, Org: 1, Name: "l2", VNI: 300},
+			{UUID: pg(400), Fabric: labFab, Org: 2, Name: "a", VNI: 400, CIDR: "10.10.1.0/24", Gateway: "10.10.1.1"},
+		},
+		VRFs: []VRF{{Fabric: labFab, Org: 1, L3VNI: 4000001}, {Fabric: labFab, Org: 2, L3VNI: 4000002}},
+	}
+	loadFW := func() {
+		t.Helper()
+		if err := intent.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		for h := range teps {
+			fw, err := Firewall(&intent, h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("ip", "netns", "exec", h, "nft", "-f", "-")
+			cmd.Stdin = strings.NewReader(fw)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s firewall: %v %s\n%s", h, err, out, fw)
+			}
+		}
+	}
+	// A TCP service inside org 1's VRF on fh1, reachable before the firewall.
+	listen := exec.Command("ip", "netns", "exec", "fh1", "ip", "vrf", "exec", VRFName(1), "python3", "-c",
+		"import socket\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind(('0.0.0.0',9999))\ns.listen(8)\nwhile True: s.accept()[0].close()")
+	if err := listen.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listen.Process.Kill(); _ = listen.Wait() }()
+	time.Sleep(time.Second)
+	tcp := func(ns, dst string) error {
+		_, err := ex.Run(in(ns, "python3", "-c", "import socket,sys\nsocket.create_connection((sys.argv[1],9999),timeout=2)", dst)...)
+		return err
+	}
+	if err := tcp("vm1", "10.10.1.1"); err != nil {
+		t.Fatalf("lab precondition: the VRF service isn't reachable without the firewall: %v", err)
+	}
+
+	loadFW() // no rules: deny between port groups
+	for _, c := range []struct{ name, ns, dst string }{
+		{"FW: inside a port group, across hosts", "vm1", "10.10.1.20"},
+		{"FW: gateway ping", "vm1", "10.10.1.1"},
+		{"FW: org 2 inside its port group", "vm7", "10.10.1.20"},
+		{"FW: L2-only", "vm5", "10.30.0.6"},
+	} {
+		if err := ping(c.ns, c.dst); err != nil {
+			t.Errorf("%s (%s → %s): %v", c.name, c.ns, c.dst, err)
+		}
+	}
+	if !noPing("vm1", "10.10.2.30") || !noPing("vm1", "10.10.2.40") {
+		t.Errorf("FW: port group a reached b with no rule")
+	}
+	if tcp("vm1", "10.10.1.1") == nil {
+		t.Errorf("FW: a guest reached a host TCP service in its VRF")
+	}
+	if out, err := ex.Run(in("vm4", "busybox", "udhcpc", "-i", "eth0", "-n", "-q", "-t", "5", "-s", "/bin/true")...); err != nil ||
+		!strings.Contains(out, "10.10.2.40") {
+		t.Errorf("FW: DHCP blocked: %v\n%s", err, out)
+	}
+
+	intent.Rules = []Rule{{UUID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Fabric: labFab, Org: 1, Src: pg(100), Dst: pg(200), Proto: "icmp"}}
+	loadFW() // a → b ping, one way
+	if err := ping("vm1", "10.10.2.30"); err != nil {
+		t.Errorf("FW: rule a→b icmp, across hosts: %v", err)
+	}
+	if err := ping("vm1", "10.10.2.40"); err != nil {
+		t.Errorf("FW: rule a→b icmp, same host: %v", err)
+	}
+	if !noPing("vm3", "10.10.1.10") {
+		t.Errorf("FW: one-way rule allowed b → a")
+	}
+	if !noPing("vm7", "10.10.2.30") {
+		t.Errorf("FW: org 2 used org 1's rule")
+	}
+	intent.Rules[0].Both = true
+	loadFW()
+	if err := ping("vm3", "10.10.1.10"); err != nil {
+		t.Errorf("FW: two-way rule b → a: %v", err)
+	}
+	if fw, _ := ex.Run(in("fh1", "nft", "list", "chain", "inet", FirewallTable, "org1")...); !strings.Contains(fw, "packets") {
+		t.Errorf("FW: no counters:\n%s", fw)
+	}
+
 	// Prune: dropping the L2-only segment removes exactly its two devices.
 	p := plan("fh1")
 	p.Segments = p.Segments[:2]
