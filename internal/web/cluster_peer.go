@@ -8,8 +8,10 @@ import (
 )
 
 // Node-to-node cluster API (served on a SEPARATE listener bound to the cluster
-// NIC, see cmd/vdxd). Every route is HMAC-authenticated with the shared cluster
-// secret via peer.Auth.Middleware, so it is reachable only by cluster peers.
+// NIC, see cmd/vdxd). Every request is HMAC-authenticated (method, path, query,
+// body, single-use nonce) with keys derived from the shared cluster secret via
+// peer.Auth.Middleware, and every response carries a MAC, so it is reachable
+// only by cluster peers and its answers can't be forged in transit.
 
 // SetClusterPeer installs the shared-secret authenticator for the peer API.
 func (s *Server) SetClusterPeer(secret []byte) { s.clusterAuth = peer.NewAuth(secret) }
@@ -29,7 +31,7 @@ func (s *Server) PeerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/v1/migrate-commit", g(s.peerMigrateCommit))
 	mux.HandleFunc("POST /cluster/v1/migrate-abort", g(s.peerMigrateAbort))
 	mux.HandleFunc("POST /cluster/v1/migrate-cold-commit", g(s.peerMigrateColdCommit))
-	mux.HandleFunc("POST /cluster/v1/cold-disk-recv", g(s.peerColdDiskRecv))
+	mux.HandleFunc("POST /cluster/v1/cold-disk-recv", s.clusterAuth.MiddlewareStream(s.peerColdDiskRecv))
 	mux.HandleFunc("POST /cluster/v1/cold-cleanup", g(s.peerColdCleanup))
 	mux.HandleFunc("POST /cluster/v1/migrate-recv-block", g(s.peerMigrateRecvBlock))
 	mux.HandleFunc("POST /cluster/v1/migrate-nbd-stop", g(s.peerMigrateNBDStop))

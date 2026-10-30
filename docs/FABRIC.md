@@ -277,7 +277,9 @@ Full review: the session transcript of 2026-10-30.
   `network_id` by port-group identity (org + name + VLAN + VNI + subnet, `qemu.PortGroupRef`): exactly one local
   match or the move is refused, and the guest's address is reserved on the destination. A precheck runs before any
   copy or stream. Fabric PGs will add their UUID to that identity once they exist.
-- **(b)** The peer API HMACs the method, path, body and timestamp, and MACs its responses.
+- **(b) Done.** The peer API HMACs the method, path, query, body digest, timestamp and a single-use nonce, and
+  MACs its responses; streamed bodies carry a trailer MAC. The admin reverse proxy now signs the user too (it
+  was unsigned, so a sniffed header could be replayed as any admin within 30 s).
 - **(c)** One composed FRR renderer for host routing plus fabric, with BGP hygiene:
   - IPv4 unicast deactivated for fabric peers;
   - router-id and update-source pinned to the TEP;

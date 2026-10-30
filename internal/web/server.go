@@ -3,6 +3,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -435,9 +436,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 func (s *Server) auth(h func(http.ResponseWriter, *http.Request, *service.Principal)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Cluster-admin reverse-proxy: another node forwarding an admin's action
-		// from the VIP. Trusted via the shared-secret HMAC header.
-		if p := s.clusterAdminPrincipal(r); p != nil {
-			h(w, r, p)
+		// from the VIP. Trusted via the shared-secret HMAC header (which covers the
+		// method, path, query, body and user), and the response is MAC'd back.
+		if p, sig := s.clusterAdminPrincipal(r); p != nil {
+			s.clusterAuth.ServeSigned(w, sig, func(w http.ResponseWriter) { h(w, r, p) })
 			return
 		}
 		p := s.svc.Principal(r)
@@ -571,22 +573,23 @@ func (s *Server) checkCSRF(p *service.Principal, r *http.Request) bool {
 
 func (s *Server) badCSRF(w http.ResponseWriter) { http.Error(w, "bad csrf token", http.StatusForbidden) }
 
-// clusterAdminPrincipal returns a trusted admin principal when the request
-// carries a valid cluster-admin reverse-proxy signature (another node forwarding
-// an admin's action from the VIP), else nil.
-func (s *Server) clusterAdminPrincipal(r *http.Request) *service.Principal {
-	if s.clusterAuth == nil {
-		return nil
+// clusterAdminPrincipal returns a trusted admin principal, and the request
+// signature its response must be MAC'd with, when the request carries a valid
+// cluster-admin reverse-proxy signature (another node forwarding an admin's
+// action from the VIP), else nil.
+func (s *Server) clusterAdminPrincipal(r *http.Request) (*service.Principal, string) {
+	if s.clusterAuth == nil || r.Header.Get(peer.AdminHeader) == "" {
+		return nil, ""
 	}
-	sig := r.Header.Get("X-Cluster-Admin")
-	user := r.Header.Get("X-Cluster-Admin-User")
-	if sig == "" || user == "" {
-		return nil
+	user, sig, ok := s.clusterAuth.VerifyAdmin(r)
+	if !ok {
+		return nil, ""
 	}
-	if !s.clusterAuth.Verify(sig, r.URL.Path, 30*time.Second) {
-		return nil
+	p := s.svc.TrustedAdminPrincipal(user)
+	if p == nil {
+		return nil, ""
 	}
-	return s.svc.TrustedAdminPrincipal(user)
+	return p, sig
 }
 
 // vmManage wraps a VM-scoped admin handler so that, on the VIP, a request for a
@@ -627,7 +630,13 @@ func (s *Server) proxyToOwner(w http.ResponseWriter, r *http.Request, p *service
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequest(r.Method, target, r.Body)
+	// The body is signed, so it is buffered (the proxied routes are small forms).
+	body, err := io.ReadAll(io.LimitReader(r.Body, proxyMaxBody+1))
+	if err != nil || len(body) > proxyMaxBody {
+		http.Error(w, "request too large to forward to the owning node", http.StatusRequestEntityTooLarge)
+		return
+	}
+	req, err := http.NewRequest(r.Method, target, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -635,8 +644,7 @@ func (s *Server) proxyToOwner(w http.ResponseWriter, r *http.Request, p *service
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		req.Header.Set("Content-Type", ct)
 	}
-	req.Header.Set("X-Cluster-Admin", s.clusterAuth.Header(r.URL.Path))
-	req.Header.Set("X-Cluster-Admin-User", p.User.Username)
+	sig := s.clusterAuth.SignAdmin(req, p.User.Username, body)
 	cl := &http.Client{
 		Timeout:       45 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -647,14 +655,25 @@ func (s *Server) proxyToOwner(w http.ResponseWriter, r *http.Request, p *service
 		return
 	}
 	defer resp.Body.Close()
+	rb, err := io.ReadAll(io.LimitReader(resp.Body, proxyMaxResponse+1))
+	if err != nil || len(rb) > proxyMaxResponse || !s.clusterAuth.CheckResponse(sig, resp.StatusCode, resp.Header, rb) {
+		http.Error(w, "the owning node's response failed cluster authentication", http.StatusBadGateway)
+		return
+	}
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(rb)
 }
+
+// Admin reverse-proxy limits: proxied requests are VM forms, responses pages.
+const (
+	proxyMaxBody     = 1 << 20
+	proxyMaxResponse = 32 << 20
+)
 
 // requestOnVIP reports whether this request arrived on the floating management
 // VIP (as opposed to the node's own mgmt IP). The admin listener binds 0.0.0.0,

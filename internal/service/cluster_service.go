@@ -48,11 +48,14 @@ func (s *Service) precheckMigration(dst cluster.Node, sess *session.Session) err
 		return err
 	}
 	body, code, err := s.peerc.PostBody(peer.BaseURL(dst.Address, peer.APIPort), "/cluster/v1/migrate-precheck", rec)
-	if err != nil {
-		return fmt.Errorf("check %s: %w", dst.Name, err)
-	}
 	if code == 404 {
 		return fmt.Errorf("%s runs an older VXVisor — update every node to the same version before migrating", dst.Name)
+	}
+	if code == 403 && errors.Is(err, peer.ErrResponseAuth) {
+		return fmt.Errorf("%s rejected this node's cluster signature (an older VXVisor, or a different cluster key) — update every node to the same version", dst.Name)
+	}
+	if err != nil {
+		return fmt.Errorf("check %s: %w", dst.Name, err)
 	}
 	if code != 200 {
 		return fmt.Errorf("%s can't take this instance: %s", dst.Name, trimErr(body))

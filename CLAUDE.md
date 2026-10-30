@@ -287,6 +287,14 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   - Routing and FRR changes are applied first and saved only on success.
   - Tenant gateways export only their downlinks.
 
+- **Peer API / admin-proxy signing v2** (`internal/peer`). Every node-to-node request is HMAC'd over
+  method + path + raw query + body SHA-256 + timestamp + single-use nonce (30 s window, replay cache), with
+  per-direction keys derived from `cluster.key`; every response carries a MAC bound to its request (status,
+  body, Location/Set-Cookie/Content-Type). Streamed bodies (`cold-disk-recv`, `MiddlewareStream`) carry a
+  trailer MAC checked at EOF — the handler must read to the end and treat a read error as rejection before it
+  commits. The VIP→owner admin reverse proxy (`X-Cluster-Admin`) signs the same fields plus the user. v1
+  headers are refused: all nodes must run the same version. WebSocket upgrades are authenticated but their
+  responses aren't MAC'd (hijacked).
 - **Cross-node migration network binding** (`session/migratenet.go`). A `networks` row id is node-local
   (port groups and leases are NOT replicated; orgs are). A migrating VM's port group travels as
   `qemu.PortGroupRef` (org + name + VLAN + VNI + CIDR + its lease); the destination binds its OWN unique

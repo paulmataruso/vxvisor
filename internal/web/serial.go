@@ -71,7 +71,7 @@ func (s *Server) relaySerial(w http.ResponseWriter, r *http.Request, ownerAddr, 
 	}
 	url := "ws://" + net.JoinHostPort(host, strconv.Itoa(peer.APIPort)) + path
 	hdr := http.Header{}
-	hdr.Set("X-Cluster-Auth", s.clusterAuth.Header(path))
+	s.clusterAuth.SetHeader(hdr, http.MethodGet, path, "")
 	dialer := websocket.Dialer{Subprotocols: []string{"binary"}, HandshakeTimeout: 8 * time.Second}
 	up, _, derr := dialer.Dial(url, hdr)
 	if derr != nil {
