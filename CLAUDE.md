@@ -65,8 +65,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **59**
-  (`ovirt-disks`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **60**
+  (`fabric`). Add `{N, "name", "SQL"}`.
 - **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
   inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
   quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
@@ -348,3 +348,16 @@ host's Claude memory is snapshotted in **`.claude-memory/`** (gitignored — con
 IPs/creds, so it is NEVER committed; it travels only via a manual folder copy). Read
 `.claude-memory/MEMORY.md` first for the index, then the per-topic files. Treat anything in
 there about hosts/IPs/credentials as **stale** until re-verified on the new host.
+
+- **VXVisor Fabric** (migration 60, `docs/FABRIC.md` §14–15): multi-host BGP EVPN / VXLAN with
+  distributed L3 (per-org VRF + L3VNI, anycast gateway on every host) and a distributed firewall. Packages:
+  `internal/fabric` (intent, plan, data plane, firewall, DHCP, 2PC), `service/fabric_*.go`, `web/fabric_*.go`,
+  `/fabric` page. Invariants:
+  - The intent is ONE replicated document; change it only via `fabricChange` (unanimous 2PC). Never write
+    `fabric_intent` directly.
+  - Reconcile is desired-state and idempotent; vdxd owns devices `vxf*`, nft `inet vdxfabric` + `bridge
+    vdxfabric`, the fabric VNIs in `inet vdxvxlan`, and the fabric part of the one composed FRR config
+    (`applyHostRouting` sets `c.Fabric`).
+  - Fabric `networks` rows (`mode='fabric'`) belong to the fabric: the generic port-group paths refuse them.
+  - A fabric gateway router leg sits on the fabric's bridge: never delete it through the generic leg paths.
+  - Live E2E: `VDX_E2E_DB=… VDX_E2E_FABRIC=1` as root on a host with vdxd running (the daemon realizes it).

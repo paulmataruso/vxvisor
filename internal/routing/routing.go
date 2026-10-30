@@ -191,7 +191,8 @@ log syslog informational
 !
 {{end}}{{if .Fabric}}{{range .Fabric.VRFs}}vrf {{.Name}}
  vni {{.VNI}}
-exit-vrf
+{{if .Egress}} ip route 0.0.0.0/0 {{.Egress}}
+{{end}}exit-vrf
 !
 {{end}}{{end}}{{if .BGPOn}}router bgp {{.BGPASN}}
 {{if .BGPRouterID}} bgp router-id {{.BGPRouterID}}

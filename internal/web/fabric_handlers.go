@@ -56,6 +56,8 @@ type fabricCard struct {
 	Egress   string
 	HasVRF   bool
 	Health   map[string]service.FabricNodeStatus
+	Gateway  *service.FabricGateway // the caller org's connected router, if any
+	GwPGName string
 }
 
 // lastFabricChecks keeps a deploy's check list for the page shown right after
@@ -107,6 +109,7 @@ func (s *Server) fabricPage(w http.ResponseWriter, r *http.Request, p *service.P
 		"Orgs":     orgs,
 		"NICsJSON": template.JS(nicsJSON),
 		"Checks":   checks,
+		"Routers":  s.svc.FabricRouterChoices(p),
 	})
 }
 
@@ -120,6 +123,9 @@ func fabricCards(p *service.Principal, v service.FabricView, orgName map[int64]s
 	var cards []fabricCard
 	for _, f := range in.Fabrics {
 		c := fabricCard{Spec: f, GuestMTU: f.GuestMTU(), Build: v.Build[f.UUID], Health: health, Egress: v.Egress[f.UUID]}
+		if g, ok := v.Gateways[f.UUID]; ok {
+			c.Gateway, c.GwPGName = &g, pgName[g.PG]
+		}
 		_, c.HasVRF = v.VRF[f.UUID]
 		var on []string
 		for _, o := range f.Orgs {
@@ -386,4 +392,21 @@ func (s *Server) fabricEgress(w http.ResponseWriter, r *http.Request, p *service
 		return
 	}
 	s.fabricBack(w, r, s.svc.SetFabricEgress(p, r.PathValue("id"), r.FormValue("egress"), clientIP(r)), "Egress updated.")
+}
+
+func (s *Server) fabricGatewayConnect(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	err := s.svc.ConnectFabricGateway(p, atoi(r.FormValue("router")), r.FormValue("pg"), r.FormValue("addr"), clientIP(r))
+	s.fabricBack(w, r, err, "Gateway connected: every host now routes the organization's outbound traffic to it.")
+}
+
+func (s *Server) fabricGatewayDisconnect(w http.ResponseWriter, r *http.Request, p *service.Principal) {
+	if !s.checkCSRF(p, r) {
+		s.badCSRF(w)
+		return
+	}
+	s.fabricBack(w, r, s.svc.DisconnectFabricGateway(p, r.PathValue("id"), clientIP(r)), "Gateway disconnected.")
 }

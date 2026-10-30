@@ -769,7 +769,11 @@ func (in *Intent) Routing(node, password string) *routing.Fabric {
 	sort.Strings(r.Peers)
 	plan, _ := in.HostPlan(node)
 	for _, v := range plan.VRFs {
-		r.VRFs = append(r.VRFs, routing.FabricVRF{Name: VRFName(v.Org), VNI: v.L3VNI})
+		fv := routing.FabricVRF{Name: VRFName(v.Org), VNI: v.L3VNI}
+		if vrf := in.VRFOf(f.UUID, v.Org); vrf != nil {
+			fv.Egress = vrf.Egress
+		}
+		r.VRFs = append(r.VRFs, fv)
 	}
 	return r
 }

@@ -44,6 +44,8 @@ type fabricRT struct {
 
 	relMu   sync.Mutex
 	release map[string]int64 // session → network id (0 = all) whose lease release failed; retried
+
+	gwRoutes map[int64]string // gateway router → fabric routes last pushed (RunFabric only)
 }
 
 // selfNode is this node's name in the fabric intent (the cluster node name).
@@ -62,6 +64,7 @@ func (s *Service) fabricRT() *fabricRT {
 	s.fab.once.Do(func() {
 		s.fab.kick = make(chan struct{}, 1)
 		s.fab.release = map[string]int64{}
+		s.fab.gwRoutes = map[int64]string{}
 		s.fab.mem = &fabric.Member{
 			Store:   fabricDB{s},
 			Check:   s.fabricCheck,

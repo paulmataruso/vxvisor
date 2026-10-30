@@ -62,7 +62,7 @@
       <td class="mono"><strong>{{.Node}}</strong>{{if eq .Node $.V.Self}} <span class="pill">this host</span>{{end}}</td>
       <td class="mono">{{.UnderlayDev}}</td>
       <td class="mono">{{.TEP}}</td>
-      <td>{{if eq $h.State "ok"}}<span class="pill running">● ok</span>{{else if eq $h.State "error"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● error</span>{{else if eq $h.State "unreachable"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● unreachable</span>{{else}}<span class="pill">● applying</span>{{end}}{{if and $h.State (not $h.BFD) (ne $h.State "unreachable")}} <span class="pill" title="bfdd isn't running: BFD is off until FRR restarts with bfdd (install.sh enables it)">no BFD</span>{{end}}</td>
+      <td>{{if eq $h.State "ok"}}<span class="pill running">● ok</span>{{else if eq $h.State "error"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● error</span>{{else if eq $h.State "unreachable"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● unreachable</span>{{else}}<span class="pill">● applying</span>{{end}}{{if and $h.State (not $h.BFD) (ne $h.State "unreachable")}} <span class="pill" title="bfdd isn't running: BFD is off until FRR restarts with bfdd (install.sh enables it)">no BFD</span>{{end}}{{if $h.DupAddrs}} <span class="pill" style="color:var(--warn)" title="EVPN froze these MACs / addresses: seen moving between hosts too often (a loop or a duplicate). {{range $h.DupAddrs}}{{.}} {{end}}">⚠ {{len $h.DupAddrs}} duplicate</span>{{end}}{{if $h.Drops}} <span class="pill" title="VXLAN packets from a source that isn't a fabric host, dropped by the ingress guard">{{$h.Drops}} dropped</span>{{end}}</td>
       <td class="mono" style="font-size:12px">{{range $h.BGP}}{{.Peer}} {{if eq .State "Established"}}<span style="color:var(--ok,#1a7f37)">up {{.Uptime}}</span>{{else}}<span style="color:var(--danger)">{{.State}}</span>{{end}}<br>{{else}}{{if gt (len $c.Hosts) 1}}<span class="muted">none</span>{{else}}<span class="muted">single host</span>{{end}}{{end}}</td>
       <td style="text-align:right">
         <form method="post" action="/fabric/f/{{$c.UUID}}/host-remove" style="display:inline" onsubmit="return confirm('Remove {{.Node}} from {{$c.Name}}? Refused while anything on that host uses a fabric port group.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="node" value="{{.Node}}"><button class="btn sm">Remove</button></form>
@@ -122,10 +122,27 @@
 
   {{if and $c.Build $c.HasVRF}}
   <div class="card-head" style="margin-top:16px"><h3 style="margin:0">Egress</h3></div>
-  <p class="muted" style="margin:0 0 8px;font-size:12.5px">Traffic leaving the fabric goes to your tenant gateway: give the address its interface holds on one of your routed fabric port groups. Every host routes the organization's outbound traffic there. A rule to <b>External</b> then allows it.</p>
-  <form method="post" action="/fabric/f/{{$c.UUID}}/egress" style="display:flex;gap:8px;align-items:center"><input type="hidden" name="csrf" value="{{$.CSRF}}">
-    <input type="text" name="egress" value="{{$c.Egress}}" placeholder="10.10.0.254" style="max-width:200px" class="mono">
-    <button class="btn sm primary">Save</button>{{if $c.Egress}}<span class="muted" style="font-size:12px">Clearing it also removes the rules to and from External.</span>{{end}}</form>
+  <p class="muted" style="margin:0 0 8px;font-size:12.5px">Traffic leaving the fabric goes to your tenant gateway, which sits on one of your routed port groups. Every host routes the organization's outbound traffic there. A rule to <b>External</b> then allows it.</p>
+  {{with $c.Gateway}}
+  <form method="post" action="/fabric/f/{{$c.UUID}}/gateway-disconnect" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" onsubmit="return confirm('Disconnect router {{.VRouter}}? Outbound traffic stops, and the rules to and from External are removed.')"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <span>Gateway: router <strong>{{.VRouter}}</strong> at <span class="mono">{{.Addr}}</span> on {{$c.GwPGName}}</span>
+    <button class="btn sm danger">Disconnect</button></form>
+  {{else}}
+  {{if $.Routers}}
+  <form method="post" action="/fabric/f/{{$c.UUID}}/gateway" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <span>Connect router</span>
+    <select name="router" style="max-width:180px">{{range $.Routers}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
+    <span>on</span>
+    <select name="pg" style="max-width:220px">{{range $c.Routed}}<option value="{{.UUID}}">{{.Name}} ({{.CIDR}})</option>{{end}}</select>
+    <span>at</span>
+    <input type="text" name="addr" placeholder="10.10.1.254" style="max-width:150px" class="mono" required title="The router's own address on that port group (not its gateway). It becomes the egress.">
+    <button class="btn sm primary">Connect</button></form>
+  {{end}}
+  <form method="post" action="/fabric/f/{{$c.UUID}}/egress" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <span>{{if $.Routers}}Or an appliance (a VM) at{{else}}Gateway appliance (a VM) at{{end}}</span>
+    <input type="text" name="egress" value="{{$c.Egress}}" placeholder="10.10.0.254" style="max-width:150px" class="mono">
+    <button class="btn sm">Save</button>{{if $c.Egress}}<span class="muted" style="font-size:12px">Clearing it also removes the rules to and from External.</span>{{end}}</form>
+  {{end}}
   {{end}}
 </div>
 

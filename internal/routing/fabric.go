@@ -30,8 +30,9 @@ type Fabric struct {
 
 // FabricVRF is one org's routing domain: a kernel VRF device and its L3VNI.
 type FabricVRF struct {
-	Name string // VRF device, e.g. vdxv12
-	VNI  int    // L3VNI (symmetric IRB)
+	Name   string // VRF device, e.g. vdxv12
+	VNI    int    // L3VNI (symmetric IRB)
+	Egress string // next hop of the VRF's default route ("" = none): the org's tenant gateway
 }
 
 // FabricPeerGroup names the fabric's BGP peer-group in frr.conf.
@@ -70,6 +71,9 @@ func (f *Fabric) Validate() error {
 		}
 		if v.VNI < 1 || v.VNI > MaxVNI {
 			return fmt.Errorf("fabric VRF %s: VNI %d is out of range 1-%d", v.Name, v.VNI, MaxVNI)
+		}
+		if v.Egress != "" && !IsIPv4(v.Egress) {
+			return fmt.Errorf("fabric VRF %s: egress %q is not an IPv4 address", v.Name, v.Egress)
 		}
 		if names[v.Name] || vnis[v.VNI] {
 			return fmt.Errorf("fabric VRF %s / VNI %d is not unique", v.Name, v.VNI)

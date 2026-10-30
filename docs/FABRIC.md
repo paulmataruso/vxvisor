@@ -340,3 +340,55 @@ Full review: the session transcript of 2026-10-30.
 - Surface `clear evpn dup-addr`.
 - TCP MSS clamp on fabric taps.
 - VRF table ids allocated per host.
+
+## 15. Implementation status (2026-10-30, v1.110.x)
+
+Built and verified (unit tests, the netns lab `internal/fabric/lab_test.go`, and a live single-host E2E
+against the running daemon, `internal/service/fabric_e2e_test.go`):
+
+- **Intent + replication** (`internal/fabric/intent.go`, `commit.go`). The whole fabric is one versioned
+  JSON document (`fabric_intent`, migration 60), changed only by a **unanimous two-phase commit** over the
+  signed peer API (`/cluster/v1/fabric/*`). Each member vetoes locally (`fabricCheck`): underlay, the
+  composed FRR config, legacy VNI collisions, port groups leaving it while in use. A member that missed a
+  commit adopts the highest version on its next 30 s sync. `Evict` drops a dead host without its vote.
+- **Reconcile** (`service/fabric_realize.go`): desired state, re-run on every commit and every 60 s. Order:
+  nft (firewall, bridge guard, VXLAN guard), l3mdev asserts, underlay, devices, prune, `networks` rows,
+  per-VRF DHCP, FRR. Writes `fabric_underlay.state = ok@<version>` or `error@<version>`. A host that left
+  removes everything, including the FRR section (detected by the peer-group *or* a `vxfvrf` VRF — a
+  single-host fabric has no peer lines).
+- **Underlay**: a free NIC/bond untagged, or a VLAN on a NIC with no other role (the parent is never
+  changed). The NIC is then refused by every other role (`guardIfaceRoles`). Deploy and add-host are
+  reverted unless every host realizes the version and the DF-ping matrix (`ping -M do -s MTU-28`) passes.
+- **Data plane** as §14 D5, with one change: the anycast gateway is the segment bridge's own address
+  plus the fabric-wide MAC (`arp_accept=1`), not a macvlan.
+- **Distributed firewall** (`fabric/firewall.go`, table `inet vdxfabric`): dispatch on the VRF device
+  (the iif the forward and input hooks see for VRF-routed packets). Default deny between port groups,
+  allow within one. External = `daddr/saddr != {org's fabric subnets}`.
+- **IPAM**: leases live in the intent (fabric-wide, kept on migration), mirrored to `ip_leases`, and are
+  rendered as static dnsmasq hosts on every host.
+- **Egress**: the org's VRF gets `ip route 0.0.0.0/0 <egress>` on every member. The egress is either a
+  netns tenant router connected on the Fabric page (`service/fabric_gateway.go`: an internal leg on the
+  port group's bridge, plus system static routes to the org's other fabric subnets via the anycast
+  gateway, refreshed when port groups change), or a free-text appliance address. A router that is a
+  fabric gateway can't be deleted or have that leg detached elsewhere. The generic paths would delete
+  the fabric bridge.
+- **Bridge guard** (`table bridge vdxfabric`, `fabric.BridgeGuard`). On a routed port group a guest may
+  only use its leased MAC + address, ARP included, with DHCP from 0.0.0.0 allowed. It can't answer DHCP or
+  send IPv6 RAs. This is enforced on the bridge `forward` AND `input` hooks, because routed traffic is
+  delivered to the anycast gateway. Every local port's forwarded broadcast/multicast is policed to
+  1000 pps. DHCP never crosses a tunnel, and guests can't inject 802.1Q/ad. Router legs (`vrh*`) are
+  exempt; L2-only port groups get only the policer. Containers are refused on routed fabric port groups:
+  they get no fabric lease.
+- **Topology map**: one "VXVisor Fabric · <name>" switch per host. The underlay is its uplink, the TEP a
+  host adapter, and the fabric port groups and their VMs are its port groups. Tenants see their own,
+  without host devices.
+- **UI** `/fabric`: deploy wizard (hosts → underlay → access → live preflight → deploy), hosts with health
+  (state, BGP sessions, BFD, EVPN duplicate flags, VXLAN guard drops), port groups, connectivity table +
+  per-org matrix, egress. Org admins build on fabrics opened to their org.
+
+Not built yet (phase 1 remainder):
+- TCP MSS clamp.
+- Per-VNI VTEP / MAC table detail on the page.
+- Fabric leases for containers.
+- A 2-node live test (no test cluster yet).
+- Phase 1b (WireGuard over management) and phase 3 are unchanged from §14.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"vdxclone/internal/fabric"
 	"vdxclone/internal/hostinfo"
 	"vdxclone/internal/lldp"
 	"vdxclone/internal/lxc"
@@ -1071,8 +1072,8 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	placed := map[string]bool{}
 	natNets := masqueradeSources()
 	for _, br := range ifaces {
-		if br.Type != "bridge" {
-			continue
+		if br.Type != "bridge" || fabric.IsFabricDevice(br.Name) {
+			continue // fabric bridges are drawn as one VXVisor Fabric switch below
 		}
 		sw := TopoSwitch{Name: br.Name, Kind: "standard", Addrs: br.Addrs, VMKs: mkVMKs(br.Name, br.Addrs), bridge: br.Name}
 		var looseVMs []TopoVM // taps on the bridge not bound to a specific port group
@@ -1167,6 +1168,34 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 		topo.Switches = append(topo.Switches, sw)
 	}
 
+	// The VXVisor Fabric: one switch for this host's share of the fabric — its
+	// port groups are the segment bridges, its uplink the underlay, its TEP a
+	// host adapter (the user's "vSwitch with the VXVisor Fabric uplink").
+	fabricIfaces := map[string]bool{}
+	if ft, ok := s.fabricTopo(); ok {
+		sw := TopoSwitch{Name: "VXVisor Fabric · " + ft.name, Kind: "overlay", VXLAN: true,
+			Uplinks: []TopoUplink{mkUplink(ft.dev)}, VMKs: []TopoVMK{{Label: "TEP", IPs: []string{ft.tep}, Iface: ft.dev}}}
+		fabricIfaces[ft.dev], fabricIfaces[ft.iface] = true, true
+		for _, n := range nets {
+			if n.mode != "fabric" {
+				continue
+			}
+			pg := TopoPortGroup{Name: n.name, CIDR: n.cidr, VMs: netToVMs[n.id], netID: n.id}
+			for _, vm := range pg.VMs {
+				placed[vm.ID] = true
+			}
+			if cts := bridgeToCts[n.bridge]; len(cts) > 0 {
+				pg.VMs = append(pg.VMs, cts...)
+				renderedBridges[n.bridge] = true
+			}
+			sw.PortGroups = append(sw.PortGroups, pg)
+		}
+		if len(sw.PortGroups) == 0 {
+			sw.PortGroups = []TopoPortGroup{{Name: "no port groups yet"}}
+		}
+		topo.Switches = append(topo.Switches, sw)
+	}
+
 	// Containers whose configured bridge isn't a live host bridge (or is empty)
 	// go on the user-mode switch so they're never hidden.
 	var looseCts []TopoVM
@@ -1182,8 +1211,8 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	// standard vSwitch. Shown even when standard vSwitches exist.
 	var natPGs []TopoPortGroup
 	for _, n := range nets {
-		if n.bridge != "" {
-			continue // already shown under its standard vSwitch
+		if n.bridge != "" || n.mode == "fabric" {
+			continue // already shown under its standard vSwitch / the fabric
 		}
 		vms := netToVMs[n.id]
 		for _, vm := range vms {
@@ -1218,7 +1247,7 @@ func (s *Service) NetworkTopology(p *Principal) (*Topology, error) {
 	// the host's own IPs are wired, VMware-style. An address-less NIC is a free
 	// uplink available for a new vSwitch.
 	for _, it := range ifaces {
-		if it.Type != "physical" || it.Master != "" {
+		if it.Type != "physical" || it.Master != "" || fabricIfaces[it.Name] {
 			continue
 		}
 		if len(it.Addrs) > 0 {

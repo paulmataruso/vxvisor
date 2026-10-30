@@ -103,6 +103,14 @@ func TestLab(t *testing.T) {
 		{VNI: 200, Gateway: "10.10.2.1/24", MTU: labMTU, Leases: []DHCPLease{{MAC: "52:54:00:00:00:04", IP: "10.10.2.40"}}},
 	}
 
+	// The bridge guard: every guest's lease on the routed segments (vm4's is
+	// its DHCP lease); 300 is L2-only.
+	labGuard := []GuardSegment{
+		{VNI: 100, Routed: true, Leases: []DHCPLease{{MAC: "52:54:00:00:00:01", IP: "10.10.1.10"}, {MAC: "52:54:00:00:00:02", IP: "10.10.1.20"}}},
+		{VNI: 200, Routed: true, Leases: []DHCPLease{{MAC: "52:54:00:00:00:03", IP: "10.10.2.30"}, {MAC: "52:54:00:00:00:04", IP: "10.10.2.40"}}},
+		{VNI: 300},
+		{VNI: 400, Routed: true, Leases: []DHCPLease{{MAC: "52:54:00:00:00:07", IP: "10.10.1.10"}, {MAC: "52:54:00:00:00:08", IP: "10.10.1.20"}}},
+	}
 	for h, tep := range teps {
 		r := nsRunner{h}
 		must(t, "ip", "link", "add", h+"-u", "type", "veth", "peer", "name", "u0", "netns", h)
@@ -118,10 +126,14 @@ func TestLab(t *testing.T) {
 		if err := Realize(r, plan(h)); err != nil { // idempotent
 			t.Fatalf("%s realize again: %v", h, err)
 		}
+		guard, err := BridgeGuard(labGuard)
+		if err != nil {
+			t.Fatal(err)
+		}
 		cmd := exec.Command("ip", "netns", "exec", h, "nft", "-f", "-")
-		cmd.Stdin = strings.NewReader(BridgeGuard())
+		cmd.Stdin = strings.NewReader(guard)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s bridge guard: %v %s", h, err, out)
+			t.Fatalf("%s bridge guard: %v %s\n%s", h, err, out, guard)
 		}
 
 		// FRR in a pathspace, configured by the production renderer.
@@ -362,6 +374,82 @@ func TestLab(t *testing.T) {
 	}
 	if fw, _ := ex.Run(in("fh1", "nft", "list", "chain", "inet", FirewallTable, "org1")...); !strings.Contains(fw, "packets") {
 		t.Errorf("FW: no counters:\n%s", fw)
+	}
+
+	// ---- egress: the VRF default route via a gateway on a port group survives
+	// reconcile re-asserting the kernel's unreachable default (AD 0 vs static) ----
+	egressConf := func(egress string) {
+		t.Helper()
+		conf, err := routing.RenderFRR(routing.Config{Hostname: "fh1", Fabric: &routing.Fabric{
+			ASN: labASN, TEP: teps["fh1"], Peers: []string{teps["fh2"]}, Password: labSecret, BFD: true,
+			VRFs: []routing.FabricVRF{{Name: VRFName(1), VNI: 4000001, Egress: egress}, {Name: VRFName(2), VNI: 4000002}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile("/etc/frr/fh1/frr.conf", []byte(conf), 0o640)
+		if out, err := ex.Run(in("fh1", "/usr/lib/frr/frr-reload.py", "-N", "fh1", "--reload", "/etc/frr/fh1/frr.conf")...); err != nil {
+			t.Fatalf("egress frr-reload: %v\n%s", err, out)
+		}
+	}
+	vrfDefault := func() string {
+		out, _ := ex.Run(in("fh1", "ip", "route", "show", "vrf", VRFName(1), "default")...)
+		return out
+	}
+	waitRoute := func(what string, want bool) {
+		t.Helper()
+		for i := 0; i < 20; i++ {
+			// vm2 is on fh2: zebra resolves the egress through the L3VNI (symmetric IRB).
+			if strings.Contains(vrfDefault(), "proto static") == want {
+				t.Logf("egress: %s", what)
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Errorf("egress: %s: VRF default is\n%s", what, vrfDefault())
+	}
+	egressConf("10.10.1.20")
+	waitRoute("installed", true)
+	if err := Realize(nsRunner{"fh1"}, plan("fh1")); err != nil { // reconcile re-asserts the unreachable default
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	waitRoute("still installed after Realize", true)
+	if err := ping("vm1", "10.10.1.1"); err != nil {
+		t.Errorf("egress: %v", err)
+	}
+	egressConf("")
+	waitRoute("removed", false)
+	if !strings.Contains(vrfDefault(), "unreachable") {
+		t.Errorf("egress: the unreachable default is gone:\n%s", vrfDefault())
+	}
+
+	// ---- bridge guard: a guest may only use its leased MAC and address ----
+	if err := ping("vm1", "10.10.1.20"); err != nil {
+		t.Errorf("guard: leased guest blocked: %v", err)
+	}
+	must(t, in("vm1", "ip", "addr", "add", "10.10.1.99/24", "dev", "eth0")...)
+	if _, err := ex.Run(in("vm1", "ping", "-c", "2", "-W", "1", "-I", "10.10.1.99", "10.10.1.20")...); err == nil {
+		t.Errorf("guard: a spoofed source address got through")
+	}
+	if _, err := ex.Run(in("vm1", "ping", "-c", "2", "-W", "1", "-I", "10.10.1.99", "10.10.1.1")...); err == nil {
+		t.Errorf("guard: a spoofed source address reached the anycast gateway (input hook)")
+	}
+	must(t, in("vm1", "ip", "addr", "del", "10.10.1.99/24", "dev", "eth0")...)
+	must(t, in("vm1", "ip", "link", "set", "eth0", "address", "52:54:00:00:00:99")...)
+	if !noPing("vm1", "10.10.1.20") {
+		t.Errorf("guard: a spoofed MAC got through")
+	}
+	must(t, in("vm1", "ip", "link", "set", "eth0", "address", "52:54:00:00:00:01")...)
+	if err := ping("vm1", "10.10.1.20"); err != nil {
+		t.Errorf("guard: guest blocked after restoring its MAC: %v", err)
+	}
+	// vm5 is on the L2-only segment: any address goes.
+	must(t, in("vm5", "ip", "addr", "add", "10.30.0.55/24", "dev", "eth0")...)
+	if _, err := ex.Run(in("vm5", "ping", "-c", "1", "-W", "2", "-I", "10.30.0.55", "10.30.0.6")...); err != nil {
+		t.Errorf("guard: L2-only segment filtered addresses: %v", err)
+	}
+	if g, _ := ex.Run(in("fh1", "nft", "list", "chain", "bridge", "vdxfabric", "port")...); !strings.Contains(g, "packets") || strings.Contains(g, "counter packets 0 bytes 0 drop\n    ether type ip ip saddr") {
+		t.Logf("guard port chain:\n%s", g)
 	}
 
 	// Prune: dropping the L2-only segment removes exactly its two devices.

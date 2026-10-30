@@ -50,6 +50,12 @@ func TestRenderFabricOnly(t *testing.T) {
 	if af := block(conf, " address-family ipv4 unicast", " exit-address-family"); strings.Contains(af, "VXFABRIC") || strings.Contains(af, "10.99.0.") {
 		t.Errorf("fabric activated in ipv4 unicast:\n%s", af)
 	}
+	// Egress: the VRF's own default route, inside its vrf block.
+	f := testFabric()
+	f.VRFs[0].Egress = "10.20.0.254"
+	if conf, _ := RenderFRR(Config{Fabric: f}); !strings.Contains(conf, "vrf vdxv12\n vni 4000012\n ip route 0.0.0.0/0 10.20.0.254\nexit-vrf\n") {
+		t.Errorf("egress route missing:\n%s", conf)
+	}
 	// The VRF definition precedes the BGP instances that use it.
 	if strings.Index(conf, "vrf vdxv12\n") > strings.Index(conf, "router bgp 65010\n") {
 		t.Errorf("vrf block after router bgp")
@@ -141,6 +147,7 @@ func TestFabricValidate(t *testing.T) {
 		"vni too big":       func(f *Fabric) { f.VRFs = []FabricVRF{{Name: "vdxv1", VNI: MaxVNI + 1}} },
 		"duplicate vrf":     func(f *Fabric) { f.VRFs = []FabricVRF{{Name: "vdxv1", VNI: 5}, {Name: "vdxv1", VNI: 6}} },
 		"duplicate vrf vni": func(f *Fabric) { f.VRFs = []FabricVRF{{Name: "vdxv1", VNI: 5}, {Name: "vdxv2", VNI: 5}} },
+		"egress inject":     func(f *Fabric) { f.VRFs[0].Egress = "10.1.1.1\nip route 0.0.0.0/0 6.6.6.6" },
 	}
 	for name, mut := range cases {
 		f := testFabric()

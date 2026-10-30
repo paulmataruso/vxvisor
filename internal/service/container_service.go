@@ -449,6 +449,11 @@ func (s *Service) resolveContainerNIC(orgID, networkID int64) (containerNIC, err
 	if n.Bridge == "" {
 		return containerNIC{}, fmt.Errorf("port group %q is user-mode NAT with no vSwitch — containers need a vSwitch-backed port group", n.Name)
 	}
+	if n.Mode == "fabric" && n.CIDR != "" {
+		// A routed fabric port group hands out only fabric-wide leases, and its
+		// bridge guard admits only leased MAC/address pairs: none for containers yet.
+		return containerNIC{}, fmt.Errorf("port group %q is a routed VXVisor Fabric port group, which serves instances only — use an L2-only fabric port group or a vSwitch port group", n.Name)
+	}
 	if !netdrv.IfaceExists(n.Bridge) {
 		return containerNIC{}, fmt.Errorf("port group %q's vSwitch (%s) isn't up on this host — check Networking, then try again", n.Name, n.Bridge)
 	}

@@ -311,6 +311,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /fabric/f/{id}/orgs", s.auth(s.fabricOrgs))
 	mux.HandleFunc("POST /fabric/f/{id}/delete", s.auth(s.fabricDelete))
 	mux.HandleFunc("POST /fabric/f/{id}/egress", s.auth(s.fabricEgress))
+	mux.HandleFunc("POST /fabric/f/{id}/gateway", s.auth(s.fabricGatewayConnect))
+	mux.HandleFunc("POST /fabric/f/{id}/gateway-disconnect", s.auth(s.fabricGatewayDisconnect))
 	mux.HandleFunc("POST /fabric/pg", s.auth(s.fabricCreatePG))
 	mux.HandleFunc("POST /fabric/pg/{id}/edit", s.auth(s.fabricEditPG))
 	mux.HandleFunc("POST /fabric/pg/{id}/delete", s.auth(s.fabricDeletePG))

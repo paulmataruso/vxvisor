@@ -3,6 +3,8 @@ package fabric
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -191,6 +193,16 @@ func TestHostShare(t *testing.T) {
 	if err := r.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	// An org's egress becomes its VRF's default route next hop, on every host.
+	in.VRFs[0].Egress = "10.10.1.254"
+	got := map[string]string{}
+	for _, v := range in.Routing("h2", "abc123").VRFs {
+		got[v.Name] = v.Egress
+	}
+	if len(got) != 2 || got[VRFName(in.VRFs[0].Org)] != "10.10.1.254" || got[VRFName(in.VRFs[1].Org)] != "" {
+		t.Fatalf("VRF egress %v", got)
+	}
+	in.VRFs[0].Egress = ""
 	in.Leases = []Lease{{PG: pgD, IP: "10.10.2.100", MAC: "52:54:00:00:00:09", Session: "vm9"}}
 	d := in.DHCP("h2")
 	if len(d[1]) != 2 || len(d[2]) != 1 {
@@ -456,5 +468,53 @@ func TestSingleHost(t *testing.T) {
 	}
 	if cur, _ := m.Current(); cur.Version != 1 {
 		t.Fatalf("version %d", cur.Version)
+	}
+}
+
+func TestBridgeGuardRender(t *testing.T) {
+	in := sample()
+	in.Leases = []Lease{{PG: pgD, IP: "10.10.2.100", MAC: "52:54:00:00:00:09", Session: "vm9"}}
+	segs := in.Guard("h2")
+	g, err := BridgeGuard(segs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"vxfb2000001" . 52:54:00:00:00:09 . 10.10.2.100`,
+		"meta ibrname . ether saddr != @macs counter drop",
+		"chain input {\n    type filter hook input priority -10; policy accept;\n    iifname != \"vxfv*\" meta ibrname @segs jump port",
+		`iifname "vrh*" return`,
+		"limit rate over 1000/second",
+	} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guard lacks %q:\n%s", want, g)
+		}
+	}
+	l2 := false
+	for _, sg := range segs {
+		if sg.VNI == 2000002 {
+			l2 = !sg.Routed && len(sg.Leases) == 0
+		}
+	}
+	if !l2 || strings.Contains(g, `"vxfb2000002" .`) {
+		t.Errorf("L2-only segment %+v treated as routed", segs)
+	}
+	if _, err := BridgeGuard([]GuardSegment{{VNI: 1, Routed: true, Leases: []DHCPLease{{MAC: "52:54:00:00:00:01 } drop", IP: "10.0.0.1"}}}}); err == nil {
+		t.Error("an injected MAC rendered")
+	}
+	if _, err := BridgeGuard([]GuardSegment{{VNI: 1, Routed: true, Leases: []DHCPLease{{MAC: "52:54:00:00:00:01", IP: "10.0.0.1 . x"}}}}); err == nil {
+		t.Error("an injected address rendered")
+	}
+	if _, err := BridgeGuard(nil); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getenv("VX_NFT_CHECK") == "1" { // root + nft: the kernel's parser accepts it
+		for _, rs := range []string{g, func() string { e, _ := BridgeGuard(nil); return e }()} {
+			cmd := exec.Command("nft", "-c", "-f", "-")
+			cmd.Stdin = strings.NewReader(rs)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("nft -c: %v %s\n%s", err, out, rs)
+			}
+		}
 	}
 }

@@ -88,6 +88,9 @@ func (s *Service) vrouterRouting(v vrouter.VRouter, legs []vrouter.Leg, cfg rout
 		eff, more = vrouter.ConstrainTenant(eff, legs)
 		ignored = append(ignored, more...)
 	}
+	// A fabric gateway reaches its org's other fabric subnets via the anycast
+	// gateway of the port group it sits on (system routes, never stored).
+	eff.Static = append(eff.Static, s.fabricLegRoutes(v, legs)...)
 	return eff, ignored
 }
 
@@ -742,6 +745,9 @@ func (s *Service) DetachSegment(p *Principal, vrID, netID int64, ip string) erro
 	}
 	if leg == nil {
 		return fmt.Errorf("that network is not a downlink of this gateway")
+	}
+	if s.fabricLegPG(*leg) != "" {
+		return fmt.Errorf("this is the organization's VXVisor Fabric gateway — disconnect it on the Fabric page")
 	}
 	// Resolve the owner by the backing networks id, scoped to the org — a
 	// tenant segment, a vSwitch port group, or (neither) the router's own.
@@ -1538,6 +1544,11 @@ func (s *Service) DeleteVRouter(p *Principal, vrID int64, ip string) error {
 		return err
 	}
 	legs, _ := s.loadLegs(vrID)
+	for _, l := range legs {
+		if s.fabricLegPG(l) != "" {
+			return fmt.Errorf("this router is the organization's VXVisor Fabric gateway — disconnect it on the Fabric page first")
+		}
+	}
 	// A transit leg holds a physical NIC — only an INSTANCE admin may cause its
 	// detach. Per-org admins build netns routers with no transit, so this never
 	// blocks them; it stops a tenant from triggering a host-plane NIC change.

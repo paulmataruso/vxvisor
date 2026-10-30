@@ -284,7 +284,8 @@ if [ -f /etc/frr/daemons ]; then
   echo "  frr: $(systemctl is-active frr 2>/dev/null || echo inactive)"
   # A running FRR picks up a newly enabled daemon only on restart (watchfrr
   # can't add one live). We don't restart it here — that would drop live
-  # routing sessions; creating a fabric restarts FRR when bfdd isn't running.
+  # routing sessions. Until then the VXVisor Fabric runs without BFD (it only
+  # renders BFD when bfdd is running); BGP timers still detect a dead peer.
   if systemctl is-active --quiet frr && ! pgrep -x bfdd >/dev/null; then
     echo "  note: bfdd is enabled but starts at FRR's next restart"
   fi

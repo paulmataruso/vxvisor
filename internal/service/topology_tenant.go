@@ -340,6 +340,31 @@ func (s *Service) tenantTopology(p *Principal) (*Topology, error) {
 		topo.Switches = append(topo.Switches, sw)
 	}
 
+	// The org's VXVisor Fabric port groups: one fabric switch (no host devices).
+	if ft, ok := s.fabricTopo(); ok {
+		sw := TopoSwitch{Name: "VXVisor Fabric · " + ft.name, Kind: "overlay", VXLAN: true,
+			Uplinks: []TopoUplink{{Name: "VXVisor Fabric", Kind: "nic", State: "up"}}}
+		if rows, err := s.db.Query(`SELECT id, name, COALESCE(bridge,''), COALESCE(cidr,'') FROM networks
+			WHERE org_id=? AND mode='fabric' ORDER BY name`, p.OrgID); err == nil {
+			for rows.Next() {
+				var id int64
+				var name, bridge, cidr string
+				if rows.Scan(&id, &name, &bridge, &cidr) != nil {
+					continue
+				}
+				placed[id] = true
+				pg := TopoPortGroup{Name: name, CIDR: cidr, VMs: vmsOf(id), netID: id}
+				pg.VMs = append(pg.VMs, bridgeCts[bridge]...)
+				delete(bridgeCts, bridge)
+				sw.PortGroups = append(sw.PortGroups, pg)
+			}
+			rows.Close()
+		}
+		if len(sw.PortGroups) > 0 {
+			topo.Switches = append(topo.Switches, sw)
+		}
+	}
+
 	// Networks the org was given that aren't its vSwitches: provider port groups
 	// (named only — their host bridge stays hidden) and user-mode NAT ones.
 	var provPGs, natPGs []TopoPortGroup

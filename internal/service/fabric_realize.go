@@ -59,6 +59,7 @@ func (s *Service) RunFabric(stop <-chan struct{}) {
 		if err := s.ReconcileFabric(); err != nil {
 			log.Printf("fabric: %v", err)
 		}
+		s.refreshFabricGateways()
 	}
 }
 
@@ -91,10 +92,14 @@ func (s *Service) ReconcileFabric() error {
 		}
 		note("firewall", err)
 		guard := "table bridge vdxfabric {}\ndelete table bridge vdxfabric\n"
+		var gerr error
 		if member {
-			guard = fabric.BridgeGuard()
+			guard, gerr = fabric.BridgeGuard(in.Guard(self))
 		}
-		note("bridge guard", netdrv.ApplyNFT(guard))
+		if gerr == nil {
+			gerr = netdrv.ApplyNFT(guard)
+		}
+		note("bridge guard", gerr)
 		note("VXLAN guard", s.applyVXLANGuard())
 	}
 	if member {
@@ -150,7 +155,13 @@ func (s *Service) fabricLeftovers() bool {
 
 func frrHasFabric() bool {
 	b, err := os.ReadFile("/etc/frr/frr.conf")
-	return err == nil && strings.Contains(string(b), "peer-group "+routing.FabricPeerGroup)
+	return err == nil && frrConfHasFabric(string(b))
+}
+
+// frrConfHasFabric reports whether an frr.conf carries a fabric section: its
+// peer-group (present even with no peers, on a single-host fabric) or a VRF.
+func frrConfHasFabric(conf string) bool {
+	return strings.Contains(conf, " neighbor "+routing.FabricPeerGroup+" peer-group") || strings.Contains(conf, "\nvrf vxfvrf")
 }
 
 // assertL3mdev keeps host sockets from accepting connections that arrive in a
@@ -483,7 +494,7 @@ func (s *Service) syncFabricFRR() error {
 	if rt.frrSet && key == rt.lastFRR {
 		return nil
 	}
-	if key == "" && !frrHasFabric() {
+	if key == "" && rt.lastFRR == "" && !frrHasFabric() {
 		rt.lastFRR, rt.frrSet = "", true
 		return nil
 	}

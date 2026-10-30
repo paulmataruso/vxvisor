@@ -78,11 +78,12 @@ type FabricView struct {
 	Admin    bool            // may manage fabrics and hosts
 	Build    map[string]bool // fabric UUID → may create port groups / rules
 	OrgID    int64
-	Nodes    []string              // cluster nodes the wizard can add (admin)
-	Networks map[string]int64      // fabric PG UUID → this node's networks row
-	Leases   map[string]int        // PG UUID → leases on it
-	Egress   map[string]string     // fabric UUID → the caller org's egress
-	VRF      map[string]fabric.VRF // fabric UUID → the caller org's VRF
+	Nodes    []string                 // cluster nodes the wizard can add (admin)
+	Networks map[string]int64         // fabric PG UUID → this node's networks row
+	Leases   map[string]int           // PG UUID → leases on it
+	Egress   map[string]string        // fabric UUID → the caller org's egress
+	VRF      map[string]fabric.VRF    // fabric UUID → the caller org's VRF
+	Gateways map[string]FabricGateway // fabric UUID → the caller org's connected router
 }
 
 // GetFabricView returns the Fabric pages' data for p.
@@ -117,6 +118,7 @@ func (s *Service) GetFabricView(p *Principal) (FabricView, error) {
 		}
 	}
 	v.Intent = in
+	v.Gateways = s.FabricGateways(p.OrgID)
 	if p.IsAdmin {
 		v.Nodes = s.clusterNodeNames()
 	}
@@ -1034,7 +1036,7 @@ func (s *Service) DeleteFabricPG(p *Principal, uuid, ip string) error {
 		for _, v := range in.VRFs {
 			if v.Fabric == pg.Fabric && v.Org == pg.Org && v.Egress != "" && pg.Routed() {
 				if _, n, _ := net.ParseCIDR(pg.CIDR); n != nil && n.Contains(net.ParseIP(v.Egress)) {
-					return fmt.Errorf("port group %s carries the organization's egress (%s) — clear the egress first", pg.Name, v.Egress)
+					return fmt.Errorf("port group %s carries the organization's egress (%s) — disconnect the gateway (or clear the egress) first", pg.Name, v.Egress)
 				}
 			}
 		}
@@ -1129,7 +1131,20 @@ func (s *Service) editRule(p *Principal, uuid, ip, action string, f func(*fabric
 // fabric: its tenant gateway's address on one of its routed port groups.
 func (s *Service) SetFabricEgress(p *Principal, fabricUUID, egress, ip string) error {
 	egress = strings.TrimSpace(egress)
-	if _, err := s.fabricChange(nil, func(in *fabric.Intent) error {
+	if g, ok := s.FabricGateways(p.OrgID)[fabricUUID]; ok {
+		return fmt.Errorf("router %s is the organization's gateway on this fabric — disconnect it first", g.VRouter)
+	}
+	if err := s.setFabricEgress(p, fabricUUID, egress); err != nil {
+		return err
+	}
+	s.audit(p, p.OrgID, "fabric.egress", "fabric", fabricUUID, ip, map[string]any{"egress": egress})
+	return nil
+}
+
+// setFabricEgress commits the org's egress next hop ("" clears it and the rules
+// to and from External).
+func (s *Service) setFabricEgress(p *Principal, fabricUUID, egress string) error {
+	_, err := s.fabricChange(nil, func(in *fabric.Intent) error {
 		if _, err := s.orgFabric(p, in, fabricUUID); err != nil {
 			return err
 		}
@@ -1150,9 +1165,6 @@ func (s *Service) SetFabricEgress(p *Principal, fabricUUID, egress, ip string) e
 			}
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
-	s.audit(p, p.OrgID, "fabric.egress", "fabric", fabricUUID, ip, map[string]any{"egress": egress})
-	return nil
+	})
+	return err
 }
