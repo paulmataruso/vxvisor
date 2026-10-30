@@ -65,8 +65,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
 
 ## Conventions you MUST follow
 ### DB migrations (`internal/db/db.go`)
-- A numbered slice; **append only**, never edit an applied migration. Current max: **52**
-  (`container-portgroup`). Add `{N, "name", "SQL"}`.
+- A numbered slice; **append only**, never edit an applied migration. Current max: **59**
+  (`ovirt-disks`). Add `{N, "name", "SQL"}`.
 - **Partial-unique constraints MUST be a standalone `CREATE UNIQUE INDEX ... WHERE`** — an
   inline `UNIQUE(...) WHERE` is a syntax error on modernc, and because `OpenResilient`
   quarantines the live DB and falls back to a FRESH empty one on ANY `Open()` error, a bad
@@ -287,8 +287,8 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   - Routing and FRR changes are applied first and saved only on success.
   - Tenant gateways export only their downlinks.
 
-- **Snapshots / instant clones / snapshot policies** (migrations 55–57 on the feature branch;
-  renumber at merge). Full design in `docs/SNAPSHOTS.md`. Invariants:
+- **Snapshots / instant clones / snapshot policies** (migrations 55–57). Full design in
+  `docs/SNAPSHOTS.md`. Invariants:
   - Every backend: qcow2 internal (live = QMP `blockdev-snapshot-internal-sync`, not `savevm`),
     zvol `zfs snapshot`, LVM thin `lvcreate -s`, RBD `rbd snap`. UEFI NVRAM copied with each one.
   - Only snapshots with a `snapshots` row are ever destroyed, via the row's `ref`. No `-r/-R/--force`.
@@ -301,6 +301,23 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   - Immutable (`locked_until`) snapshots: no delete, no purge of their VM, no prune — for anyone.
   - Storage move / migrate refuse a VM with snapshots or a dependent-clone tie.
   - Policies: instance admin = all orgs; org admin = own org, `org_id` in every query.
+  - A qcow2 revert first removes the backup API's `vdxckpt-*` bitmaps (QEMU refuses to apply an
+    internal snapshot while persistent dirty bitmaps exist); the next backup is then full.
+
+- **CBT warm import from VMware** (migrations 53–54, `docs/CBT-IMPORT.md`). Opt-in per import: the
+  "Use CBT" checkbox is the operator's consent to enable CBT and take `vxvisor-cbt-*` snapshots on
+  that ONE source VM. All source-mutating vSphere calls live in `internal/vmware/cbt.go` behind a
+  `CBTConsent` (`TestReadOnlyDiscipline` keeps every other file read-only). Only snapshots we
+  recorded (moref + name) are removed, including on crash recovery; CBT is restored if we turned it
+  on. Driven by `CBTTick` in the worker. Unticked = the old read-only import, unchanged.
+
+- **Veeam via an oVirt-compatible API** (migrations 58–59, `docs/VEEAM-OVIRT-API.md`).
+  Config-gated `[ovirt]`, **off by default**; its own TLS listeners (443 engine, 54322 imageio) on
+  the management IP, per-install CA in `<DataDir>/ovirt-ca.*`. Packages: `internal/ovirtapi`
+  (engine REST subset), `internal/imageio` (disk transfer), `internal/vmbackup` (pull-mode
+  fleecing + `vdxckpt-*` persistent-bitmap checkpoints), `internal/nbd` (NBD client, shared with
+  CBT). Instance admins only. A backup pins its VM (`BackupBusy`): start/delete/purge/resize/
+  snapshot/revert/clone/move refuse while it runs. Never tested against a real Veeam server yet.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous
