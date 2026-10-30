@@ -39,7 +39,7 @@ func TestFabricPageRender(t *testing.T) {
 	}
 	names := map[int64]string{1: "default", 2: "acme"}
 	health := map[string]service.FabricNodeStatus{
-		"n1": {Node: "n1", State: "ok", BFD: true, DupAddrs: []string{"52:54:00:aa:bb:cc"}, Drops: 7, BGP: []service.FabricBGPPeer{{Peer: "10.250.0.2", State: "Established", Uptime: "01:02:03"}}},
+		"n1": {Node: "n1", State: "ok", BFD: true, DupAddrs: []string{"52:54:00:aa:bb:cc"}, Drops: 7, VNIs: []service.FabricVNI{{VNI: 2000001, Type: "L2", VRF: "vxfvrf2", MACs: 3, Remotes: 1}}, BGP: []service.FabricBGPPeer{{Peer: "10.250.0.2", State: "Established", Uptime: "01:02:03"}}},
 		"n2": {Node: "n2", State: "unreachable", Error: "dial timeout"},
 	}
 	render := func(p *service.Principal, v service.FabricView, checks *fabricChecksEntry) string {
@@ -72,7 +72,7 @@ func TestFabricPageRender(t *testing.T) {
 	av.OrgID, av.Egress, av.VRF = 1, nil, nil // the admin acts in its own org
 	out := render(admin, av, &fabricChecksEntry{OK: false, Checks: []service.FabricCheck{{Node: "n2", Check: "underlay", Detail: "enp9s0 MTU 1500 < 1550"}}})
 	for _, want := range []string{`id="m-deploy"`, `action="/fabric/deploy"`, `id="m-host-f1"`, `action="/fabric/f/f1/host-remove"`,
-		`name="evict" value="1"`, "up 01:02:03", "Deploy failed", "enp9s0 MTU 1500 &lt; 1550", "enp9s0.40", "⚠ 1 duplicate", "7 dropped",
+		`name="evict" value="1"`, "up 01:02:03", "Deploy failed", "enp9s0 MTU 1500 &lt; 1550", "enp9s0.40", "⚠ 1 duplicate", "7 dropped", "<summary>1</summary>", `<td class="mono">vxfvrf2</td>`,
 		`id="m-pgedit-pb"`, `action="/fabric/rule/r2/on"`, "✓ tcp 5432",
 		`<option>n3</option>`, `value="2" checked`} {
 		if !strings.Contains(out, want) {

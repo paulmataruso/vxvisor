@@ -243,9 +243,17 @@ func TestFirewallRender(t *testing.T) {
 		"ip saddr 10.10.1.0/24 ip daddr != { 10.10.1.0/24, 10.10.2.0/24 } counter accept",
 		"ip saddr != { 10.10.1.0/24, 10.10.2.0/24 } ip daddr 10.10.1.0/24 counter accept",
 		`iifname "vxfb*" counter drop`,
+		`iifname "vxfvrf*" tcp flags syn tcp option maxseg size set rt mtu`,
 	} {
 		if !strings.Contains(fw, want) {
 			t.Errorf("missing %q in\n%s", want, fw)
+		}
+	}
+	if os.Getenv("VX_NFT_CHECK") == "1" {
+		cmd := exec.Command("nft", "-c", "-f", "-")
+		cmd.Stdin = strings.NewReader(fw)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("nft -c: %v %s\n%s", err, out, fw)
 		}
 	}
 	if strings.Contains(fw, "meta l4proto icmp") {

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,6 +35,29 @@ func LegVethName(name string, idx int) string {
 // vRouter backend can write frr.conf directly when the container is stopped
 // (dir-backed rootfs only — block-backed rootfs is unmapped while stopped).
 func ConfigPath(name, lxcpath string) string { return filepath.Join(basePath(lxcpath), name, "config") }
+
+// ConfigMAC is the MAC of a container's first NIC as its config pins it ("" =
+// none, the NIC gets a random one at each start).
+func ConfigMAC(name, lxcpath string) string {
+	raw, err := os.ReadFile(ConfigPath(name, lxcpath))
+	if err != nil {
+		return ""
+	}
+	return configMAC(string(raw))
+}
+
+func configMAC(cfg string) string {
+	for _, l := range strings.Split(cfg, "\n") {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok || strings.TrimSpace(k) != "lxc.net.0.hwaddr" {
+			continue
+		}
+		if hw, err := net.ParseMAC(strings.TrimSpace(v)); err == nil && len(hw) == 6 {
+			return hw.String()
+		}
+	}
+	return ""
+}
 func RootfsPath(name, lxcpath string) string {
 	return filepath.Join(basePath(lxcpath), name, "rootfs")
 }

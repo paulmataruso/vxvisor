@@ -199,6 +199,15 @@ func (s *Service) CreateContainer(p *Principal, in CreateContainerInput, ip stri
 		}
 		id, _ := res.LastInsertId()
 		batch = append(batch, pending{id: id, name: n, mac: mac})
+		if nic.FabricLease {
+			if _, err := s.FabricIPAM().Lease(nic.NetworkID, containerLeaseKey(id), mac); err != nil {
+				for _, b := range batch {
+					s.FabricIPAM().Release(containerLeaseKey(b.id))
+					_, _ = s.db.Exec(`DELETE FROM containers WHERE id=?`, b.id)
+				}
+				return fmt.Errorf("container %s: %w", n, err)
+			}
+		}
 	}
 	s.audit(p, p.OrgID, "container.create", "container", in.Name, ip,
 		map[string]any{"dist": in.Dist, "release": in.Release, "copies": copies, "network_id": nic.NetworkID, "bridge": nic.Bridge})
@@ -324,8 +333,23 @@ func (s *Service) UpdateContainer(p *Principal, id, networkID int64, cpus, memMB
 	if err != nil {
 		return err
 	}
+	if nic.FabricLease && nic.NetworkID != c.NetworkID {
+		mac := lxc.ConfigMAC(c.Name, c.Lxcpath)
+		if mac == "" {
+			return fmt.Errorf("container %s has no fixed MAC address, which a fabric port group's lease needs — recreate it on that port group", c.Name)
+		}
+		if _, err := s.FabricIPAM().Lease(nic.NetworkID, containerLeaseKey(id), mac); err != nil {
+			return err
+		}
+	}
 	if err := lxc.UpdateManaged(c.Name, c.Lxcpath, nic.Bridge, nic.VLAN, nic.MTU, cpus, memMB); err != nil {
+		if nic.FabricLease && nic.NetworkID != c.NetworkID {
+			s.FabricIPAM().ReleaseOn(containerLeaseKey(id), nic.NetworkID)
+		}
 		return fmt.Errorf("update container config: %w", err)
+	}
+	if c.NetworkID != 0 && c.NetworkID != nic.NetworkID {
+		s.FabricIPAM().ReleaseOn(containerLeaseKey(id), c.NetworkID) // no-op unless it was a fabric port group
 	}
 	lxc.SetLimits(c.Name, c.Lxcpath, cpus, memMB)
 	if _, err := s.db.Exec(`UPDATE containers SET bridge=?, network_id=?, cpus=?, memory_mb=? WHERE id=?`,
@@ -390,6 +414,7 @@ func (s *Service) DeleteContainer(p *Principal, id int64, ip string) error {
 	if _, err := s.db.Exec(`DELETE FROM containers WHERE id=?`, id); err != nil {
 		return err
 	}
+	s.FabricIPAM().Release(containerLeaseKey(id))
 	s.audit(p, p.OrgID, "container.delete", "container", c.Name, ip, nil)
 	return nil
 }
@@ -429,7 +454,12 @@ type containerNIC struct {
 	Bridge    string
 	VLAN      int // access VLAN on a vlan_filtering vSwitch (0 = untagged)
 	MTU       int // the bridge's MTU when below 1500 (VXLAN), else 0
+
+	FabricLease bool // a routed VXVisor Fabric port group: lease the address
 }
+
+// containerLeaseKey is a container's owner key for fabric leases.
+func containerLeaseKey(id int64) string { return "container-" + strconv.FormatInt(id, 10) }
 
 // resolveContainerNIC maps a port-group choice to the bridge (+ VLAN, MTU) a
 // container of orgID attaches to. networkID 0 is LXC's lxcbr0 NAT, which every
@@ -449,15 +479,12 @@ func (s *Service) resolveContainerNIC(orgID, networkID int64) (containerNIC, err
 	if n.Bridge == "" {
 		return containerNIC{}, fmt.Errorf("port group %q is user-mode NAT with no vSwitch — containers need a vSwitch-backed port group", n.Name)
 	}
-	if n.Mode == "fabric" && n.CIDR != "" {
-		// A routed fabric port group hands out only fabric-wide leases, and its
-		// bridge guard admits only leased MAC/address pairs: none for containers yet.
-		return containerNIC{}, fmt.Errorf("port group %q is a routed VXVisor Fabric port group, which serves instances only — use an L2-only fabric port group or a vSwitch port group", n.Name)
-	}
 	if !netdrv.IfaceExists(n.Bridge) {
 		return containerNIC{}, fmt.Errorf("port group %q's vSwitch (%s) isn't up on this host — check Networking, then try again", n.Name, n.Bridge)
 	}
-	nic := containerNIC{NetworkID: n.ID, Bridge: n.Bridge, VLAN: n.VLANID}
+	// A routed fabric port group serves only fabric-wide leases (its bridge
+	// guard admits only leased MAC/address pairs): the container gets one.
+	nic := containerNIC{NetworkID: n.ID, Bridge: n.Bridge, VLAN: n.VLANID, FabricLease: n.Mode == "fabric" && n.CIDR != ""}
 	if mtu := netdrv.LinkMTU(n.Bridge); mtu > 0 && mtu < 1500 {
 		nic.MTU = mtu
 	}

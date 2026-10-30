@@ -118,3 +118,13 @@ func TestUpdateManaged(t *testing.T) {
 		t.Errorf("config changed by a refused update")
 	}
 }
+
+func TestConfigMAC(t *testing.T) {
+	cfg := "lxc.net.0.type = veth\n# lxc.net.0.hwaddr = 00:00:00:00:00:01\nlxc.net.0.hwaddr = 52:54:00:AA:BB:CC\nlxc.net.1.hwaddr = 52:54:00:00:00:02\n"
+	if got := configMAC(cfg); got != "52:54:00:aa:bb:cc" {
+		t.Fatalf("configMAC = %q", got)
+	}
+	if configMAC("lxc.net.0.hwaddr = xx\n") != "" || configMAC("") != "" {
+		t.Fatal("configMAC accepted garbage")
+	}
+}

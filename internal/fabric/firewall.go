@@ -49,6 +49,7 @@ func Firewall(in *Intent, node string) (string, error) {
   }
   chain forward {
     type filter hook forward priority filter - 5; policy accept;
+    iifname "vxfvrf*" tcp flags syn tcp option maxseg size set rt mtu
     iifname "vxfvrf*" jump routed
   }
   chain routed {

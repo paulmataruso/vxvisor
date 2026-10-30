@@ -145,3 +145,27 @@ func TestCheckContainerLimits(t *testing.T) {
 		t.Errorf("32 MB accepted")
 	}
 }
+
+// TestResolveContainerNICFabric: a routed fabric port group makes the container
+// take a fabric lease; an L2-only one (no subnet) doesn't.
+func TestResolveContainerNICFabric(t *testing.T) {
+	s, _, ten := containerTestService(t)
+	add := func(name, cidr string) int64 {
+		res, err := s.db.Exec(`INSERT INTO networks(org_id,name,mode,bridge,vlan_id,cidr) VALUES(?,?,'fabric','lo',0,?)`, ten, name, cidr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	routed, l2 := add("web", "10.10.1.0/24"), add("san", "")
+	if nic, err := s.resolveContainerNIC(ten, routed); err != nil || !nic.FabricLease {
+		t.Errorf("routed fabric PG: %+v %v", nic, err)
+	}
+	if nic, err := s.resolveContainerNIC(ten, l2); err != nil || nic.FabricLease {
+		t.Errorf("L2-only fabric PG: %+v %v", nic, err)
+	}
+	if containerLeaseKey(7) != "container-7" {
+		t.Error("lease key")
+	}
+}

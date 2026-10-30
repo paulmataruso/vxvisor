@@ -21,6 +21,8 @@
  .fx-checks .bad{color:var(--danger)}
  .fx-checks .warn{color:var(--warn)}
  .fx-sub{margin:14px 0 6px;font-size:13px;font-weight:600}
+ .fx-vnis{margin-top:6px}
+ .fx-vnis td,.fx-vnis th{font-size:12px;padding:2px 8px}
 </style>
 <div class="card">
   <div class="card-head">
@@ -56,7 +58,7 @@
 
   {{if $.V.Admin}}
   <table>
-    <tr><th>Host</th><th>Underlay</th><th>TEP</th><th>Status</th><th>EVPN sessions</th><th></th></tr>
+    <tr><th>Host</th><th>Underlay</th><th>TEP</th><th>Status</th><th>EVPN sessions</th><th>VNIs</th><th></th></tr>
     {{range $c.Hosts}}{{$h := index $c.Health .Node}}
     <tr>
       <td class="mono"><strong>{{.Node}}</strong>{{if eq .Node $.V.Self}} <span class="pill">this host</span>{{end}}</td>
@@ -64,6 +66,10 @@
       <td class="mono">{{.TEP}}</td>
       <td>{{if eq $h.State "ok"}}<span class="pill running">● ok</span>{{else if eq $h.State "error"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● error</span>{{else if eq $h.State "unreachable"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● unreachable</span>{{else}}<span class="pill">● applying</span>{{end}}{{if and $h.State (not $h.BFD) (ne $h.State "unreachable")}} <span class="pill" title="bfdd isn't running: BFD is off until FRR restarts with bfdd (install.sh enables it)">no BFD</span>{{end}}{{if $h.DupAddrs}} <span class="pill" style="color:var(--warn)" title="EVPN froze these MACs / addresses: seen moving between hosts too often (a loop or a duplicate). {{range $h.DupAddrs}}{{.}} {{end}}">⚠ {{len $h.DupAddrs}} duplicate</span>{{end}}{{if $h.Drops}} <span class="pill" title="VXLAN packets from a source that isn't a fabric host, dropped by the ingress guard">{{$h.Drops}} dropped</span>{{end}}</td>
       <td class="mono" style="font-size:12px">{{range $h.BGP}}{{.Peer}} {{if eq .State "Established"}}<span style="color:var(--ok,#1a7f37)">up {{.Uptime}}</span>{{else}}<span style="color:var(--danger)">{{.State}}</span>{{end}}<br>{{else}}{{if gt (len $c.Hosts) 1}}<span class="muted">none</span>{{else}}<span class="muted">single host</span>{{end}}{{end}}</td>
+      <td style="font-size:12px">{{if $h.VNIs}}<details><summary>{{len $h.VNIs}}</summary>
+        <table class="fx-vnis"><tr><th>VNI</th><th>Type</th><th>VRF</th><th>MACs</th><th>ARP</th><th>Remote VTEPs</th></tr>
+        {{range $h.VNIs}}<tr><td class="mono">{{.VNI}}</td><td>{{.Type}}</td><td class="mono">{{.VRF}}</td><td>{{.MACs}}</td><td>{{.ARPs}}</td><td>{{.Remotes}}</td></tr>{{end}}
+        </table></details>{{else}}<span class="muted">—</span>{{end}}</td>
       <td style="text-align:right">
         <form method="post" action="/fabric/f/{{$c.UUID}}/host-remove" style="display:inline" onsubmit="return confirm('Remove {{.Node}} from {{$c.Name}}? Refused while anything on that host uses a fabric port group.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="node" value="{{.Node}}"><button class="btn sm">Remove</button></form>
         {{if eq $h.State "unreachable"}}<form method="post" action="/fabric/f/{{$c.UUID}}/host-remove" style="display:inline" onsubmit="return confirm('Evict {{.Node}}? Use this only for a dead host: the others drop it without its consent. When it comes back it removes its own fabric state.')"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="node" value="{{.Node}}"><input type="hidden" name="evict" value="1"><button class="btn sm danger">Evict</button></form>{{end}}

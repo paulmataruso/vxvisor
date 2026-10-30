@@ -377,8 +377,8 @@ against the running daemon, `internal/service/fabric_e2e_test.go`):
   send IPv6 RAs. This is enforced on the bridge `forward` AND `input` hooks, because routed traffic is
   delivered to the anycast gateway. Every local port's forwarded broadcast/multicast is policed to
   1000 pps. DHCP never crosses a tunnel, and guests can't inject 802.1Q/ad. Router legs (`vrh*`) are
-  exempt; L2-only port groups get only the policer. Containers are refused on routed fabric port groups:
-  they get no fabric lease.
+  exempt; L2-only port groups get only the policer. A container on a routed fabric port group gets a
+  fabric lease for its vdxd-assigned MAC (key `container-<id>`), released on delete or a network change.
 - **Topology map**: one "VXVisor Fabric · <name>" switch per host. The underlay is its uplink, the TEP a
   host adapter, and the fabric port groups and their VMs are its port groups. Tenants see their own,
   without host devices.
@@ -386,9 +386,9 @@ against the running daemon, `internal/service/fabric_e2e_test.go`):
   (state, BGP sessions, BFD, EVPN duplicate flags, VXLAN guard drops), port groups, connectivity table +
   per-org matrix, egress. Org admins build on fabrics opened to their org.
 
+Also: a TCP MSS clamp on VRF-routed SYNs (`rt mtu`), and per-host VNI detail on the page (type, VRF,
+MACs, ARP entries, remote VTEPs).
+
 Not built yet (phase 1 remainder):
-- TCP MSS clamp.
-- Per-VNI VTEP / MAC table detail on the page.
-- Fabric leases for containers.
 - A 2-node live test (no test cluster yet).
 - Phase 1b (WireGuard over management) and phase 3 are unchanged from §14.
