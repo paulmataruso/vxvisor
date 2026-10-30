@@ -21,7 +21,8 @@ runtime benefit). Repo: `github.com/paulmataruso/vxvisor` (name ≠ module path,
 - **`deploy/install.sh` MUST install EVERY tool any UI feature can configure.** If the UI
   exposes it, the host must have the software for it — no "optional" gaps. Current coverage:
   qemu/ovmf/swtpm (VMs/TPM), lvm2+zfsutils (ZFS/LVM pools), nfs-common/cifs-utils/ceph-common/
-  open-iscsi (shared storage), **frr+frr-pythontools (routing — OSPF/BGP/static)**, lxc stack
+  open-iscsi (shared storage), **frr+frr-pythontools (routing — OSPF/BGP/static)**, wireguard-tools
+  (fabric over management), lxc stack
   (containers), chrony (time), tuned (perf), bridge/nft/ethtool
   (networking). `apt_opt` skips only packages with NO install candidate on the release; an
   available package that fails to install is a **hard error** (never `|| true`-swallowed).
@@ -361,3 +362,9 @@ there about hosts/IPs/credentials as **stale** until re-verified on the new host
   - Fabric `networks` rows (`mode='fabric'`) belong to the fabric: the generic port-group paths refuse them.
   - A fabric gateway router leg sits on the fabric's bridge: never delete it through the generic leg paths.
   - Live E2E: `VDX_E2E_DB=… VDX_E2E_FABRIC=1` as root on a host with vdxd running (the daemon realizes it).
+  - **Over management** (§16, `Spec.Underlay="mgmt"`): the TEP rides WireGuard `vxfwg0`, port 51871, between the
+    hosts' static mgmt IPs. The mgmt interface is ONLY read — never change its MTU, addresses, master or routes.
+    Each node's key is `<DataDir>/fabric-wg.key` (never leaves it); its public key and endpoint come from the node
+    itself (`/cluster/v1/fabric/wg`) and it vetoes an intent that misstates them. Refused on a DHCP or VIP mgmt
+    address. `wg syncconf` files go in `/etc/wireguard` only (Ubuntu's AppArmor profile for `wg`). `vxfwg0` is not
+    `IsFabricDevice` (Prune must not touch it); teardown is via `fabric_underlay` / `DeleteWG`.

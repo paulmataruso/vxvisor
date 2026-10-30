@@ -36,9 +36,15 @@ func Firewall(in *Intent, node string) (string, error) {
 		return b.String(), nil
 	}
 	b.WriteString("table inet " + FirewallTable + " {\n")
-	b.WriteString(`  chain input {
-    type filter hook input priority filter - 5; policy accept;
-    iifname "vxfvrf*" jump guest_in
+	b.WriteString("  chain input {\n    type filter hook input priority filter - 5; policy accept;\n")
+	if f.OverMgmt() {
+		in, err := wgInput(f, node)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(in)
+	}
+	b.WriteString(`    iifname "vxfvrf*" jump guest_in
     iifname "vxfb*" counter drop
   }
   chain guest_in {
@@ -122,7 +128,41 @@ func Firewall(in *Intent, node string) (string, error) {
 		}
 		b.WriteString("    counter drop\n  }\n")
 	}
+	if f.OverMgmt() {
+		// WireGuard leaves marked CS1 (below best effort): on a congested
+		// management link, management traffic wins.
+		fmt.Fprintf(&b, "  chain underlay_out {\n    type filter hook postrouting priority mangle; policy accept;\n    udp sport %d counter ip dscp set cs1\n  }\n", WGPort)
+	}
 	b.WriteString("}\n")
+	return b.String(), nil
+}
+
+// wgInput is the input filter of a fabric over management: WireGuard is
+// accepted only from the other hosts' management addresses, and nothing
+// claiming a TEP-subnet source is accepted unless it came out of the tunnel
+// (so no one on the management network can spoof a peer's VXLAN, BGP or BFD).
+func wgInput(f *Spec, node string) (string, error) {
+	var b strings.Builder
+	var eps []string
+	var tepNet *net.IPNet
+	for _, h := range f.Hosts {
+		if ip := ipv4(h.Endpoint); h.Node != node && ip != nil {
+			eps = append(eps, ip.String())
+		}
+		if _, n, err := net.ParseCIDR(h.TEP); err == nil && tepNet == nil {
+			tepNet = n
+		}
+	}
+	if tepNet == nil {
+		return "", fmt.Errorf("fabric %s has no TEP subnet", f.Name)
+	}
+	if len(eps) == 0 {
+		fmt.Fprintf(&b, "    udp dport %d counter drop\n", WGPort)
+	} else {
+		fmt.Fprintf(&b, "    meta nfproto ipv4 udp dport %d ip saddr != { %s } counter drop\n", WGPort, strings.Join(sortedUniq(eps), ", "))
+		fmt.Fprintf(&b, "    meta nfproto ipv6 udp dport %d counter drop\n", WGPort)
+	}
+	fmt.Fprintf(&b, "    ip saddr %s iifname != { %q, \"lo\" } counter drop\n", tepNet, WGDev)
 	return b.String(), nil
 }
 

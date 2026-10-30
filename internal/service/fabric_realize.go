@@ -104,9 +104,12 @@ func (s *Service) ReconcileFabric() error {
 	}
 	if member {
 		note("l3mdev", assertL3mdev())
-		note("underlay", s.ensureUnderlay(f, *h))
+		note("underlay", s.ensureUnderlay(f, *h, in.WGPeers(self)))
 	}
 	note("stale underlay", s.teardownUnderlays(f))
+	if (!member || !f.OverMgmt()) && netdrv.IfaceExists(fabric.WGDev) {
+		note("stale tunnel", fabric.DeleteWG(fabricExec)) // vdxd owns vxf*: one no row records
+	}
 	if member {
 		note("devices", fabric.Realize(fabricExec, plan))
 	}
@@ -145,7 +148,7 @@ func (s *Service) fabricLeftovers() bool {
 	}
 	if ents, err := os.ReadDir("/sys/class/net"); err == nil {
 		for _, e := range ents {
-			if fabric.IsFabricDevice(e.Name()) {
+			if fabric.IsFabricDevice(e.Name()) || e.Name() == fabric.WGDev {
 				return true
 			}
 		}
@@ -182,9 +185,11 @@ func assertL3mdev() error {
 // ---- underlay ----------------------------------------------------------------
 
 // ensureUnderlay puts this host's TEP on its underlay: the dedicated NIC (MTU
-// raised to the fabric's, its original recorded once) or a VLAN subinterface
-// vdxd creates (the parent is never changed).
-func (s *Service) ensureUnderlay(f *fabric.Spec, h fabric.Host) error {
+// raised to the fabric's, its original recorded once), a VLAN subinterface
+// vdxd creates (the parent is never changed), or the WireGuard device over
+// management (the management interface is never touched; peers = the tunnel's
+// other ends).
+func (s *Service) ensureUnderlay(f *fabric.Spec, h fabric.Host, peers []fabric.WGPeer) error {
 	dev := h.UnderlayDev()
 	var have struct {
 		dev, tep string
@@ -195,6 +200,17 @@ func (s *Service) ensureUnderlay(f *fabric.Spec, h fabric.Host) error {
 			return err
 		}
 		recorded = false
+	}
+	if f.OverMgmt() {
+		// Recorded as the WireGuard device alone (made by vdxd, deleted on
+		// teardown): the management interface is never marked or changed.
+		if !recorded {
+			if _, err := s.db.Exec(`INSERT OR REPLACE INTO fabric_underlay(fabric_uuid, iface, dev, tep, made_vlan, orig_mtu) VALUES(?,?,?,?,1,0)`,
+				f.UUID, dev, dev, h.TEP); err != nil {
+				return err
+			}
+		}
+		return s.ensureWGUnderlay(f, h, peers)
 	}
 	if !recorded {
 		orig := 0
@@ -509,7 +525,8 @@ func (s *Service) syncFabricFRR() error {
 }
 
 // fabricVXLANListeners adds the fabric's VNIs to the host VXLAN ingress guard:
-// each is accepted only from the other members' TEPs.
+// each is accepted only from the other members' TEPs (over management, only out
+// of the WireGuard tunnel).
 func (s *Service) fabricVXLANListeners() []netdrv.VXLANListener {
 	in, err := s.fabricIntent()
 	if err != nil {
@@ -521,12 +538,16 @@ func (s *Service) fabricVXLANListeners() []netdrv.VXLANListener {
 		return nil
 	}
 	peers := in.Peers(self)
+	iface := ""
+	if f, _ := in.HostOf(self); f.OverMgmt() {
+		iface = fabric.WGDev
+	}
 	var out []netdrv.VXLANListener
 	for _, sg := range plan.Segments {
-		out = append(out, netdrv.VXLANListener{Port: fabric.VXLANPort, VNI: sg.VNI, Peers: peers})
+		out = append(out, netdrv.VXLANListener{Port: fabric.VXLANPort, VNI: sg.VNI, Peers: peers, Iface: iface})
 	}
 	for _, v := range plan.VRFs {
-		out = append(out, netdrv.VXLANListener{Port: fabric.VXLANPort, VNI: v.L3VNI, Peers: peers})
+		out = append(out, netdrv.VXLANListener{Port: fabric.VXLANPort, VNI: v.L3VNI, Peers: peers, Iface: iface})
 	}
 	return out
 }

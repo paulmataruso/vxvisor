@@ -97,6 +97,7 @@ func (s *Server) fabricPage(w http.ResponseWriter, r *http.Request, p *service.P
 	cards := fabricCards(p, v, orgName, health)
 	nics := s.svc.FabricNICChoices(p)
 	nicsJSON, _ := json.Marshal(nics)
+	mgmtJSON, _ := json.Marshal(s.svc.FabricWGChoices(p))
 	var checks *fabricChecksEntry
 	if e, ok := lastFabricChecks.LoadAndDelete(p.Token()); ok {
 		if ce := e.(fabricChecksEntry); time.Since(ce.At) < 10*time.Minute {
@@ -108,6 +109,8 @@ func (s *Server) fabricPage(w http.ResponseWriter, r *http.Request, p *service.P
 		"Cards":    cards,
 		"Orgs":     orgs,
 		"NICsJSON": template.JS(nicsJSON),
+		"MgmtJSON": template.JS(mgmtJSON),
+		"WGPort":   fabric.WGPort,
 		"Checks":   checks,
 		"Routers":  s.svc.FabricRouterChoices(p),
 	})
@@ -225,6 +228,9 @@ func connectivityMatrix(in *fabric.Intent, fab string, org int64, pgs []fabric.P
 func fabricForm(r *http.Request) service.FabricInput {
 	_ = r.ParseForm()
 	fi := service.FabricInput{Name: r.FormValue("name"), ASN: int(atoi(r.FormValue("asn"))), MTU: int(atoi(r.FormValue("mtu")))}
+	if r.FormValue("underlay") == fabric.UnderlayMgmt {
+		fi.Underlay = fabric.UnderlayMgmt
+	}
 	for _, o := range r.Form["orgs"] {
 		if id := atoi(o); id > 0 {
 			fi.Orgs = append(fi.Orgs, id)

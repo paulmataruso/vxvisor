@@ -162,12 +162,15 @@ func IsVXLAN(name string) bool {
 // VXLANListener is one VXLAN identity this host terminates: frames for VNI on
 // UDP Port are accepted only from Peers. Open accepts from anywhere — only for a
 // VXLAN that has no configured peers by design (the [cluster] overlay learns its
-// peers), so filtering it would cut it off.
+// peers), so filtering it would cut it off. Iface, when set, also requires the
+// frames to arrive on that interface (a fabric over management: only out of its
+// WireGuard tunnel).
 type VXLANListener struct {
 	Port  int
 	VNI   int
 	Peers []string
 	Open  bool
+	Iface string
 }
 
 // RenderVXLANGuard builds the vdxvxlan table. For every UDP port a managed VXLAN
@@ -179,6 +182,7 @@ func RenderVXLANGuard(ls []VXLANListener) string {
 	type key struct{ port, vni int }
 	peers := map[key]map[string]bool{}
 	open := map[key]bool{}
+	iface := map[key]string{}
 	ports := map[int]bool{}
 	for _, l := range ls {
 		if l.Port < 1 || l.Port > 65535 || l.VNI < MinVNI || l.VNI > MaxVNI {
@@ -188,6 +192,9 @@ func RenderVXLANGuard(ls []VXLANListener) string {
 		ports[l.Port] = true
 		if l.Open {
 			open[k] = true
+		}
+		if l.Iface != "" && ValidIfName(l.Iface) {
+			iface[k] = l.Iface
 		}
 		if peers[k] == nil {
 			peers[k] = map[string]bool{}
@@ -220,6 +227,9 @@ func RenderVXLANGuard(ls []VXLANListener) string {
 		for _, vni := range vnis {
 			k := key{port, vni}
 			match := fmt.Sprintf("udp dport %d @th,96,24 %d", port, vni)
+			if iface[k] != "" {
+				match = fmt.Sprintf("iifname %q %s", iface[k], match)
+			}
 			if open[k] {
 				fmt.Fprintf(&b, "    %s accept\n", match)
 				continue

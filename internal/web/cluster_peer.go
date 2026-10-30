@@ -47,6 +47,7 @@ func (s *Server) PeerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /cluster/v1/fabric/dfping", g(s.peerFabricDFPing))
 	mux.HandleFunc("GET /cluster/v1/fabric/status", g(s.peerFabricStatus))
 	mux.HandleFunc("GET /cluster/v1/fabric/nics", g(s.peerFabricNICs))
+	mux.HandleFunc("GET /cluster/v1/fabric/wg", g(s.peerFabricWG))
 }
 
 // peerMigratePrecheck (destination) checks an inbound migration record (port

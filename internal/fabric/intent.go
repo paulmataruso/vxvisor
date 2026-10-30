@@ -38,14 +38,22 @@ type Spec struct {
 	MTU   int     `json:"mtu"`            // underlay MTU; overlay devices get MTU-50
 	Orgs  []int64 `json:"orgs,omitempty"` // orgs whose admins may build on it (instance admins always may)
 	Hosts []Host  `json:"hosts"`
+	// Underlay is "" (a dedicated NIC or VLAN per host) or UnderlayMgmt
+	// (WireGuard between the hosts' management addresses; the MTU is then the
+	// WireGuard device's). Fixed once created.
+	Underlay string `json:"underlay,omitempty"`
 }
 
 // Host is one node's membership: its underlay interface and tunnel endpoint.
 type Host struct {
 	Node  string `json:"node"`           // cluster node name
-	Iface string `json:"iface"`          // dedicated NIC or bond
+	Iface string `json:"iface"`          // dedicated NIC or bond (over management: the management interface, never changed)
 	VLAN  int    `json:"vlan,omitempty"` // 802.1Q tag on Iface (0 = untagged)
 	TEP   string `json:"tep"`            // tunnel endpoint with prefix, "10.250.0.1/24"
+	// Over management only: the node's static management IPv4 (its WireGuard
+	// endpoint) and its WireGuard public key, both as the node itself reported.
+	Endpoint string `json:"endpoint,omitempty"`
+	WGPub    string `json:"wg_pub,omitempty"`
 }
 
 // PortGroup is a fabric-wide network (NSX segment). Routed when CIDR is set
@@ -231,9 +239,12 @@ func (f *Spec) GuestMTU() int { return f.MTU - 50 }
 // TEPIP is the host's tunnel endpoint without its prefix.
 func (h Host) TEPIP() string { return strings.Split(h.TEP, "/")[0] }
 
-// UnderlayDev is the kernel device that carries the TEP: Iface, or its VLAN
-// subinterface.
+// UnderlayDev is the kernel device that carries the TEP: Iface, its VLAN
+// subinterface, or (over management) the WireGuard device.
 func (h Host) UnderlayDev() string {
+	if h.WGPub != "" {
+		return WGDev
+	}
 	if h.VLAN == 0 {
 		return h.Iface
 	}
@@ -248,6 +259,40 @@ var (
 	rePorts  = regexp.MustCompile(`^[0-9]{1,5}(-[0-9]{1,5})?(,[0-9]{1,5}(-[0-9]{1,5})?){0,31}$`)
 	reFabNam = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._-]{0,31}$`)
 )
+
+// validWG checks a host's WireGuard fields against its fabric's underlay: over
+// management every host has a unique static endpoint and key and no VLAN; on a
+// dedicated underlay it has neither.
+func validWG(f *Spec, h Host, endpoints, keys map[string]string) error {
+	if !f.OverMgmt() {
+		if h.Endpoint != "" || h.WGPub != "" {
+			return fmt.Errorf("host %s: a WireGuard endpoint/key is only for a fabric over management", h.Node)
+		}
+		return nil
+	}
+	if h.VLAN != 0 {
+		return fmt.Errorf("host %s: a fabric over management takes no VLAN", h.Node)
+	}
+	ep := ipv4(h.Endpoint)
+	if ep == nil || ep.IsLoopback() || ep.IsMulticast() || ep.IsUnspecified() || ep.Equal(net.IPv4bcast) {
+		return fmt.Errorf("host %s: management address %q is not a usable IPv4 address", h.Node, h.Endpoint)
+	}
+	if h.Endpoint != ep.String() {
+		return fmt.Errorf("host %s: write the management address as %s", h.Node, ep)
+	}
+	if other, ok := endpoints[h.Endpoint]; ok {
+		return fmt.Errorf("management address %s is used by both %s and %s", h.Endpoint, other, h.Node)
+	}
+	endpoints[h.Endpoint] = h.Node
+	if !ValidWGKey(h.WGPub) {
+		return fmt.Errorf("host %s: missing or malformed WireGuard public key", h.Node)
+	}
+	if other, ok := keys[h.WGPub]; ok {
+		return fmt.Errorf("%s and %s have the same WireGuard key", other, h.Node)
+	}
+	keys[h.WGPub] = h.Node
+	return nil
+}
 
 // ValidName checks a port group name (the same rule as host port groups).
 func ValidName(n string) error {
@@ -298,7 +343,11 @@ func (in *Intent) Validate() error {
 		if f.MTU < 1330 || f.MTU > 9216 {
 			return fmt.Errorf("fabric %s: underlay MTU %d is out of range — use 1330–9216 (1500 gives guests 1450)", f.Name, f.MTU)
 		}
+		if f.Underlay != "" && f.Underlay != UnderlayMgmt {
+			return fmt.Errorf("fabric %s: unknown underlay %q", f.Name, f.Underlay)
+		}
 		var subnet *net.IPNet
+		endpoints, keys := map[string]string{}, map[string]string{}
 		for _, h := range f.Hosts {
 			if !reNode.MatchString(h.Node) {
 				return fmt.Errorf("fabric %s: node name %q is invalid", f.Name, h.Node)
@@ -307,6 +356,9 @@ func (in *Intent) Validate() error {
 				return fmt.Errorf("host %s is already in fabric %s — a host belongs to one fabric", h.Node, other)
 			}
 			nodes[h.Node] = f.Name
+			if err := validWG(f, h, endpoints, keys); err != nil {
+				return err
+			}
 			if routing.ValidIface(h.Iface) != nil || strings.HasPrefix(h.Iface, "vxf") {
 				return fmt.Errorf("host %s: interface %q is not a valid interface name", h.Node, h.Iface)
 			}
@@ -331,6 +383,11 @@ func (in *Intent) Validate() error {
 				subnet = n
 			} else if !subnet.IP.Equal(n.IP) || subnet.Mask.String() != n.Mask.String() {
 				return fmt.Errorf("fabric %s: every TEP must be in one subnet (%s), %s's is %s", f.Name, subnet, h.Node, n)
+			}
+		}
+		for ep, node := range endpoints {
+			if subnet != nil && subnet.Contains(net.ParseIP(ep)) {
+				return fmt.Errorf("%s's management address %s is inside the TEP subnet %s — use a separate subnet for the fabric", node, ep, subnet)
 			}
 		}
 		for _, o := range f.Orgs {

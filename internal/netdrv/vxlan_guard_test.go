@@ -147,6 +147,15 @@ func TestRenderVXLANGuard(t *testing.T) {
 	if empty := RenderVXLANGuard(nil); strings.Contains(empty, "udp") {
 		t.Errorf("no listeners = nothing filtered:\n%s", empty)
 	}
+	// Bound to an interface (a fabric over management): only out of the tunnel.
+	wg := RenderVXLANGuard([]VXLANListener{{Port: 4789, VNI: 2000000, Peers: []string{"10.250.0.2"}, Iface: "vxfwg0"},
+		{Port: 4789, VNI: 2000001, Peers: []string{"10.250.0.2"}, Iface: "bad name!"}})
+	for _, want := range []string{`iifname "vxfwg0" udp dport 4789 @th,96,24 2000000 ip saddr { 10.250.0.2 } accept`,
+		"\n    udp dport 4789 @th,96,24 2000001 ip saddr { 10.250.0.2 } accept"} {
+		if !strings.Contains(wg, want) {
+			t.Errorf("guard missing %q\n%s", want, wg)
+		}
+	}
 }
 
 // TestRenderBondEditPlan: a mode change releases every member, switches mode

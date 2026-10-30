@@ -309,6 +309,11 @@ func (s *Service) SyncFabric() {
 // know (its interfaces, its legacy VXLANs, its instances).
 func (s *Service) fabricCheck(cur, next fabric.Intent) error {
 	self := s.selfNode()
+	for _, g := range next.Fabrics {
+		if c := cur.Fabric(g.UUID); c != nil && c.Underlay != g.Underlay {
+			return fmt.Errorf("fabric %s: its underlay can't change once it exists", g.Name)
+		}
+	}
 	nf, nh := next.HostOf(self)
 	cf, ch := cur.HostOf(self)
 	if nh != nil && (ch == nil || cf.UUID != nf.UUID || *ch != *nh) {
@@ -378,12 +383,16 @@ func (s *Service) legacyVNIs() map[int]string {
 
 // checkUnderlay refuses an underlay interface that can't carry this node's TEP:
 // management or any other role, a stacked/enslaved NIC, a TEP subnet that
-// overlaps something already on the host, too small an MTU.
+// overlaps something already on the host, too small an MTU. Over management,
+// checkMgmtUnderlay replaces the interface checks (it only reads management).
 func (s *Service) checkUnderlay(f *fabric.Spec, h fabric.Host) error {
-	if !netdrv.IfaceExists(h.Iface) {
+	if f.OverMgmt() {
+		if err := s.checkMgmtUnderlay(f, h); err != nil {
+			return err
+		}
+	} else if !netdrv.IfaceExists(h.Iface) {
 		return fmt.Errorf("interface %s doesn't exist on this host", h.Iface)
-	}
-	if h.VLAN == 0 {
+	} else if h.VLAN == 0 {
 		if err := s.guardIfaceInUse(h.Iface, "fabric underlay"); err != nil {
 			return err
 		}
@@ -409,7 +418,12 @@ func (s *Service) checkUnderlay(f *fabric.Spec, h fabric.Host) error {
 	if err != nil {
 		return fmt.Errorf("list interfaces: %w", err)
 	}
+	var own string // this fabric's underlay as already realized here
+	_ = s.db.QueryRow(`SELECT dev FROM fabric_underlay WHERE fabric_uuid=?`, f.UUID).Scan(&own)
 	for _, it := range ifs {
+		if it.Name == own {
+			continue
+		}
 		for _, a := range it.Addrs {
 			ip, n, err := net.ParseCIDR(a)
 			if err != nil || ip.To4() == nil {

@@ -50,7 +50,8 @@ func TestFabricPageRender(t *testing.T) {
 		data := map[string]any{"P": p, "CSRF": "tok", "Active": "fabric", "V": v,
 			"Cards": fabricCards(p, v, names, h), "Orgs": []service.OrgLite{{ID: 1, Name: "default"}, {ID: 2, Name: "acme"}},
 			"NICsJSON": template.JS(`{"n1":[{"name":"enp9s0","kind":"physical","mtu":9000,"carrier":true,"free":true}]}`), "Checks": checks,
-			"Routers": []service.FabricRouterChoice{{ID: 5, Name: "edge"}}}
+			"Routers": []service.FabricRouterChoice{{ID: 5, Name: "edge"}},
+			"MgmtJSON": template.JS(`{"n1":{"node":"n1","iface":"vSwitch0","endpoint":"172.16.0.11","mtu":1500}}`), "WGPort": fabric.WGPort}
 		var b bytes.Buffer
 		if err := tm.ExecuteTemplate(&b, "fabric.html", data); err != nil {
 			t.Fatalf("fabric.html: %v", err)
@@ -82,6 +83,26 @@ func TestFabricPageRender(t *testing.T) {
 	// n1 is ok: no Evict on it; a host already in the fabric isn't offered again.
 	if strings.Count(out, `name="evict"`) != 1 || strings.Contains(out, `<option>n1</option>`) {
 		t.Fatalf("evict/host picker wrong")
+	}
+
+	// A fabric over management: the tunnel over the management interface, its
+	// sessions, and an add-host form with no interface or VLAN.
+	mv := fabricTestView()
+	mv.OrgID, mv.Egress, mv.VRF = 1, nil, nil
+	pub := "x2FvQ2fF1PDcVv2yrUQLxwpB1ZLsKBX7uIvjLHzG2VY="
+	mv.Intent.Fabrics[0].Underlay, mv.Intent.Fabrics[0].MTU = fabric.UnderlayMgmt, 1440
+	mv.Intent.Fabrics[0].Hosts = []fabric.Host{{Node: "n1", Iface: "vSwitch0", TEP: "10.250.0.1/24", Endpoint: "172.16.0.11", WGPub: pub},
+		{Node: "n2", Iface: "vSwitch0", TEP: "10.250.0.2/24", Endpoint: "172.16.0.12", WGPub: "Fq4bxRrDj3WpjsHrRtUHtN8xKWRSmzRo9k8LSI9o+Vo="}}
+	health["n1"] = service.FabricNodeStatus{Node: "n1", State: "ok", BFD: true, WG: []service.FabricWGPeer{{Node: "n2", Endpoint: "172.16.0.12"}}}
+	out = render(admin, mv, nil)
+	for _, want := range []string{"over management · WireGuard", "MTU 1440 → guests 1390", "vxfwg0", "over vSwitch0 · 172.16.0.11", "↔ n2", "no handshake · never",
+		`"endpoint":"172.16.0.11"`, "rides over management"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("management fabric page missing %q", want)
+		}
+	}
+	if strings.Contains(out, `id="h-f1"`) {
+		t.Fatalf("add-host on a fabric over management offers an interface")
 	}
 
 	// An org admin builds on the fabric but never sees hosts or the wizard.

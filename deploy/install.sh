@@ -148,6 +148,13 @@ systemctl enable --now lxc     >/dev/null 2>&1 || true
 say "Routing stack (FRR: OSPF / BGP / static)"
 apt_opt frr frr-pythontools
 
+# wireguard-tools: `wg` for the VXVisor Fabric's "over management" underlay
+# (docs/FABRIC.md §16): each host's TEP rides an encrypted WireGuard tunnel
+# between the hosts' management addresses. The wireguard module is in the stock
+# kernel; nothing is enabled here (vdxd creates vxfwg0 only for such a fabric).
+say "WireGuard tools (fabric over management)"
+apt_opt wireguard-tools
+
 # lldpd: link-layer discovery. Receives BOTH LLDP and Cisco CDP so the network
 # topology diagram can show the upstream switch each uplink is wired to (switch
 # name, port, VLAN, mgmt IP). Enabled now; the diagram reads `lldpctl`.

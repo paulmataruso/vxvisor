@@ -324,6 +324,9 @@ Full review: the session transcript of 2026-10-30.
   - `install.sh` adds `wireguard-tools`.
 - Refused on a DHCP-addressed mgmt IP. The TEP is the node's own IP, never the VIP.
 - BUM policers are mandatory, and fabric UDP is shaped or DSCP-marked.
+- Built in v1.111 as §16 describes. Two changes from the above: public keys come from each node over the
+  signed peer API and every node vetoes an intent that misstates its own (not gossip). The guard
+  matches `iifname "vxfwg0"`, the one device vdxd makes.
 
 **D7 — (merged into phase 1).** Distributed L3 is part of D5 per the owner's decision.
 
@@ -391,4 +394,61 @@ MACs, ARP entries, remote VTEPs).
 
 Not built yet (phase 1 remainder):
 - A 2-node live test (no test cluster yet).
-- Phase 1b (WireGuard over management) and phase 3 are unchanged from §14.
+- Phase 3 is unchanged from §14. Phase 1b is built (§16).
+
+## 16. Phase 1b: a fabric over management (v1.111)
+
+For hosts with no spare NIC. Chosen per fabric in the wizard's underlay step ("Over management
+(WireGuard)"). `Spec.Underlay = "mgmt"` is fixed once the fabric exists: every member vetoes a change.
+
+**What changes on a host: one device, nothing else.** Each host's TEP sits on `vxfwg0`, a WireGuard
+device vdxd creates. Its encrypted UDP (port 51871) runs between the hosts' management addresses. The
+management interface is only *read*: its name, its static IPv4, its MTU. vdxd never changes its MTU,
+addresses, master or routes. The `fabric_underlay` row records `vxfwg0` alone, so no guard ever treats
+the management NIC as the fabric's. Teardown deletes `vxfwg0`. The live E2E snapshots the management
+interface's link, addresses and routes and requires them byte-identical while the fabric runs and after
+it is gone.
+
+**Keys.** Each node makes its own X25519 key on first use: `<DataDir>/fabric-wg.key`, 0600, base64 as
+`wg genkey` writes it (Go `crypto/ecdh`; the E2E checks `wg pubkey` agrees). The private key never
+leaves the node. The wizard and add-host fetch each node's public key, management interface and
+endpoint from the node itself (`GET /cluster/v1/fabric/wg`, HMAC-signed both ways) and write them into
+the host's intent entry (`Host.Endpoint`, `Host.WGPub`). In the 2PC every node checks its own entry
+against its live key, interface and address (`checkMgmtUnderlay`), so a wrong key or endpoint can't
+commit. Each peer's `AllowedIPs` is only its own TEP/32, so one host can never speak for another's TEP.
+`wg syncconf` loads the config: unchanged peers keep their sessions and stale peers go. The config
+passes through a 0600 file in `/etc/wireguard` that is removed straight after. Ubuntu's AppArmor
+profile for `wg` reads config only from there, and vdxd doesn't widen it.
+
+**Refused** (preflight and the member veto): no `wg` (install.sh installs `wireguard-tools`); the
+module won't load; the management address is a DHCP lease (`dynamic`), because a new lease would cut
+the tunnel; the address is a cluster VIP (configured, held, or the leader's), because a VIP moves; the
+management MTU is under fabric MTU + 60; UDP 51871 is taken; `vxfwg0` exists and vdxd didn't make it; a
+management address inside the TEP subnet (validation). The address is `[cluster] mgmt_addr`, else the
+admin listener's IP, else the management interface's first non-VIP IPv4.
+
+**MTU.** The fabric MTU is the tunnel's: 1440 by default (1500 − 60), so guests get 1390. The deploy
+check DF-pings every TEP through the tunnel at full size. Failure reverts the deploy, as on a dedicated
+underlay. It also DF-pings every peer's management address at MTU + 60. That one only warns: WireGuard
+still works if its outer packets fragment, just slower.
+
+**Filtering** (in `inet vdxfabric`, rendered from the intent):
+- UDP 51871 is accepted only from the other members' management addresses (IPv6 never; a single host
+  from no one).
+- Anything with a source in the TEP subnet is dropped unless it came out of `vxfwg0` (or `lo`). Nobody
+  on the management network can pass for a peer's VXLAN, BGP or BFD.
+- The fabric's VNIs in `inet vdxvxlan` additionally require `iifname "vxfwg0"`.
+- The tunnel's outgoing packets are marked DSCP CS1 (`postrouting`, below best effort), so management
+  traffic wins on a congested link.
+- The BUM policers of the bridge guard apply as on any fabric.
+
+**Status.** The hosts table shows `vxfwg0 over <iface> · <address>` and each tunnel session's latest
+handshake. More than 3 minutes without one shows red.
+
+**Tests.**
+- Unit: keys vs RFC 7748, validation, config rendering, `EnsureWG` idempotence and that the key never
+  reaches a command line, firewall `nft -c`.
+- The netns lab with `VX_FABRIC_LAB_WG=1`: the whole lab over WireGuard, plus a live handshake, CS1
+  seen by the receiver, and a stranger on the management network dropped at the tunnel port and when
+  spoofing a TEP.
+- The live single-host E2E `TestE2EFabricMgmt`.

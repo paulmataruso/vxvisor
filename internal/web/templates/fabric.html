@@ -29,7 +29,7 @@
     <h2>VXVisor Fabric</h2>
     {{if .V.Admin}}<button class="btn primary" data-modal="m-deploy">+ Deploy fabric</button>{{end}}
   </div>
-  <p class="muted" style="margin:0">A fabric stretches <b>port groups across hosts</b>. A VM on a fabric port group reaches the others on it at layer 2 wherever they run, and keeps its address when it moves. Routed port groups get a <b>distributed gateway</b>: the same gateway address answers on every host, so traffic between port groups is routed on the host where the VM runs. Hosts reach each other over a dedicated underlay (a NIC, or a VLAN on a non-management uplink). The control plane is BGP EVPN, the data plane VXLAN. Traffic between two port groups is <b>denied</b> until a row in the connectivity table allows it. Inside one port group, traffic is always allowed.</p>
+  <p class="muted" style="margin:0">A fabric stretches <b>port groups across hosts</b>. A VM on a fabric port group reaches the others on it at layer 2 wherever they run, and keeps its address when it moves. Routed port groups get a <b>distributed gateway</b>: the same gateway address answers on every host, so traffic between port groups is routed on the host where the VM runs. Hosts reach each other over a dedicated underlay (a NIC, or a VLAN on a non-management uplink), or over the management network inside an encrypted WireGuard tunnel that leaves the management interface unchanged. The control plane is BGP EVPN, the data plane VXLAN. Traffic between two port groups is <b>denied</b> until a row in the connectivity table allows it. Inside one port group, traffic is always allowed.</p>
 </div>
 
 {{with .Checks}}
@@ -48,7 +48,7 @@
 {{range $c := .Cards}}
 <div class="card">
   <div class="card-head">
-    <h2>{{$c.Name}} <span class="pill">AS {{$c.ASN}}</span> <span class="pill" title="Underlay MTU; VMs on its port groups get {{$c.GuestMTU}}">MTU {{$c.MTU}} → guests {{$c.GuestMTU}}</span></h2>
+    <h2>{{$c.Name}} <span class="pill">AS {{$c.ASN}}</span> <span class="pill" title="Underlay MTU; VMs on its port groups get {{$c.GuestMTU}}">MTU {{$c.MTU}} → guests {{$c.GuestMTU}}</span>{{if $c.OverMgmt}} <span class="pill" title="The hosts' tunnel endpoints sit in an encrypted WireGuard tunnel between their management addresses (UDP {{$.WGPort}}, marked DSCP CS1). The management interfaces are not changed.">over management · WireGuard</span>{{end}}</h2>
     <span>
       {{if $.V.Admin}}<button class="btn sm" data-modal="m-host-{{$c.UUID}}">+ Add host</button>
       <button class="btn sm" data-modal="m-orgs-{{$c.UUID}}">Organizations</button>
@@ -62,7 +62,7 @@
     {{range $c.Hosts}}{{$h := index $c.Health .Node}}
     <tr>
       <td class="mono"><strong>{{.Node}}</strong>{{if eq .Node $.V.Self}} <span class="pill">this host</span>{{end}}</td>
-      <td class="mono">{{.UnderlayDev}}</td>
+      <td class="mono">{{.UnderlayDev}}{{if .WGPub}} <span class="muted" style="font-size:12px">over {{.Iface}} · {{.Endpoint}}</span>{{range $h.WG}}<br><span style="font-size:12px" title="WireGuard tunnel to {{.Node}} ({{.Endpoint}}): latest handshake {{.HandshakeAge}}">↔ {{.Node}} {{if .Stale}}<span style="color:var(--danger)">no handshake · {{.HandshakeAge}}</span>{{else}}<span style="color:var(--ok,#1a7f37)">{{.HandshakeAge}}</span>{{end}}</span>{{end}}{{end}}</td>
       <td class="mono">{{.TEP}}</td>
       <td>{{if eq $h.State "ok"}}<span class="pill running">● ok</span>{{else if eq $h.State "error"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● error</span>{{else if eq $h.State "unreachable"}}<span class="pill" style="color:var(--danger)" title="{{$h.Error}}">● unreachable</span>{{else}}<span class="pill">● applying</span>{{end}}{{if and $h.State (not $h.BFD) (ne $h.State "unreachable")}} <span class="pill" title="bfdd isn't running: BFD is off until FRR restarts with bfdd (install.sh enables it)">no BFD</span>{{end}}{{if $h.DupAddrs}} <span class="pill" style="color:var(--warn)" title="EVPN froze these MACs / addresses: seen moving between hosts too often (a loop or a duplicate). {{range $h.DupAddrs}}{{.}} {{end}}">⚠ {{len $h.DupAddrs}} duplicate</span>{{end}}{{if $h.Drops}} <span class="pill" title="VXLAN packets from a source that isn't a fabric host, dropped by the ingress guard">{{$h.Drops}} dropped</span>{{end}}</td>
       <td class="mono" style="font-size:12px">{{range $h.BGP}}{{.Peer}} {{if eq .State "Established"}}<span style="color:var(--ok,#1a7f37)">up {{.Uptime}}</span>{{else}}<span style="color:var(--danger)">{{.State}}</span>{{end}}<br>{{else}}{{if gt (len $c.Hosts) 1}}<span class="muted">none</span>{{else}}<span class="muted">single host</span>{{end}}{{end}}</td>
@@ -158,9 +158,14 @@
   <div class="modal-head"><h3>Add a host to {{$c.Name}}</h3><button class="modal-x" data-close aria-label="Close">&times;</button></div>
   <form class="mform row2" method="post" action="/fabric/f/{{$c.UUID}}/host">
     <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    {{if $c.OverMgmt}}
+    <label class="fld">Host<select name="node" required><option value="">— pick a host —</option>{{range $.V.Nodes}}{{if not ($c.HasHost .)}}<option>{{.}}</option>{{end}}{{end}}</select></label>
+    <p class="muted full" style="margin:0;font-size:12px">This fabric rides over management: the host's tunnel ends at its static management address, and nothing on its management interface changes.</p>
+    {{else}}
     <label class="fld">Host<select name="node" data-nicfor="h-{{$c.UUID}}" required><option value="">— pick a host —</option>{{range $.V.Nodes}}{{if not ($c.HasHost .)}}<option>{{.}}</option>{{end}}{{end}}</select></label>
     <label class="fld">Interface<select name="iface" id="h-{{$c.UUID}}" required></select></label>
     <label class="fld">VLAN<input type="number" name="vlan" value="0" min="0" max="4094" title="0 = untagged on a free NIC; a tag puts the TEP on a VLAN of the interface (the interface itself is never changed)"></label>
+    {{end}}
     <label class="fld">TEP<input type="text" name="tep" class="mono" placeholder="{{with index $c.Hosts 0}}{{.TEP}}{{end}}" required title="This host's tunnel address, in the same subnet as the other hosts' TEPs"></label>
     <p class="muted full" style="margin:0;font-size:12px">The host is checked first, then joins. Every host must then reach it at {{$c.MTU}} bytes with DF set, or it is removed again.</p>
     <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add host</button></div>
@@ -240,10 +245,15 @@
       <p class="wiz-err" id="fx-err1"></p>
     </section>
     <section class="wiz-pane">
-      <p class="wiz-note">How each host reaches the others: a free NIC (untagged), or a VLAN on a NIC that has no other role. Management is never offered, and a VLAN's parent is never changed. Every TEP must be in one subnet that nothing else on the hosts uses.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 18px">
+        <label class="chk"><input type="radio" name="underlay" value="" checked data-fxul> Dedicated interface or VLAN</label>
+        <label class="chk"><input type="radio" name="underlay" value="mgmt" data-fxul> Over management (WireGuard)</label>
+      </div>
+      <p class="wiz-note" data-ul="">How each host reaches the others: a free NIC (untagged), or a VLAN on a NIC that has no other role. Management is never offered, and a VLAN's parent is never changed. Every TEP must be in one subnet that nothing else on the hosts uses.</p>
+      <p class="wiz-note" data-ul="mgmt">For hosts without a spare NIC: each host's TEP sits in an encrypted WireGuard tunnel between the hosts' management addresses. Nothing on the management interface changes (no MTU, address or bridge change). The tunnel's packets are marked low priority (DSCP CS1), so management traffic wins on a busy link. Every host needs a static management address (not DHCP, not the cluster VIP). The tunnel takes 60 bytes: at MTU 1440, guests get 1390.</p>
       <div class="wiz-sub" style="display:grid;grid-template-columns:1fr 1fr;gap:13px">
         <label class="fld">TEP subnet<input type="text" id="fx-tepnet" class="mono" value="10.250.0.0/24" title="Each host gets the next address; edit any of them below"></label>
-        <label class="fld">Underlay MTU<input type="number" name="mtu" id="fx-mtu" value="1550" min="1330" max="9216" title="The fabric adds 50 bytes. At 1550, guests keep 1500. A VLAN can't exceed its parent's MTU."></label>
+        <label class="fld">Underlay MTU<input type="number" name="mtu" id="fx-mtu" value="1550" min="1330" max="9216" title="The fabric adds 50 bytes. At 1550, guests keep 1500. A VLAN can't exceed its parent's MTU. Over management it is the tunnel's MTU: 60 below the management interface's."></label>
       </div>
       <div class="fx-hosts" id="fx-hostrows"></div>
       <p class="wiz-err" id="fx-err2"></p>
@@ -266,6 +276,7 @@
 <script>
 (function(){
   const NICS = {{.NICsJSON}} || {};
+  const MGMT = {{.MgmtJSON}} || {};
   function nicOptions(node, sel){
     sel.innerHTML = '';
     const list = NICS[node] || [];
@@ -301,20 +312,40 @@
     let v = ((p[0]<<24)>>>0) + (p[1]<<16) + (p[2]<<8) + p[3] + k;
     return [v>>>24 & 255, v>>>16 & 255, v>>>8 & 255, v & 255].join('.') + '/' + pfx;
   }
+  const overMgmt = () => (form.querySelector('[data-fxul]:checked') || {}).value === 'mgmt';
   function hostRows(){
     const box = document.getElementById('fx-hostrows');
     const keep = {};
     box.querySelectorAll('[data-k]').forEach(e => keep[e.name] = e.value);
-    box.innerHTML = '<span class="h">Host</span><span class="h">Interface</span><span class="h">VLAN</span><span class="h">TEP</span>';
+    const mg = overMgmt();
+    form.querySelectorAll('[data-ul]').forEach(p => p.style.display = (p.dataset.ul === 'mgmt') === mg ? '' : 'none');
+    box.innerHTML = '<span class="h">Host</span><span class="h">' + (mg ? 'Management' : 'Interface') + '</span><span class="h">VLAN</span><span class="h">TEP</span>';
     nodes().forEach((n, i) => {
       const lab = document.createElement('span'); lab.className = 'mono'; lab.textContent = n; box.appendChild(lab);
+      const tp = document.createElement('input'); tp.type = 'text'; tp.className = 'mono'; tp.name = 'tep_' + n; tp.dataset.k = 1;
+      tp.value = ipAdd(document.getElementById('fx-tepnet').value.trim(), i + 1);
+      if(keep[tp.name] !== undefined) tp.value = keep[tp.name];
+      if(mg){
+        const m = MGMT[n] || {problem: 'no answer from this host'};
+        const info = document.createElement('span');
+        info.className = m.problem ? 'wiz-err' : 'mono';
+        info.textContent = m.problem ? m.problem : m.iface + ' · ' + m.endpoint + ' · MTU ' + m.mtu;
+        box.appendChild(info);
+        const dash = document.createElement('span'); dash.className = 'muted'; dash.textContent = '—'; box.appendChild(dash);
+        box.appendChild(tp);
+        return;
+      }
       const sel = document.createElement('select'); sel.name = 'iface_' + n; sel.dataset.k = 1; nicOptions(n, sel); box.appendChild(sel);
       const vl = document.createElement('input'); vl.type = 'number'; vl.min = 0; vl.max = 4094; vl.value = 0; vl.name = 'vlan_' + n; vl.dataset.k = 1; box.appendChild(vl);
-      const tp = document.createElement('input'); tp.type = 'text'; tp.className = 'mono'; tp.name = 'tep_' + n; tp.dataset.k = 1;
-      tp.value = ipAdd(document.getElementById('fx-tepnet').value.trim(), i + 1); box.appendChild(tp);
-      [sel, vl, tp].forEach(e => { if(keep[e.name] !== undefined) e.value = keep[e.name]; });
+      box.appendChild(tp);
+      [sel, vl].forEach(e => { if(keep[e.name] !== undefined) e.value = keep[e.name]; });
     });
   }
+  form.querySelectorAll('[data-fxul]').forEach(r => r.addEventListener('change', () => {
+    const mtu = document.getElementById('fx-mtu'), mg = overMgmt();
+    if(mtu.value === (mg ? '1550' : '1440')) mtu.value = mg ? '1440' : '1550';
+    hostRows();
+  }));
   document.getElementById('fx-tepnet').addEventListener('change', () => {
     nodes().forEach((n, i) => { const t = form.querySelector('[name="tep_' + CSS.escape(n) + '"]'); if(t) t.value = ipAdd(document.getElementById('fx-tepnet').value.trim(), i + 1); });
   });
@@ -353,8 +384,13 @@
     }
     if(at === 1){
       const e = document.getElementById('fx-err2');
-      const bad = nodes().filter(n => !form.querySelector('[name="iface_' + CSS.escape(n) + '"]').value);
-      e.textContent = bad.length ? 'Pick an interface for ' + bad.join(', ') + '.' : '';
+      if(overMgmt()){
+        const bad = nodes().filter(n => !MGMT[n] || MGMT[n].problem);
+        e.textContent = bad.length ? bad.join(', ') + ' can\'t ride over management (see above).' : '';
+      } else {
+        const bad = nodes().filter(n => !form.querySelector('[name="iface_' + CSS.escape(n) + '"]').value);
+        e.textContent = bad.length ? 'Pick an interface for ' + bad.join(', ') + '.' : '';
+      }
       if(e.textContent) return;
     }
     show(at + 1);

@@ -32,11 +32,12 @@ type FabricHostInput struct {
 
 // FabricInput is the deploy wizard's form.
 type FabricInput struct {
-	Name  string
-	ASN   int // 0 = the hosts' BGP AS if they run one, else 65100
-	MTU   int // underlay MTU; 0 = 1550 (guests keep 1500)
-	Orgs  []int64
-	Hosts []FabricHostInput
+	Name     string
+	ASN      int // 0 = the hosts' BGP AS if they run one, else 65100
+	MTU      int // underlay MTU; 0 = 1550 (guests keep 1500), over management 1440 (guests get 1390)
+	Orgs     []int64
+	Hosts    []FabricHostInput
+	Underlay string // "" = a dedicated NIC/VLAN per host, fabric.UnderlayMgmt = WireGuard over management
 }
 
 // FabricCheck is one preflight / verification result.
@@ -235,7 +236,11 @@ func (s *Service) FabricLocalPreflight(f fabric.Spec, h fabric.Host) []FabricChe
 		_, err := exec.LookPath("dnsmasq")
 		return err
 	}(), false, "present")
-	add("underlay "+h.UnderlayDev(), s.checkUnderlay(&f, h), false, "TEP "+h.TEP+", MTU "+strconv.Itoa(f.MTU))
+	detail := "TEP " + h.TEP + ", MTU " + strconv.Itoa(f.MTU)
+	if f.OverMgmt() {
+		detail = "TEP " + h.TEP + " in WireGuard over " + h.Iface + " (" + h.Endpoint + "), MTU " + strconv.Itoa(f.MTU)
+	}
+	add("underlay "+h.UnderlayDev(), s.checkUnderlay(&f, h), false, detail)
 	add("host routing", func() error {
 		hc := s.loadHostRouting()
 		hc.Fabric = &routing.Fabric{ASN: f.ASN, TEP: h.TEPIP(), BFD: true}
@@ -326,8 +331,36 @@ func (s *Service) FabricLocalDFPing(fabricUUID string, teps []string) []FabricCh
 			c.OK, c.Detail = true, strconv.Itoa(f.MTU)+" bytes, DF"
 		}
 		out = append(out, c)
+		if f.OverMgmt() {
+			out = append(out, mgmtDFPing(f, h, t))
+		}
 	}
 	return out
+}
+
+// mgmtDFPing checks that the management path carries a full tunnel packet
+// unfragmented. Only a warning: WireGuard still works when its outer packets
+// fragment, just slower (the TEP ping above already proved the tunnel).
+func mgmtDFPing(f *fabric.Spec, h *fabric.Host, tep string) FabricCheck {
+	var ep string
+	for _, o := range f.Hosts {
+		if o.TEPIP() == tep {
+			ep = o.Endpoint
+		}
+	}
+	size := f.MTU + fabric.WGOverhead
+	c := FabricCheck{Node: h.Node, Check: "management DF ping → " + ep, Warn: true}
+	if net.ParseIP(ep) == nil {
+		c.Detail = "no management address for TEP " + tep
+		return c
+	}
+	if _, err := exec.Command("ping", "-M", "do", "-s", strconv.Itoa(size-28), "-c", "3", "-i", "0.2", "-W", "1",
+		"-I", h.Endpoint, ep).CombinedOutput(); err != nil {
+		c.Detail = "the management path doesn't carry " + strconv.Itoa(size) + "-byte packets unfragmented (or blocks ping): the tunnel's packets will fragment — lower the fabric MTU for full speed"
+		return c
+	}
+	c.OK, c.Detail = true, strconv.Itoa(size)+" bytes, DF"
+	return c
 }
 
 // verifyFabric waits until every host realized version v (or reports an error)
@@ -400,7 +433,8 @@ type FabricNodeStatus struct {
 	BGP      []FabricBGPPeer `json:"bgp,omitempty"`
 	VNIs     []FabricVNI     `json:"vnis,omitempty"`
 	DupAddrs []string        `json:"dup,omitempty"`
-	Drops    int64           `json:"drops"` // VXLAN packets dropped by the ingress guard
+	Drops    int64           `json:"drops"`        // VXLAN packets dropped by the ingress guard
+	WG       []FabricWGPeer  `json:"wg,omitempty"` // tunnel sessions (a fabric over management)
 }
 
 // FabricBGPPeer is one EVPN session.
@@ -450,6 +484,9 @@ func (s *Service) FabricLocalStatus() FabricNodeStatus {
 	st.VNIs = evpnVNIs()
 	st.DupAddrs = evpnDups()
 	st.Drops = vxlanDrops()
+	if f.OverMgmt() {
+		st.WG = wgStatus(in.WGPeers(st.Node))
+	}
 	return st
 }
 
@@ -624,7 +661,8 @@ func hostsFromInput(hs []FabricHostInput) []fabric.Host {
 // fabricSpecFrom builds a new fabric from the wizard's form (defaults filled)
 // and checks it against the current intent.
 func (s *Service) fabricSpecFrom(fi FabricInput) (fabric.Spec, error) {
-	f := fabric.Spec{UUID: fabric.NewUUID(), Name: strings.TrimSpace(fi.Name), ASN: fi.ASN, MTU: fi.MTU, Orgs: fi.Orgs, Hosts: hostsFromInput(fi.Hosts)}
+	f := fabric.Spec{UUID: fabric.NewUUID(), Name: strings.TrimSpace(fi.Name), ASN: fi.ASN, MTU: fi.MTU, Orgs: fi.Orgs,
+		Hosts: hostsFromInput(fi.Hosts), Underlay: fi.Underlay}
 	if f.ASN == 0 {
 		if f.ASN = s.hostASN(); f.ASN == 0 {
 			f.ASN = 65100
@@ -632,9 +670,19 @@ func (s *Service) fabricSpecFrom(fi FabricInput) (fabric.Spec, error) {
 	}
 	if f.MTU == 0 {
 		f.MTU = 1550
+		if f.OverMgmt() {
+			f.MTU = fabric.MgmtMTU
+		}
 	}
 	if len(f.Hosts) == 0 {
 		return f, fmt.Errorf("pick at least one host")
+	}
+	if f.OverMgmt() {
+		for i := range f.Hosts {
+			if err := s.fillWGHost(&f.Hosts[i]); err != nil {
+				return f, err
+			}
+		}
 	}
 	cur, err := s.fabricIntent()
 	if err != nil {
@@ -758,7 +806,7 @@ func (s *Service) CreateFabric(p *Principal, fi FabricInput, ip string) (string,
 		s.audit(p, p.OrgID, "fabric.create.failed", "fabric", f.Name, ip, map[string]any{"error": err.Error()})
 		return "", checks, err
 	}
-	s.audit(p, p.OrgID, "fabric.create", "fabric", f.Name, ip, map[string]any{"uuid": f.UUID, "asn": f.ASN, "mtu": f.MTU, "hosts": len(f.Hosts)})
+	s.audit(p, p.OrgID, "fabric.create", "fabric", f.Name, ip, map[string]any{"uuid": f.UUID, "asn": f.ASN, "mtu": f.MTU, "hosts": len(f.Hosts), "underlay": f.Underlay})
 	return f.UUID, checks, nil
 }
 
@@ -776,6 +824,11 @@ func (s *Service) AddFabricHost(p *Principal, fabricUUID string, hi FabricHostIn
 		return nil, ErrNotFound
 	}
 	h := hostsFromInput([]FabricHostInput{hi})[0]
+	if f.OverMgmt() {
+		if err := s.fillWGHost(&h); err != nil {
+			return nil, err
+		}
+	}
 	trial := cur.Clone()
 	trial.Fabric(fabricUUID).Hosts = append(trial.Fabric(fabricUUID).Hosts, h)
 	if err := trial.Validate(); err != nil {

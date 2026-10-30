@@ -22,59 +22,12 @@ import (
 // (its 60 s reconcile), so what's checked is the real daemon's work. The
 // underlay is a dummy NIC made here. Everything is torn down again.
 func TestE2EFabric(t *testing.T) {
-	dbPath := os.Getenv("VDX_E2E_DB")
-	if dbPath == "" || os.Getenv("VDX_E2E_FABRIC") != "1" || os.Geteuid() != 0 {
-		t.Skip("live E2E: run as root with VDX_E2E_DB and VDX_E2E_FABRIC=1")
-	}
-	cfg, err := config.Load("/etc/vdxclone/config.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := db.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	s := &Service{cfg: cfg, db: d, store: store.New(d), net: netdrv.New(d)}
-	var org, uid int64
-	d.QueryRow(`SELECT id FROM orgs ORDER BY id LIMIT 1`).Scan(&org)
-	d.QueryRow(`SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&uid)
-	p := &Principal{User: &auth.User{ID: uid}, OrgID: org, OrgRole: "owner", IsAdmin: true}
+	k := newE2E(t)
+	s, p, d, org := k.s, k.p, k.d, k.org
+	sh, must, check, waitFor := k.sh, k.must, k.check, k.waitFor
 	const ip, dummy = "e2e-test", "vxe2e0"
 	self := s.selfNode()
 
-	sh := func(c string) string {
-		out, _ := exec.Command("sh", "-c", c).CombinedOutput()
-		return strings.TrimSpace(string(out))
-	}
-	must := func(err error, what string) {
-		t.Helper()
-		if err != nil {
-			t.Fatalf("%s: %v", what, err)
-		}
-	}
-	check := func(ok bool, what string, detail ...string) {
-		t.Helper()
-		if !ok {
-			t.Errorf("FAIL %s %v", what, detail)
-		} else {
-			t.Logf("ok   %s", what)
-		}
-	}
-	// waitFor polls until the daemon has realized a step (it reconciles every 60 s).
-	waitFor := func(what string, cond func() bool) bool {
-		t.Helper()
-		start := time.Now()
-		for time.Since(start) < 100*time.Second {
-			if cond() {
-				t.Logf("ok   %s (%.0fs)", what, time.Since(start).Seconds())
-				return true
-			}
-			time.Sleep(time.Second)
-		}
-		t.Errorf("FAIL %s: not realized within 100 s", what)
-		return false
-	}
 	frrMarks := func() string { return sh(`grep -cE 'advertise-all-vni|VXFABRIC|vrf vxfvrf' /etc/frr/frr.conf`) }
 	initialFRR := frrMarks()
 	check(sh(`ip -br link | grep -c '^vxf'`) == "0", "no fabric devices before the test", sh(`ip -br link | grep '^vxf'`))
@@ -220,6 +173,75 @@ func TestE2EFabric(t *testing.T) {
 	})
 }
 
+// e2eKit is a live E2E's service (on the live DB, as an instance admin) and
+// its check helpers.
+type e2eKit struct {
+	t   *testing.T
+	s   *Service
+	p   *Principal
+	d   *db.DB
+	org int64
+}
+
+func newE2E(t *testing.T) *e2eKit {
+	t.Helper()
+	dbPath := os.Getenv("VDX_E2E_DB")
+	if dbPath == "" || os.Getenv("VDX_E2E_FABRIC") != "1" || os.Geteuid() != 0 {
+		t.Skip("live E2E: run as root with VDX_E2E_DB and VDX_E2E_FABRIC=1")
+	}
+	cfg, err := config.Load("/etc/vdxclone/config.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	k := &e2eKit{t: t, d: d, s: &Service{cfg: cfg, db: d, store: store.New(d), net: netdrv.New(d)}}
+	var uid int64
+	d.QueryRow(`SELECT id FROM orgs ORDER BY id LIMIT 1`).Scan(&k.org)
+	d.QueryRow(`SELECT id FROM users ORDER BY id LIMIT 1`).Scan(&uid)
+	k.p = &Principal{User: &auth.User{ID: uid}, OrgID: k.org, OrgRole: "owner", IsAdmin: true}
+	return k
+}
+
+func (k *e2eKit) sh(c string) string {
+	out, _ := exec.Command("sh", "-c", c).CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
+func (k *e2eKit) must(err error, what string) {
+	k.t.Helper()
+	if err != nil {
+		k.t.Fatalf("%s: %v", what, err)
+	}
+}
+
+func (k *e2eKit) check(ok bool, what string, detail ...string) {
+	k.t.Helper()
+	if !ok {
+		k.t.Errorf("FAIL %s %v", what, detail)
+	} else {
+		k.t.Logf("ok   %s", what)
+	}
+}
+
+// waitFor polls until the daemon has realized a step (it reconciles every 60 s).
+func (k *e2eKit) waitFor(what string, cond func() bool) bool {
+	k.t.Helper()
+	start := time.Now()
+	for time.Since(start) < 100*time.Second {
+		if cond() {
+			k.t.Logf("ok   %s (%.0fs)", what, time.Since(start).Seconds())
+			return true
+		}
+		time.Sleep(time.Second)
+	}
+	k.t.Errorf("FAIL %s: not realized within 100 s", what)
+	return false
+}
+
 func checkText(cs []FabricCheck) string {
 	var b strings.Builder
 	for _, c := range cs {
@@ -237,4 +259,74 @@ func TestFRRConfHasFabric(t *testing.T) {
 	if !frrConfHasFabric(single) || !frrConfHasFabric(vrfOnly) || frrConfHasFabric(host) {
 		t.Fatal("frrConfHasFabric")
 	}
+}
+
+// Live E2E for a single-host fabric over management (same rules as
+// TestE2EFabric): the TEP rides WireGuard on vxfwg0, the node's own key and
+// endpoint reach the intent, and the management interface comes out exactly as
+// it went in — link, addresses and routes — both while the fabric runs and
+// after it is gone.
+func TestE2EFabricMgmt(t *testing.T) {
+	k := newE2E(t)
+	s, p := k.s, k.p
+	const ip = "e2e-test"
+	if _, err := exec.LookPath("wg"); err != nil {
+		t.Skip("wireguard-tools isn't installed")
+	}
+	info := s.FabricLocalWG()
+	if info.Problem != "" {
+		t.Skipf("this host can't ride over management: %s", info.Problem)
+	}
+	mgmtState := func() string {
+		return k.sh("ip -o link show dev " + info.Iface + "; ip -o addr show dev " + info.Iface + "; ip -4 route show dev " + info.Iface)
+	}
+	before := mgmtState()
+	k.check(k.sh(`ip -br link | grep -c '^vxf'`) == "0", "no fabric devices before the test")
+
+	fi := FabricInput{Name: "e2e-mgmt", Underlay: fabric.UnderlayMgmt, Orgs: []int64{k.org},
+		Hosts: []FabricHostInput{{Node: s.selfNode(), TEP: "10.251.78.1/24"}}}
+	checks, err := s.PreflightFabric(p, fi)
+	k.must(err, "preflight")
+	k.check(!FabricChecksFailed(checks), "preflight passes", checkText(checks))
+	fu, checks, err := s.CreateFabric(p, fi, ip)
+	k.must(err, "create fabric: "+checkText(checks))
+	defer func() {
+		k.must(s.DeleteFabric(p, fu, ip), "cleanup: delete fabric")
+		k.waitFor("WireGuard device removed", func() bool { return !netdrv.IfaceExists(fabric.WGDev) })
+		k.waitFor("fabric nft tables removed", func() bool { return !strings.Contains(k.sh("nft list tables"), "vdxfabric") })
+		var n int
+		k.d.QueryRow(`SELECT count(*) FROM fabric_underlay`).Scan(&n)
+		k.check(n == 0, "fabric_underlay empty")
+		k.check(mgmtState() == before, "management interface unchanged after teardown", before, mgmtState())
+	}()
+
+	in, _ := s.fabricIntent()
+	f, h := in.HostOf(s.selfNode())
+	k.check(f != nil && f.OverMgmt() && f.MTU == fabric.MgmtMTU && f.GuestMTU() == 1390, "over management, MTU 1440, guests 1390")
+	k.check(h != nil && h.Iface == info.Iface && h.Endpoint == info.Endpoint && h.WGPub == info.Pub, "host entry is what the node reports", info.Iface, info.Endpoint)
+	k.check(strings.Contains(k.sh("ip -4 -br addr show dev "+fabric.WGDev), "10.251.78.1/24"), "TEP on vxfwg0", k.sh("ip -4 -br addr show dev "+fabric.WGDev))
+	k.check(strings.Contains(k.sh("ip -o link show dev "+fabric.WGDev), "mtu 1440"), "vxfwg0 MTU 1440")
+	k.check(k.sh("wg show "+fabric.WGDev+" listen-port") == strconv.Itoa(fabric.WGPort), "tunnel on UDP 51871")
+	k.check(k.sh("wg show "+fabric.WGDev+" public-key") == info.Pub, "the kernel holds the key in the intent")
+	k.check(k.sh("cat "+s.fabricWGKeyPath()+" | wg pubkey") == info.Pub, "wg derives the same public key as vdxd")
+	k.check(k.sh("stat -c %a "+s.fabricWGKeyPath()) == "600", "private key file is 0600")
+	k.check(k.sh("ls "+fabric.WGConfDir+"/"+fabric.WGDev+"-*.conf 2>/dev/null | wc -l") == "0", "no config with the private key left behind")
+	fw := k.sh("nft list table inet vdxfabric")
+	k.check(strings.Contains(fw, "udp dport 51871 counter"), "tunnel port shut to everyone (single host)")
+	k.check(strings.Contains(fw, "ip dscp set cs1"), "tunnel packets marked CS1")
+	k.check(strings.Contains(fw, `iifname != { "vxfwg0", "lo" }`), "TEP sources only out of the tunnel")
+	k.check(mgmtState() == before, "management interface unchanged", before, mgmtState())
+
+	// A routed port group: its VXLAN ends on the tunnel's TEP at guest MTU.
+	web, err := s.CreateFabricPG(p, FabricPGInput{Fabric: fu, Name: "web", CIDR: "10.252.78.0/24"}, ip)
+	k.must(err, "create PG web")
+	defer func() { k.must(s.DeleteFabricPG(p, web, ip), "cleanup: delete PG web") }()
+	in, _ = s.fabricIntent()
+	vx := fabric.SegVXLAN(in.PG(web).VNI)
+	k.waitFor("VXLAN "+vx+" on the tunnel's TEP", func() bool {
+		d := k.sh("ip -d -o link show dev " + vx)
+		return strings.Contains(d, "local 10.251.78.1") && strings.Contains(d, "mtu 1390")
+	})
+	k.check(mgmtState() == before, "management interface unchanged with a port group", before, mgmtState())
+	k.waitFor("node status ok", func() bool { st := s.FabricLocalStatus(); return st.State == "ok" && st.Underlay == fabric.WGDev })
 }

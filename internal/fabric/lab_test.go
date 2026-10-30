@@ -18,6 +18,10 @@ import (
 // Realize, routing.RenderFRR with a Fabric section, DNSMasqConfig, BridgeGuard.
 //
 //	VX_FABRIC_LAB=1 go test ./internal/fabric -run TestLab -v   (VX_FABRIC_LAB_KEEP=1 leaves it up)
+//
+// VX_FABRIC_LAB_WG=1 runs the same lab over management: fxu is then the
+// management network, each host's TEP sits on the WireGuard device EnsureWG
+// builds (wireguard-tools needed), and the tunnel's own filters are checked.
 
 var ex Exec
 
@@ -87,6 +91,25 @@ func TestLab(t *testing.T) {
 	must(t, in("fxu", "ip", "link", "set", "ubr", "up")...)
 
 	teps := map[string]string{"fh1": "10.250.0.1", "fh2": "10.250.0.2"}
+	const labFab = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	wgLab := os.Getenv("VX_FABRIC_LAB_WG") == "1"
+	mgmt := map[string]string{"fh1": "172.31.0.11", "fh2": "172.31.0.12"}
+	wgKey, wgPub := map[string]string{}, map[string]string{}
+	labSpec := Spec{UUID: labFab, Name: "lab", ASN: labASN, MTU: labMTU + 50}
+	for _, h := range []string{"fh1", "fh2"} {
+		x := Host{Node: h, Iface: "u0", TEP: teps[h] + "/24"}
+		if wgLab {
+			k, err := NewWGKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wgKey[h] = k
+			wgPub[h], _ = WGPublic(k)
+			x.Endpoint, x.WGPub = mgmt[h], wgPub[h]
+			labSpec.Underlay = UnderlayMgmt
+		}
+		labSpec.Hosts = append(labSpec.Hosts, x)
+	}
 	anycast := AnycastMAC("lab-fabric")
 	plan := func(h string) HostPlan {
 		return HostPlan{TEP: teps[h], AnycastMAC: anycast, GuestMTU: labMTU,
@@ -115,9 +138,26 @@ func TestLab(t *testing.T) {
 		r := nsRunner{h}
 		must(t, "ip", "link", "add", h+"-u", "type", "veth", "peer", "name", "u0", "netns", h)
 		must(t, "ip", "link", "set", h+"-u", "netns", "fxu")
+		if wgLab {
+			// The management network carries a full tunnel packet: fabric MTU + 60.
+			must(t, in("fxu", "ip", "link", "set", h+"-u", "mtu", fmt.Sprint(labMTU+50+WGOverhead))...)
+			must(t, in(h, "ip", "link", "set", "u0", "mtu", fmt.Sprint(labMTU+50+WGOverhead))...)
+		}
 		must(t, in("fxu", "ip", "link", "set", h+"-u", "master", "ubr", "up")...)
-		must(t, in(h, "ip", "addr", "add", tep+"/24", "dev", "u0")...)
-		must(t, in(h, "ip", "link", "set", "u0", "up")...)
+		if wgLab {
+			must(t, in(h, "ip", "addr", "add", mgmt[h]+"/24", "dev", "u0")...)
+			must(t, in(h, "ip", "link", "set", "u0", "up")...)
+			li := Intent{Fabrics: []Spec{labSpec}}
+			if err := EnsureWG(r, WGConfDir, wgKey[h], li.WGPeers(h), tep+"/24", labMTU+50); err != nil {
+				t.Fatalf("%s wireguard: %v", h, err)
+			}
+			if err := EnsureWG(r, WGConfDir, wgKey[h], li.WGPeers(h), tep+"/24", labMTU+50); err != nil {
+				t.Fatalf("%s wireguard again: %v", h, err)
+			}
+		} else {
+			must(t, in(h, "ip", "addr", "add", tep+"/24", "dev", "u0")...)
+			must(t, in(h, "ip", "link", "set", "u0", "up")...)
+		}
 		must(t, in(h, "sysctl", "-qw", "net.ipv4.ip_forward=1")...)
 
 		if err := Realize(r, plan(h)); err != nil {
@@ -285,11 +325,9 @@ func TestLab(t *testing.T) {
 	t.Logf("fh1 EVPN:\n%s", evpn)
 
 	// ---- distributed firewall, rendered from an intent describing this lab ----
-	const labFab = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	pg := func(n int) string { return fmt.Sprintf("bbbbbbbb-bbbb-4bbb-8bbb-%012d", n) }
 	intent := Intent{
-		Fabrics: []Spec{{UUID: labFab, Name: "lab", ASN: labASN, MTU: labMTU + 50, Hosts: []Host{
-			{Node: "fh1", Iface: "u0", TEP: "10.250.0.1/24"}, {Node: "fh2", Iface: "u0", TEP: "10.250.0.2/24"}}}},
+		Fabrics: []Spec{labSpec},
 		PGs: []PortGroup{
 			{UUID: pg(100), Fabric: labFab, Org: 1, Name: "a", VNI: 100, CIDR: "10.10.1.0/24", Gateway: "10.10.1.1"},
 			{UUID: pg(200), Fabric: labFab, Org: 1, Name: "b", VNI: 200, CIDR: "10.10.2.0/24", Gateway: "10.10.2.1"},
@@ -347,6 +385,9 @@ func TestLab(t *testing.T) {
 	}
 	if tcp("vm1", "10.10.1.1") == nil {
 		t.Errorf("FW: a guest reached a host TCP service in its VRF")
+	}
+	if wgLab {
+		wgLabChecks(t, wgPub, ping)
 	}
 	if out, err := ex.Run(in("vm4", "busybox", "udhcpc", "-i", "eth0", "-n", "-q", "-t", "5", "-s", "/bin/true")...); err != nil ||
 		!strings.Contains(out, "10.10.2.40") {
@@ -459,5 +500,63 @@ func TestLab(t *testing.T) {
 	gone, err := Prune(nsRunner{"fh1"}, p)
 	if err != nil || strings.Join(gone, ",") != "vxfv300,vxfb300" {
 		t.Errorf("prune: %v %v", gone, err)
+	}
+}
+
+// wgLabChecks covers what only a fabric over management has: live tunnel
+// sessions, the CS1 mark on the tunnel's packets, and the input filter — no one
+// on the management network may reach the tunnel port, or pass for a TEP.
+func wgLabChecks(t *testing.T, pub map[string]string, ping func(ns, dst string) error) {
+	t.Helper()
+	hs, err := WGHandshakes(nsRunner{"fh1"})
+	if err != nil || hs[pub["fh2"]] == 0 {
+		t.Errorf("WG: no handshake fh1 → fh2: %v %v", hs, err)
+	}
+	// The receiving side sees the tunnel's packets marked CS1.
+	must(t, "sh", "-c", `ip netns exec fh2 nft -f - <<'E'
+table inet vxflabdscp {
+  chain in { type filter hook input priority raw; policy accept;
+    udp dport 51871 ip dscp cs1 counter
+  }
+}
+E`)
+	if err := ping("vm1", "10.10.1.20"); err != nil {
+		t.Errorf("WG: overlay ping: %v", err)
+	}
+	if out, _ := ex.Run(in("fh2", "nft", "list", "table", "inet", "vxflabdscp")...); strings.Contains(out, "counter packets 0 ") || !strings.Contains(out, "counter packets") {
+		t.Errorf("WG: tunnel packets not marked CS1:\n%s", out)
+	}
+	_, _ = ex.Run(in("fh2", "nft", "delete", "table", "inet", "vxflabdscp")...)
+
+	// Someone else on the management network (fxu): the tunnel port is shut to
+	// them, and a TEP source arriving outside the tunnel is dropped.
+	must(t, in("fxu", "ip", "addr", "add", "172.31.0.99/24", "dev", "ubr")...)
+	must(t, in("fxu", "ip", "addr", "add", "10.250.0.2/32", "dev", "ubr")...)
+	send := func(src, dst string, port int) {
+		_, _ = ex.Run(in("fxu", "python3", "-c", "import socket,sys\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\ns.bind((sys.argv[1],0))\n[s.sendto(b'x'*64,(sys.argv[2],int(sys.argv[3]))) for _ in range(5)]",
+			src, dst, fmt.Sprint(port))...)
+	}
+	counter := func(match string) string {
+		out, _ := ex.Run(in("fh1", "nft", "list", "chain", "inet", FirewallTable, "input")...)
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, match) {
+				return l
+			}
+		}
+		return "(no rule " + match + ")"
+	}
+	send("172.31.0.99", "172.31.0.11", WGPort)
+	if l := counter("udp dport 51871 ip saddr != "); !strings.Contains(l, "counter packets 5 ") {
+		t.Errorf("WG: the tunnel port took packets from a stranger: %s", l)
+	}
+	send("10.250.0.2", "172.31.0.11", VXLANPort)
+	if l := counter("ip saddr 10.250.0.0/24 iifname"); !strings.Contains(l, "counter packets 5 ") {
+		t.Errorf("WG: a spoofed TEP source got in from the management side: %s", l)
+	}
+	if hs, _ := WGHandshakes(nsRunner{"fh1"}); hs[pub["fh2"]] == 0 {
+		t.Errorf("WG: the tunnel dropped")
+	}
+	if err := ping("vm1", "10.10.1.20"); err != nil {
+		t.Errorf("WG: overlay ping after the probes: %v", err)
 	}
 }

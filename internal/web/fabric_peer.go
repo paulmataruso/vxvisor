@@ -84,3 +84,9 @@ func (s *Server) peerFabricStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) peerFabricNICs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.svc.FabricLocalNICs())
 }
+
+// peerFabricWG is this node's management endpoint and WireGuard public key, as
+// the node itself reports them (the private key never leaves it).
+func (s *Server) peerFabricWG(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.svc.FabricLocalWG())
+}

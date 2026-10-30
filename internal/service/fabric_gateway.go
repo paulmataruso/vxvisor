@@ -287,5 +287,9 @@ func (s *Service) fabricTopo() (fabricTopoInfo, bool) {
 	if f == nil {
 		return fabricTopoInfo{}, false
 	}
-	return fabricTopoInfo{name: f.Name, dev: h.UnderlayDev(), iface: h.Iface, tep: h.TEP}, true
+	t := fabricTopoInfo{name: f.Name, dev: h.UnderlayDev(), iface: h.Iface, tep: h.TEP}
+	if f.OverMgmt() {
+		t.iface = "" // the management interface stays where it is on the map
+	}
+	return t, true
 }
