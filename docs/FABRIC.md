@@ -207,7 +207,7 @@ The wizard picks one of three options per host:
 ## 12. Testing
 
 - **Unit tests:** renderers (FRR, nft, dnsmasq), the allocator, replication with tombstones, rule compilation, authz.
-- **Live tests need two or more nodes.** The nested two-node test cluster (test01/test02) must be re-verified first. The single test host can only exercise preflight and a one-host fabric.
+- **Live tests need two or more nodes.** They run on the nested 3-node Proxmox lab: docs/ROADMAP.md §2–3 (steps 8–9 are the fabric). A single host can only exercise preflight and a one-host fabric.
 
 ## 13. Adversarial review (2026-10-30): summary
 
@@ -254,7 +254,7 @@ Full review: the session transcript of 2026-10-30.
   hairpin-through-one-gateway interim is dropped.
 - The live-migration NIC bug is **fixed first** (D4a, done in `a452492`, deployed 1.109.2).
 - No 2-node cluster for now. Phase 1 is built against unit tests and a single-host netns lab
-  (two network namespaces standing in for two hosts). The 2-node live E2E runs when test01/test02 are back.
+  (two network namespaces standing in for two hosts). The multi-node live E2E runs on the 3-node lab (docs/ROADMAP.md).
 
 **D1 — Port groups.**
 - Fabric-wide PGs, with a per-PG **host span** (NSX transport-zone membership). The default span is all fabric hosts.
@@ -393,7 +393,7 @@ Also: a TCP MSS clamp on VRF-routed SYNs (`rt mtu`), and per-host VNI detail on 
 MACs, ARP entries, remote VTEPs).
 
 Not built yet (phase 1 remainder):
-- A 2-node live test (no test cluster yet).
+- A multi-node live test: docs/ROADMAP.md §3 steps 8–9 (the 3-node lab), including writing the multi-node E2E.
 - Phase 3 is unchanged from §14. Phase 1b is built (§16).
 
 ## 16. Phase 1b: a fabric over management (v1.111)

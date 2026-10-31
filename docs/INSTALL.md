@@ -23,9 +23,15 @@ takes a few minutes.
 The installer pulls in everything a feature in the UI can use, including:
 `qemu-system-x86`, `qemu-utils`, `ovmf`, `swtpm`, `zfsutils-linux`, `lvm2`,
 `lxc`, `frr`, `nftables`, `smartmontools`, `nfs-common`, `cifs-utils`,
-`ceph-common`, `open-iscsi`, `chrony`, and `tuned`. Packages with no install
+`ceph-common`, `open-iscsi`, `chrony`, `tuned` and `wireguard-tools`. Packages with no install
 candidate on your release are skipped; a package that exists but fails to
 install is treated as an error.
+
+It also builds the **RustGuac console** (browser SSH/RDP/VNC/SPICE behind the
+console page's RustGuac button) from pinned sources into `/opt/rustguac`. This
+adds several minutes to a first install, and the host needs to reach GitHub and
+crates.io for it. rustguac and its guacd listen on loopback only; browsers reach
+them through vdxd's session-checked proxy on `<bind-ip>:8769`.
 
 ---
 

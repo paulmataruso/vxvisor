@@ -24,8 +24,12 @@ runtime benefit). Repo: `github.com/paulmataruso/vxvisor` (name ≠ module path,
   open-iscsi (shared storage), **frr+frr-pythontools (routing — OSPF/BGP/static)**, wireguard-tools
   (fabric over management), lxc stack
   (containers), chrony (time), tuned (perf), bridge/nft/ethtool
-  (networking). `apt_opt` skips only packages with NO install candidate on the release; an
+  (networking), rustguac + guacd built from pinned source (the RustGuac console). `apt_opt` skips only
+  packages with NO install candidate on the release; an
   available package that fails to install is a **hard error** (never `|| true`-swallowed).
+  install.sh runs under `set -euo pipefail`: never pipe into something that stops reading early
+  (`grep -q`, `head`, `awk …exit`) — the writer dies of SIGPIPE and the pipeline fails even on a
+  match (that made `apt_opt` skip EVERY package from 2026-10-17 to 2026-10-31).
 
 ## Build / deploy / verify
 ```bash
@@ -147,22 +151,23 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   and published to a host's `<DataDir>/clients`.
 
 ### Recent subsystems (not in the older notes above)
-- **rustguac "advanced console" (OPTIONAL test add-on, config-gated).** Browser SSH/RDP/VNC/
-  SPICE via a local [rustguac](https://github.com/sol1/rustguac) + its own guacd, built from
-  source under `/opt/rustguac` (systemd `rustguac` + `rustguac-guacd`). rustguac binds **loopback
-  only** (`127.0.0.1:8089`); its guacd runs on **4823** (the pre-existing Apache guacd on 4822 is
-  left untouched). vdxd fronts it: the `[guac]` config block (`enabled/upstream/api_key/
-  proxy_addr`) turns on `internal/service/guac_service.go` (`AdvancedConsole` brokers a session +
-  single-use WS ticket server-side with the admin API key) and a **second cookie-gated reverse-
-  proxy listener** (`internal/web/guac_proxy.go`, `cmd/vdxd/main.go`) on `proxy_addr`
-  (172.16.0.163:8767) that forwards to loopback rustguac — so a browser reaches rustguac only
-  through a valid `vdx_session`. Route `GET /console/{id}/advanced` (broker→302 to the proxy),
-  and an "⚡ RustGuac" button on console.html shown only when `GuacEnabled()`. **No DB migration**
-  — the whole feature is config-only. **Rollback:** set `[guac] enabled=false` + restart (instant,
-  reversible; noVNC untouched), or full uninstall via `~/rollback-rustguac.sh` on the host. Install
-  caveats on Ubuntu 26.04: install.sh's apt step was edited to drop `freerdp3-dev` (already present
-  at 3.24.2; the 3.32.1 security candidate conflicts) and the Xvnc/Chromium web-session deps
-  (chromium is a snap, no `chromium-sandbox` .deb) — neither affects VNC/SPICE/RDP/SSH consoles.
+- **RustGuac console (installed by `deploy/install.sh`).** Browser SSH/RDP/VNC/SPICE via a local
+  [rustguac](https://github.com/sol1/rustguac) + its own guacd. Upstream's packages target Debian 13,
+  so install.sh builds both from **pinned** sources (rustguac tag + commit, the guacamole-server
+  commit rustguac pins, its `patches/`) with Ubuntu's `cargo` into `/opt/rustguac` (systemd `rustguac`
+  + `rustguac-guacd`); a re-run rebuilds only when the pins change (`/opt/rustguac/.vxvisor-build`).
+  rustguac binds **loopback only** (`127.0.0.1:8089`, enforced on every run), its guacd
+  `127.0.0.1:4823`. Not installed: rustguac's Xvnc/Chromium web sessions and its RDP drive (vdxd uses
+  neither). install.sh mints a rustguac admin `vdxd` whose key works only from 127.0.0.1 and appends
+  the `[guac]` block (`enabled/upstream/api_key/proxy_addr`, config then 0600) unless one exists.
+  vdxd fronts it: `internal/service/guac_service.go` (`AdvancedConsole` brokers a session + single-use
+  WS ticket server-side with that key) and a **second cookie-gated reverse-proxy listener**
+  (`internal/web/guac_proxy.go`, `cmd/vdxd/main.go`) on `proxy_addr` = `<bind-ip>:8769` (NOT 8767 —
+  that's the cluster peer API, which binds 0.0.0.0 when `advertise` is unset), so a browser reaches
+  rustguac only through a valid `vdx_session`. Route `GET /console/{id}/advanced` (broker→302 to the
+  proxy); the "⚡ RustGuac" button shows only when `GuacEnabled()`. No DB migration. Off switch:
+  `[guac] enabled=false` + restart (noVNC untouched). Open: through the cluster VIP the redirect goes
+  to the owning node's proxy, where the VIP's cookie doesn't apply (docs/ROADMAP.md §3 step 12).
 
 - **Inventory folders** (migration 43): org-scoped nestable folder tree to organize
   instances. `vm_folders` + `vm_folder_members` tables (separate from `sessions`),
@@ -342,6 +347,10 @@ ssh HOST 'sudo install -o root -g root -m 0755 /tmp/vdxd.new /usr/local/bin/vdxd
   fleecing + `vdxckpt-*` persistent-bitmap checkpoints), `internal/nbd` (NBD client, shared with
   CBT). Instance admins only. A backup pins its VM (`BackupBusy`): start/delete/purge/resize/
   snapshot/revert/clone/move refuse while it runs. Never tested against a real Veeam server yet.
+
+### What's left
+`docs/ROADMAP.md` — the nested 3-node Proxmox lab, the ordered multi-node test plan (nothing needing a
+second host has run since 2026-10-16), and everything not built yet. Start there.
 
 ### Onboarding a NEW Claude on a migrated host
 When this project folder is moved to a new host, prior-session context from the previous

@@ -56,7 +56,7 @@ echo "  virtualization-capable CPUs: ${VIRT}"
 [ -f "$SRC_DIR/vdxd" ] || die "vdxd binary not found next to this script ($SRC_DIR/vdxd)"
 
 if [ -z "$BIND_IP" ]; then
-  BIND_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+  BIND_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '!f{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); f=1; break}}')
   [ -n "$BIND_IP" ] || die "could not auto-detect an IP; pass --ip <addr>"
   echo "  auto-detected bind IP: $BIND_IP  (override with --ip)"
 else
@@ -75,10 +75,17 @@ apt-get update -qq
 # install is a hard error: silently swallowing it (the old `|| true`) is exactly
 # how a UI feature ends up dead on a host with no trace. Every tool the UI can
 # drive must really be installed, so we fail loudly instead.
+#
+# Under `set -o pipefail` never pipe a command into something that stops reading
+# early (`grep -q`, `head`, `awk …exit`): the writer dies of SIGPIPE and the
+# pipeline fails even on a match. apt-cache flushes per line, so the old
+# `apt-cache policy | grep -q` called EVERY package "no install candidate" and
+# skipped them all.
 apt_opt(){
-  local want="$*" have=() miss=() p
+  local want="$*" have=() miss=() p c
   for p in $want; do
-    if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [^(]'; then have+=("$p"); else miss+=("$p"); fi
+    c=$(apt-cache policy "$p" 2>/dev/null | sed -n 's/^ *Candidate: *//p')
+    if [ -n "$c" ] && [ "$c" != "(none)" ]; then have+=("$p"); else miss+=("$p"); fi
   done
   [ ${#miss[@]} -gt 0 ] && echo "  (skipped — no install candidate on this release: ${miss[*]})"
   if [ ${#have[@]} -gt 0 ]; then
@@ -203,7 +210,7 @@ install_raid_tools(){
     # the host sees them. Package from the hwraid pool, libs from the official Ubuntu
     # archive. All best-effort.
     local base=https://hwraid.le-vert.net/ubuntu deb t f idx lib
-    deb="$(curl -fsSL "$base/dists/focal/main/binary-amd64/Packages" 2>/dev/null | awk '/^Package: megacli$/{p=1} p&&/^Filename:/{print $2; exit}')"
+    deb="$(curl -fsSL "$base/dists/focal/main/binary-amd64/Packages" 2>/dev/null | awk '/^Package: megacli$/{p=1} p&&/^Filename:/&&!f{print $2; f=1}')"
     [ -n "$deb" ] || return 1
     t="$(mktemp -d)"
     curl -fsSL "$base/$deb" -o "$t/megacli.deb" || { rm -rf "$t"; return 1; }
@@ -222,7 +229,7 @@ install_raid_tools(){
     megacli -v >/dev/null 2>&1
   }
   # --- Broadcom/LSI MegaRAID = Dell PERC / Lenovo / Supermicro ---
-  if echo "$pci" | grep -qiE 'megaraid|\bPERC\b|LSI.*(RAID|SAS)|Broadcom.*(RAID|SAS)|Avago'; then
+  if grep -qiE 'megaraid|\bPERC\b|LSI.*(RAID|SAS)|Broadcom.*(RAID|SAS)|Avago' <<<"$pci"; then
     if ! command -v megacli >/dev/null 2>&1 && ! command -v storcli >/dev/null 2>&1 && ! command -v perccli >/dev/null 2>&1; then
       say "MegaRAID/PERC controller detected — installing megacli"
       _install_megacli || echo "  WARN: could not install megacli (controller still detected; UI shows an install hint)"
@@ -233,7 +240,7 @@ install_raid_tools(){
     _try_deb_url storcli "${STORCLI_DEB_URL:-}"
   fi
   # --- HPE Smart Array (ssacli via HPE Management Component Pack) ---
-  if echo "$pci" | grep -qiE 'smart array|hewlett.?packard.*(array|raid)'; then
+  if grep -qiE 'smart array|hewlett.?packard.*(array|raid)' <<<"$pci"; then
     if ! command -v ssacli >/dev/null 2>&1; then
       say "HPE Smart Array detected — adding HPE MCP repo for ssacli"
       local cn; cn="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-focal}")"
@@ -249,7 +256,7 @@ install_raid_tools(){
     fi
   fi
   # --- Adaptec / Microchip (arcconf — no apt repo; operator-supplied only) ---
-  if echo "$pci" | grep -qiE 'adaptec|microsemi|pmc.?sierra'; then
+  if grep -qiE 'adaptec|microsemi|pmc.?sierra' <<<"$pci"; then
     command -v arcconf >/dev/null 2>&1 || _try_deb_url arcconf "${ARCCONF_DEB_URL:-}"
   fi
   [ "$updated" = 1 ] && apt-get update -qq || true
@@ -379,6 +386,157 @@ else
   echo "  wrote config bound to ${BIND_IP} (admin :8766)"
 fi
 
+# ---- RustGuac console (rustguac + guacd) ---------------------------------
+# The console page's "RustGuac" button (browser SSH/RDP/VNC/SPICE) is vdxd
+# fronting a local rustguac (github.com/sol1/rustguac) and its own guacd.
+# Upstream's packages target Debian 13, so both are built here from pinned
+# sources into /opt/rustguac (build tree on disk under /var/lib/vdxclone/tmp,
+# Ubuntu's own cargo). rustguac listens on 127.0.0.1:8089 and its guacd on
+# 127.0.0.1:4823 — loopback only, always: the only way in is vdxd's
+# cookie-gated proxy on <bind-ip>:8769, so a browser needs a vdxd session. vdxd
+# mints sessions with an admin API key that rustguac accepts only from
+# 127.0.0.1. A re-run rebuilds only when the pinned versions change and never
+# replaces a [guac] section vdxd already has. Not installed: rustguac's
+# web-browser sessions (Xvnc + Chromium) and its encrypted RDP drive — vdxd
+# uses neither.
+RUSTGUAC_REPO="https://github.com/sol1/rustguac.git"
+RUSTGUAC_TAG="v1.13.4"
+RUSTGUAC_COMMIT="82aca33d1aedf9e141ec04b2cb15883ff625dc1c"
+GUACD_REPO="https://github.com/apache/guacamole-server.git"
+GUACD_COMMIT="6719b20d09b767d30915c5e1c626a7a72fc75a59"   # the commit rustguac pins
+RG=/opt/rustguac
+RG_PROXY_PORT=8769   # not 8767: that's the cluster peer API
+
+install_rustguac(){
+  say "RustGuac console (rustguac + guacd from source — a first install takes several minutes)"
+  apt_opt autoconf automake libtool pkg-config make gcc g++ git \
+    libcairo2-dev libjpeg-dev libpng-dev libwebp-dev libssh2-1-dev libssl-dev \
+    libvncserver-dev libpango1.0-dev libpulse-dev libavcodec-dev libavformat-dev \
+    libavutil-dev libswscale-dev libtelnet-dev libwebsockets-dev freerdp3-dev \
+    libspice-client-glib-2.0-dev uuid-dev cargo rustc
+  id rustguac >/dev/null 2>&1 || useradd --system --no-create-home --home-dir "$RG" --shell /usr/sbin/nologin rustguac
+
+  local stamp="$RG/.vxvisor-build" want="$RUSTGUAC_COMMIT $GUACD_COMMIT"
+  if [ -x "$RG/bin/rustguac" ] && [ -x "$RG/sbin/guacd" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$want" ]; then
+    echo "  rustguac $RUSTGUAC_TAG already built"
+  else
+    local b=/var/lib/vdxclone/tmp/rustguac-build p
+    rm -rf "$b"; install -d -m 0700 "$b"
+    git -c advice.detachedHead=false clone -q --depth 1 --branch "$RUSTGUAC_TAG" "$RUSTGUAC_REPO" "$b/rustguac" 2>/dev/null || die "can't fetch rustguac $RUSTGUAC_TAG"
+    [ "$(git -C "$b/rustguac" rev-parse HEAD)" = "$RUSTGUAC_COMMIT" ] || die "rustguac $RUSTGUAC_TAG isn't the pinned commit $RUSTGUAC_COMMIT"
+    git init -q "$b/guacd"
+    git -C "$b/guacd" fetch -q --depth 1 "$GUACD_REPO" "$GUACD_COMMIT" || die "can't fetch guacamole-server $GUACD_COMMIT"
+    git -C "$b/guacd" checkout -q FETCH_HEAD
+    # rustguac's guacd patches, as its own installer applies them (one that
+    # doesn't apply to this commit is already in it).
+    for p in "$b/rustguac/patches/"*.patch; do
+      [ -f "$p" ] || continue
+      if git -C "$b/guacd" apply --check "$p" 2>/dev/null; then git -C "$b/guacd" apply --whitespace=nowarn "$p"; else echo "  guacd patch $(basename "$p"): already in this commit"; fi
+    done
+    echo "  building guacd (log: $b/guacd.log)"
+    (cd "$b/guacd" && autoreconf -fi && ./configure --prefix="$RG" --with-ssh --with-vnc --with-rdp --with-spice \
+        --without-telnet --disable-kubernetes --disable-guaclog --disable-guacclip --disable-static \
+      && make -j"$(nproc)" && make install) >"$b/guacd.log" 2>&1 \
+      || { tail -n 30 "$b/guacd.log"; die "guacd build failed (log: $b/guacd.log)"; }
+    echo "  building rustguac (log: $b/cargo.log)"
+    (cd "$b/rustguac" && CARGO_HOME="$b/cargo" cargo build --release --locked) >"$b/cargo.log" 2>&1 \
+      || { tail -n 30 "$b/cargo.log"; die "rustguac build failed (log: $b/cargo.log)"; }
+    systemctl stop rustguac rustguac-guacd 2>/dev/null || true
+    install -d "$RG/bin"
+    install -m 0755 "$b/rustguac/target/release/rustguac" "$RG/bin/rustguac"
+    rm -rf "$RG/static"; cp -r "$b/rustguac/static" "$RG/static"
+    echo "$want" >"$stamp"
+    rm -rf "$b"
+  fi
+
+  install -d -o rustguac -g rustguac "$RG/data" "$RG/recordings"
+  if [ ! -f "$RG/config.toml" ]; then
+    cat >"$RG/config.toml" <<EOF
+listen_addr = "127.0.0.1:8089"
+guacd_addr = "127.0.0.1:4823"
+recording_path = "$RG/recordings"
+static_path = "$RG/static"
+db_path = "$RG/data/rustguac.db"
+session_pending_timeout_secs = 60
+xvnc_path = "Xvnc"
+chromium_path = "chromium"
+display_range_start = 100
+display_range_end = 199
+EOF
+  fi
+  sed -i -E 's|^listen_addr *=.*|listen_addr = "127.0.0.1:8089"|; s|^guacd_addr *=.*|guacd_addr = "127.0.0.1:4823"|' "$RG/config.toml"
+  echo "$RG/lib" >/etc/ld.so.conf.d/rustguac.conf
+  ldconfig
+  cat >/etc/systemd/system/rustguac-guacd.service <<EOF
+[Unit]
+Description=Guacamole proxy daemon (guacd) for rustguac
+After=network.target
+
+[Service]
+Type=simple
+User=rustguac
+ExecStart=$RG/sbin/guacd -b 127.0.0.1 -l 4823 -L info -f
+Restart=on-failure
+RestartSec=5
+Environment=LD_LIBRARY_PATH=$RG/lib
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >/etc/systemd/system/rustguac.service <<EOF
+[Unit]
+Description=rustguac web session proxy
+After=network.target rustguac-guacd.service
+Requires=rustguac-guacd.service
+
+[Service]
+Type=simple
+User=rustguac
+WorkingDirectory=$RG
+ExecStart=$RG/bin/rustguac --config $RG/config.toml serve
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable rustguac-guacd rustguac >/dev/null 2>&1 || die "can't enable the rustguac services"
+  systemctl restart rustguac-guacd rustguac || die "rustguac didn't start (journalctl -u rustguac -u rustguac-guacd)"
+  local i
+  for i in $(seq 1 30); do [ -n "$(ss -Hltn 'sport = :8089')" ] && break; sleep 1; done
+  [ -n "$(ss -Hltn 'sport = :8089')" ] || die "rustguac isn't listening on 127.0.0.1:8089 (journalctl -u rustguac)"
+  echo "  rustguac: $(systemctl is-active rustguac), guacd: $(systemctl is-active rustguac-guacd)"
+
+  local cfg=/etc/vdxclone/config.toml
+  if grep -q '^\[guac\]' "$cfg"; then
+    echo "  vdxd's [guac] section already exists — leaving it untouched"
+    return 0
+  fi
+  local rg=(runuser -u rustguac -- "$RG/bin/rustguac" --config "$RG/config.toml") out key
+  if "${rg[@]}" list-admins 2>/dev/null | grep -w vdxd >/dev/null; then
+    out=$("${rg[@]}" rotate-key --name vdxd) || die "can't rotate rustguac's vdxd API key"
+  else
+    out=$("${rg[@]}" add-admin --name vdxd --allowed-ips 127.0.0.1/32) || die "can't create rustguac's vdxd admin"
+  fi
+  key=$(printf '%s\n' "$out" | sed -n -E 's/^(New )?API Key: *//p')
+  [ -n "$key" ] || die "rustguac printed no API key"
+  chmod 0600 "$cfg"   # it now holds a secret
+  cat >>"$cfg" <<EOF
+
+[guac]
+# RustGuac console (set up by install.sh): vdxd mints sessions on the loopback
+# rustguac with this key and proxies browsers to it on proxy_addr.
+enabled    = true
+upstream   = "127.0.0.1:8089"
+api_key    = "$key"
+proxy_addr = "$BIND_IP:$RG_PROXY_PORT"
+EOF
+  echo "  RustGuac console on: browser proxy ${BIND_IP}:${RG_PROXY_PORT}"
+}
+install_rustguac
+
 # ---- default vSwitch (bridge the management interface) -------------------
 # Converts the mgmt NIC into a bridge (vSwitch0) so VMs can ride the uplink,
 # the same way ESXi puts the mgmt interface on vSwitch0. Rock-solid rules:
@@ -394,7 +552,7 @@ setup_mgmt_vswitch(){
 
   # The mgmt NIC is whichever interface actually carries the bind IP.
   local IF MAC
-  IF=$(ip -o -4 addr show 2>/dev/null | awk -v ip="$BIND_IP" '{split($4,a,"/"); if(a[1]==ip) print $2}' | head -1)
+  IF=$(ip -o -4 addr show 2>/dev/null | awk -v ip="$BIND_IP" '{split($4,a,"/"); if(a[1]==ip) print $2}' | sed -n 1p)
   [ -n "$IF" ] || { echo "  could not find the interface carrying $BIND_IP — skipping vSwitch setup"; return 0; }
 
   if [ -d "/sys/class/net/$IF/bridge" ]; then
@@ -412,7 +570,7 @@ setup_mgmt_vswitch(){
 
   # DHCP vs static: a kernel-assigned DHCP lease is flagged "dynamic".
   local IS_DHCP=0
-  ip -o -4 addr show dev "$IF" 2>/dev/null | grep -qw dynamic && IS_DHCP=1
+  ip -o -4 addr show dev "$IF" 2>/dev/null | grep -w dynamic >/dev/null && IS_DHCP=1
 
   say "Converting $IF into default vSwitch '$VSW_NAME' (mgmt IP $BIND_IP, DHCP=$IS_DHCP)"
 
@@ -425,8 +583,8 @@ setup_mgmt_vswitch(){
     local A4 A6 GW4 GW6 DNS NSLINE="" i
     A4=$(ip -o -4 addr show dev "$IF" | awk '{print $4}')
     A6=$(ip -o -6 addr show dev "$IF" scope global | awk '{print $4}')
-    GW4=$(ip -o -4 route show default dev "$IF" 2>/dev/null | awk '{print $3; exit}')
-    GW6=$(ip -o -6 route show default dev "$IF" 2>/dev/null | awk '{print $3; exit}')
+    GW4=$(ip -o -4 route show default dev "$IF" 2>/dev/null | awk 'NR==1{print $3}')
+    GW6=$(ip -o -6 route show default dev "$IF" 2>/dev/null | awk 'NR==1{print $3}')
     DNS=$(resolvectl dns "$IF" 2>/dev/null | awk '{for(i=2;i<=NF;i++)print $i}')
     [ -z "$DNS" ] && DNS=$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null)
     [ -z "$DNS" ] && DNS=$'1.1.1.1\n8.8.8.8'
@@ -486,7 +644,7 @@ YAML
   # Confirm the mgmt IP landed on the bridge (the only success that matters).
   local ok=0 i
   for i in $(seq 1 30); do
-    if ip -o addr show dev "$VSW_NAME" 2>/dev/null | grep -qw "$BIND_IP"; then ok=1; break; fi
+    if ip -o addr show dev "$VSW_NAME" 2>/dev/null | grep -w "$BIND_IP" >/dev/null; then ok=1; break; fi
     sleep 2
   done
 
@@ -548,7 +706,7 @@ SYSCTL
   # 3) vhost-net kernel module (in-kernel virtio-net dataplane), loaded + persisted.
   modprobe vhost_net 2>/dev/null || true
   echo "vhost_net" > /etc/modules-load.d/vdxclone.conf
-  if lsmod | grep -q '^vhost_net'; then echo "  vhost_net: loaded"; else echo "  vhost_net: not available on this kernel"; fi
+  if lsmod | grep '^vhost_net' >/dev/null; then echo "  vhost_net: loaded"; else echo "  vhost_net: not available on this kernel"; fi
 
   # 4) THP = always (belt-and-suspenders; tuned usually sets this too).
   if [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
@@ -624,6 +782,7 @@ cat <<EOF
 VXVisor installed.
 
   Admin UI :  http://${BIND_IP}:8766     (sign in as 'admin')
+  RustGuac :  the console page's RustGuac button (proxy ${BIND_IP}:${RG_PROXY_PORT})
 
 Next steps:
   1. Pull a base image:

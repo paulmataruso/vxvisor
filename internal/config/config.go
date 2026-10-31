@@ -84,11 +84,11 @@ func specificIP(host string) bool {
 	return ip != nil && !ip.IsUnspecified()
 }
 
-// GuacConfig is the OPTIONAL rustguac "advanced console" integration — a test
-// add-on that fronts a local rustguac+guacd (browser SSH/RDP/VNC/SPICE) through
-// vdxd's own authentication. It is OFF unless Enabled is true and Upstream +
-// APIKey are set, so leaving the [guac] section out (or Enabled=false) is a
-// complete rollback: vdxd behaves exactly as before and noVNC is untouched.
+// GuacConfig is the RustGuac console: vdxd fronting a local rustguac+guacd
+// (browser SSH/RDP/VNC/SPICE) through its own authentication. deploy/install.sh
+// builds rustguac and writes this section. It is OFF unless Enabled is true and
+// Upstream + APIKey are set, so Enabled=false is a complete off switch: noVNC
+// is untouched.
 type GuacConfig struct {
 	// Enabled turns the whole feature on. Default false.
 	Enabled bool `toml:"enabled"`
@@ -99,8 +99,9 @@ type GuacConfig struct {
 	// sessions and single-use WebSocket tickets. Never sent to the browser.
 	APIKey string `toml:"api_key"`
 	// ProxyAddr is the address vdxd's cookie-gated reverse proxy for rustguac
-	// listens on (a browser-reachable mgmt address + port, e.g.
-	// "172.16.0.163:8767"). rustguac itself stays on loopback; this is the only
+	// listens on (a browser-reachable mgmt address + port; install.sh uses
+	// "<bind-ip>:8769" — 8767 is the cluster peer API). rustguac itself stays
+	// on loopback; this is the only
 	// path a browser can reach it, and it requires a valid vdxd session.
 	ProxyAddr string `toml:"proxy_addr"`
 }
